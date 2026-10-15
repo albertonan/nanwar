@@ -1,0 +1,2693 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>NanWar</title>
+    <meta name="description" content="Estrategia por turnos sobre un mapa hexagonal de Europa.">
+    <meta name="theme-color" content="#2b3125">
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="NanWar">
+    <style>
+        /* Barlow Semi Condensed (SIL Open Font License), incluida para que el juego se vea igual sin conexión y en el móvil */
+        @font-face { font-family: 'Barlow Semi Condensed'; font-weight: 400; font-display: swap; src: url(fonts/barlow-400-latin-ext.woff2) format('woff2'); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+        @font-face { font-family: 'Barlow Semi Condensed'; font-weight: 400; font-display: swap; src: url(fonts/barlow-400-latin.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+        @font-face { font-family: 'Barlow Semi Condensed'; font-weight: 600; font-display: swap; src: url(fonts/barlow-600-latin-ext.woff2) format('woff2'); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+        @font-face { font-family: 'Barlow Semi Condensed'; font-weight: 600; font-display: swap; src: url(fonts/barlow-600-latin.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+        @font-face { font-family: 'Barlow Semi Condensed'; font-weight: 700; font-display: swap; src: url(fonts/barlow-700-latin-ext.woff2) format('woff2'); unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+        @font-face { font-family: 'Barlow Semi Condensed'; font-weight: 700; font-display: swap; src: url(fonts/barlow-700-latin.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+        :root {
+            --sea: #16232b;
+            --panel: #2b3125;
+            --raised: #363e2e;
+            --line: #4b5541;
+            --text: #ebe7d8;
+            --muted: #a6a892;
+            --signal: #f0c419;
+            --war: #e05a47;
+            --ally: #62aede;
+            --go: #8fd16b;
+            --ink: #151a12;
+            --font: 'Barlow Semi Condensed', Bahnschrift, 'DIN Alternate', 'Arial Narrow', system-ui, sans-serif;
+        }
+        * { box-sizing: border-box; }
+        [hidden] { display: none !important; }
+        html, body { height: 100%; margin: 0; }
+        body {
+            background: var(--sea); color: var(--text);
+            font: 14px/1.4 var(--font); font-variant-numeric: tabular-nums;
+            overflow: hidden; overscroll-behavior: none; -webkit-tap-highlight-color: transparent;
+        }
+        h1, h2, h3 { font-stretch: 85%; margin: 0; line-height: 1.15; }
+        h2 { font-size: 21px; font-weight: 700; }
+        h3 { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+        p { margin: 0; }
+        .muted { color: var(--muted); }
+        .small { font-size: 12.5px; }
+        :focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+
+        /* Botones */
+        .btn {
+            display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+            padding: 7px 12px; border-radius: 6px; cursor: pointer;
+            background: var(--raised); color: var(--text); border: 1px solid var(--line);
+            font: 600 13.5px var(--font);
+        }
+        .btn:hover:not(:disabled) { border-color: var(--muted); }
+        .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+        .btn.primary { background: var(--signal); color: var(--ink); border-color: #b8930c; }
+        .btn.primary:hover:not(:disabled) { background: #ffd43b; }
+        .btn.war { background: var(--war); color: #fff; border-color: #a83a2b; }
+        .btn.wide { width: 100%; }
+        .btn.ghost { background: none; border-color: transparent; color: var(--muted); }
+        .btn.ghost:hover:not(:disabled) { color: var(--text); border-color: var(--line); }
+        .btn svg { width: 18px; height: 18px; }
+        .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+        .stack { display: grid; gap: 6px; }
+
+        /* Estructura */
+        #app { display: grid; grid-template-rows: 54px 1fr; height: 100vh; }
+        main { display: grid; grid-template-columns: 74px minmax(0, 1fr) auto; min-height: 0; }
+
+        #topbar {
+            display: flex; align-items: center; gap: 22px; padding: 0 12px 0 16px;
+            background: var(--panel); border-bottom: 2px solid var(--ink);
+        }
+        #topbar .brand { display: flex; align-items: center; gap: 10px; min-width: 190px; }
+        #topbar .flag { width: 14px; height: 26px; border-radius: 2px; background: var(--signal); box-shadow: 0 0 0 2px var(--ink); }
+        #topbar .brand h1 { font-size: 22px; font-weight: 700; }
+        .figure { display: flex; flex-direction: column; line-height: 1.1; }
+        .figure span { font-size: 12px; color: var(--muted); }
+        .figure b { font-size: 19px; }
+        .figure small { color: var(--go); font-size: 13px; margin-left: 4px; }
+        #topbar .spacer { flex: 1; }
+        #end-turn { padding: 9px 18px; font-size: 15px; }
+        kbd {
+            font: 600 11px var(--font); padding: 1px 5px; border-radius: 4px;
+            border: 1px solid currentColor; opacity: 0.65;
+        }
+
+        #tools {
+            background: var(--panel); border-right: 2px solid var(--ink);
+            display: flex; flex-direction: column; gap: 4px; padding: 10px 6px;
+        }
+        .tool {
+            display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 9px 2px 7px;
+            border-radius: 8px; border: 1px solid transparent; background: none; color: var(--muted);
+            cursor: pointer; font: 600 12.5px var(--font);
+        }
+        .tool svg { width: 26px; height: 26px; }
+        .tool:hover:not(:disabled) { color: var(--text); background: var(--raised); }
+        .tool.on { color: var(--ink); background: var(--signal); }
+        .tool:disabled { opacity: 0.35; cursor: not-allowed; }
+        .tool kbd { font-size: 10px; }
+        #tools hr { width: 70%; border: 0; border-top: 1px solid var(--line); margin: 6px auto; }
+
+        #stage { position: relative; min-width: 0; overflow: hidden; }
+        #map { display: block; width: 100%; height: 100%; cursor: pointer; touch-action: none; }
+        #map.dragging { cursor: grabbing; }
+        #map.building { cursor: crosshair; }
+
+        .float {
+            background: var(--panel); border: 2px solid var(--ink); border-radius: 10px;
+            box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+        }
+
+        /* Ficha contextual */
+        #card {
+            position: absolute; left: 14px; bottom: 14px; width: 352px; max-height: calc(100% - 28px);
+            overflow-y: auto; border-left: 7px solid var(--owner, var(--signal));
+        }
+        .card-head { display: flex; gap: 10px; align-items: flex-start; padding: 13px 12px 10px 14px; }
+        .card-head > div { flex: 1; min-width: 0; }
+        .card-head p { margin-top: 3px; }
+        .sec { padding: 11px 14px 13px; border-top: 1px solid var(--line); }
+        .chip {
+            display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px 1px 6px; border-radius: 99px;
+            background: var(--raised); font-size: 12.5px; font-weight: 600; white-space: nowrap;
+        }
+        .chip i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+        .chip.guerra { background: var(--war); color: #fff; }
+        .chip.alianza { background: var(--ally); color: var(--ink); }
+        .chip.tu { background: var(--signal); color: var(--ink); }
+        .control-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin: 6px 0 4px; box-shadow: 0 0 0 1px var(--ink); }
+        .facts { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 13px; }
+        .facts dt { color: var(--muted); }
+        .facts dd { margin: 0; }
+
+        .units { display: grid; gap: 6px; margin: 8px 0; }
+        .unit-row { display: grid; grid-template-columns: 30px 1fr auto; gap: 8px; align-items: center; }
+        .nato { width: 28px; height: 18px; display: block; }
+        .stepper { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+        .stepper button { width: 28px; height: 28px; border: 0; background: var(--raised); color: var(--text); font: 700 16px var(--font); cursor: pointer; }
+        .stepper button:disabled { opacity: 0.35; cursor: default; }
+        .stepper output { min-width: 56px; text-align: center; font-weight: 600; }
+        .meter { height: 7px; background: var(--ink); border-radius: 4px; overflow: hidden; margin: 6px 0 3px; }
+        .meter i { display: block; height: 100%; background: var(--go); }
+        .note { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+        .note.warn { color: #ffb347; }
+        .recruit { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+        .recruit .btn { flex-direction: column; gap: 3px; padding: 8px 4px; font-size: 13px; }
+        .recruit .btn small { font-weight: 400; color: var(--muted); font-size: 11.5px; }
+        .recruit .btn b { color: var(--signal); }
+
+        /* Avisos */
+        #toasts { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); display: grid; gap: 8px; width: min(460px, calc(100% - 24px)); z-index: 3; }
+        .toast { padding: 11px 14px; border-left: 6px solid var(--signal); }
+        .toast p { margin-bottom: 8px; }
+        #hint {
+            position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); max-width: calc(100% - 760px);
+            min-width: 320px; padding: 8px 14px; text-align: center; font-size: 13.5px; border-radius: 99px;
+            background: rgba(21, 26, 18, 0.88); color: var(--text); pointer-events: none;
+        }
+        #confirm { position: absolute; left: 50%; bottom: 62px; transform: translateX(-50%); padding: 10px 12px; display: flex; gap: 10px; align-items: center; z-index: 3; max-width: calc(100% - 24px); }
+        .mobile-only { display: none !important; }
+        #hint.beside-card { left: calc(50% + 185px); max-width: calc(100% - 560px); }
+        #tooltip {
+            position: absolute; pointer-events: none; background: rgba(21, 26, 18, 0.94); border: 1px solid var(--line);
+            padding: 7px 10px; border-radius: 6px; font-size: 13px; line-height: 1.45; max-width: 290px; z-index: 4;
+        }
+        #legend { position: absolute; right: 14px; bottom: 14px; font-size: 12.5px; padding: 6px 10px; }
+        #legend summary { cursor: pointer; color: var(--muted); }
+        #legend ul { list-style: none; margin: 8px 0 2px; padding: 0; display: grid; gap: 4px; }
+        #legend i.line { display: inline-block; width: 22px; vertical-align: middle; margin-right: 6px; }
+
+        /* Nueva partida */
+        #setup { position: absolute; left: 14px; top: 14px; bottom: 14px; width: 390px; overflow-y: auto; padding: 18px 18px 20px; }
+        #setup h2 { font-size: 30px; margin-bottom: 4px; }
+        #setup .lead { color: var(--muted); margin-bottom: 14px; }
+        .field { margin-top: 14px; }
+        .field > span { display: block; font-weight: 600; margin-bottom: 6px; }
+        .seg { display: flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+        .seg button { flex: 1; padding: 7px 4px; border: 0; border-right: 1px solid var(--line); background: var(--raised); color: var(--text); font: 600 13px var(--font); cursor: pointer; }
+        .seg button:last-child { border-right: 0; }
+        .seg button.on { background: var(--signal); color: var(--ink); }
+        select, input[type="text"], input[type="search"] {
+            width: 100%; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--line);
+            background: var(--ink); color: var(--text); font: 14px var(--font);
+        }
+        .pick { margin-top: 10px; padding: 12px; border-radius: 8px; background: var(--raised); border-left: 6px solid var(--signal); }
+        .pick h3 { font-size: 20px; }
+
+        /* Panel derecho */
+        #drawer { width: 330px; background: var(--panel); border-left: 2px solid var(--ink); display: flex; flex-direction: column; min-height: 0; }
+        #drawer.closed { width: 38px; }
+        #drawer.closed .tabs button:not(.toggle), #drawer.closed .drawer-body { display: none; }
+        .tabs { display: flex; border-bottom: 2px solid var(--ink); }
+        .tabs button { flex: 1; padding: 11px 6px 9px; border: 0; background: none; color: var(--muted); font: 600 14px var(--font); cursor: pointer; border-bottom: 3px solid transparent; }
+        .tabs button.on { color: var(--text); border-bottom-color: var(--signal); }
+        .tabs button.toggle { flex: 0 0 36px; font-size: 18px; }
+        .tabs button .count { background: var(--war); color: #fff; border-radius: 99px; padding: 0 6px; font-size: 11px; margin-left: 3px; }
+        .drawer-body { flex: 1; overflow-y: auto; padding: 12px; min-height: 0; }
+        .nation-row {
+            display: grid; grid-template-columns: 10px 1fr auto auto; gap: 8px; align-items: center; width: 100%;
+            padding: 7px 8px; border: 0; border-radius: 6px; background: none; color: var(--text); font: 14px var(--font);
+            text-align: left; cursor: pointer;
+        }
+        .nation-row:hover { background: var(--raised); }
+        .nation-row .sw { width: 10px; height: 10px; border-radius: 2px; }
+        .nation-row .num { color: var(--muted); font-size: 12.5px; }
+        .group-title { color: var(--muted); font-size: 12.5px; margin: 12px 0 2px 8px; }
+        .bloc { padding: 11px 12px; border-radius: 8px; background: var(--raised); margin-bottom: 8px; }
+        .bloc.mine { box-shadow: inset 4px 0 0 var(--ally); }
+        .members { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
+        .check { display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: start; }
+        .check input { margin: 2px 0 0; }
+        .log-turn { color: var(--signal); font-weight: 700; margin: 12px 0 4px; font-size: 13px; }
+        .log-turn:first-child { margin-top: 0; }
+        .log-line { font-size: 13px; padding: 3px 0 3px 10px; border-left: 2px solid var(--line); }
+
+        dialog { border: 0; padding: 0; background: none; color: var(--text); }
+        dialog::backdrop { background: rgba(10, 14, 10, 0.6); }
+        dialog .float { padding: 18px; width: min(480px, calc(100vw - 32px)); }
+        .slot { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line); }
+        #overlay { position: fixed; inset: 0; background: rgba(10, 14, 10, 0.7); display: flex; align-items: center; justify-content: center; z-index: 10; }
+        #overlay .float { padding: 26px; width: min(420px, calc(100vw - 32px)); text-align: center; }
+        #overlay h2 { font-size: 34px; margin-bottom: 8px; }
+
+        /* Móvil: herramientas abajo, ficha como panel inferior, países a pantalla completa */
+        @media (max-width: 760px) {
+            #app { grid-template-rows: auto 1fr; height: 100dvh; }
+            #topbar { gap: 12px; padding: max(6px, env(safe-area-inset-top)) 10px 6px; min-height: 52px; }
+            #topbar .brand { min-width: 0; flex: 1; overflow: hidden; }
+            #topbar .brand h1 { font-size: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            #topbar .spacer, #btn-next, kbd { display: none; }
+            .figure b { font-size: 16px; }
+            #end-turn { padding: 8px 12px; font-size: 14px; }
+            main { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+            #stage { grid-row: 1; }
+            #tools {
+                grid-row: 2; flex-direction: row; justify-content: space-around; gap: 0; padding: 4px 4px max(4px, env(safe-area-inset-bottom));
+                border-right: 0; border-top: 2px solid var(--ink);
+            }
+            .tool { flex: 1; padding: 6px 0 4px; font-size: 11.5px; }
+            .tool svg { width: 23px; height: 23px; }
+            #tools hr { display: none; }
+            .mobile-only { display: flex !important; }
+            #drawer { position: fixed; inset: 0; width: auto !important; z-index: 20; padding-top: env(safe-area-inset-top); }
+            #drawer.closed { display: none; }
+            #card {
+                left: 0; right: 0; bottom: 0; width: auto; max-height: 52%;
+                border-left: 0; border-top: 6px solid var(--owner, var(--signal)); border-radius: 14px 14px 0 0;
+            }
+            #setup { left: 0; right: 0; top: auto; bottom: 0; width: auto; max-height: 64%; border-radius: 14px 14px 0 0; padding: 14px 14px 18px; }
+            #setup h2 { font-size: 24px; }
+            #hint, #hint.beside-card {
+                left: 8px; right: 8px; bottom: 8px; transform: none; max-width: none; min-width: 0;
+                border-radius: 8px; font-size: 12.5px; padding: 6px 10px;
+            }
+            #stage:has(#card:not([hidden])) #hint, #stage:has(#setup:not([hidden])) #hint { display: none; }
+            #confirm { left: 8px; right: 8px; bottom: 8px; transform: none; max-width: none; flex-wrap: wrap; }
+            #confirm > span { flex: 1 1 100%; }
+            #confirm .btn { flex: 1; padding: 10px; }
+            #legend, #tooltip { display: none !important; }
+            .recruit .btn { font-size: 12.5px; }
+            dialog .float { padding: 14px; }
+            .slot { grid-template-columns: 1fr auto; }
+            .slot > div { grid-column: 1 / -1; }
+        }
+    </style>
+</head>
+<body>
+<div id="app">
+    <header id="topbar">
+        <div class="brand"><span class="flag" id="flag"></span><h1 id="nation-name">NanWar</h1></div>
+        <div class="figure" id="fig-gold" title="Oro en el tesoro e ingresos por turno"><span>Oro</span><b id="gold">—</b></div>
+        <div class="figure" title="Turno actual"><span>Turno</span><b id="turn">1</b></div>
+        <div class="spacer"></div>
+        <button class="btn ghost" data-action="next-army" id="btn-next" title="Seleccionar el siguiente ejército que aún puede moverse">Siguiente ejército <kbd>N</kbd></button>
+        <button class="btn" id="btn-install" data-action="install" hidden title="Instalar NanWar como aplicación">Instalar</button>
+        <button class="btn" data-action="open-game">Partida</button>
+        <button class="btn primary" id="end-turn" data-action="end-turn" disabled>Terminar turno <kbd>Intro</kbd></button>
+    </header>
+    <main>
+        <nav id="tools" aria-label="Herramientas"></nav>
+        <section id="stage">
+            <canvas id="map"></canvas>
+            <div id="toasts"></div>
+            <aside id="setup" class="float" hidden></aside>
+            <aside id="card" class="float" hidden></aside>
+            <div id="confirm" class="float" hidden></div>
+            <div id="hint"></div>
+            <details id="legend" class="float"></details>
+            <div id="tooltip" hidden></div>
+        </section>
+        <aside id="drawer"></aside>
+    </main>
+</div>
+<dialog id="game-dialog"><div class="float" id="game-dialog-body"></div></dialog>
+<div id="overlay" hidden><div class="float" id="overlay-card"></div></div>
+<input type="file" id="import-file" accept=".json,application/json" hidden>
+<script src="europa-data.js"></script>
+<script>
+'use strict';
+
+const E = window.EUROPA;
+
+const MOVE = 6;   // subpuntos por punto de movimiento (las carreteras cuestan fracciones)
+const CONFIG = {
+    INCOME_PER_MILLION: 3,     // oro por turno por millón de habitantes × productividad
+    START_GOLD_TURNS: 2,
+    CITY_DEFENSE: 1.25,
+    CAPITAL_DEFENSE: 1.5,
+    TRUCE_TURNS: 6,
+    RECRUIT_PER_MILLION: 1 / 1.5,   // reclutas por turno y provincia: 1 + población/1,5 M
+    ROAD_BONUS: 0.25,               // +25 % de renta en provincias unidas por carretera a la capital
+    ROAD_MOVE: { 1: 3, 2: 2 },      // coste en subpuntos por tramo: carretera ½, autopista ⅓
+    ROAD_COST: 15,                  // oro por tramo de carretera (× coste del terreno)
+    HIGHWAY_COST: 30,               // oro extra por convertir un tramo en autopista
+    FORT_COST: 40,                  // oro por casilla fortificada
+    FORT_TURNS: 3,                  // turnos de obra hasta que la fortificación funciona
+    FORT_DEFENSE: 1.75,             // defensa en casilla fortificada
+    SUPPLY_ROAD_RANGE: 4,           // casillas abastecidas alrededor de la red de carreteras unida a la capital
+    SUPPLY_CITY_RANGE: 2,           // casillas abastecidas alrededor de cada ciudad propia
+    NO_SUPPLY_MOVE: 0.5,            // movimiento sin suministro
+    TERRAIN: {
+        plain:    { name: "Llanura", cost: 1, def: 1 },
+        urban:    { name: "Urbano",  cost: 1, def: 1.4 },
+        hills:    { name: "Colinas", cost: 2, def: 1.3 },
+        mountain: { name: "Montaña", cost: 3, def: 1.6 }
+    },
+    TYPES: {
+        infantry:  { name: "Infantería", short: "I", cost: 50,  atk: 5,  def: 6,  speed: 4 },
+        tank:      { name: "Tanque",     short: "T", cost: 150, atk: 20, def: 15, speed: 7 },
+        artillery: { name: "Artillería", short: "A", cost: 200, atk: 40, def: 3,  speed: 3 }
+    },
+    RESOURCE_ICON: { petroleo: '⛽', gas: '🔥', carbon: '⛏', hierro: '⚙', minerales: '💎' },
+    RESOURCE_COLOR: { petroleo: '#1b1b1b', gas: '#1f4e79', carbon: '#3d3d3d', hierro: '#7b3f1d', minerales: '#145a5a' }
+};
+
+// Ajustes de partida
+const AGGRESSION = {
+    pacifica: { name: "Pacífica", desc: "Las naciones casi nunca inician guerras y firman la paz enseguida.",
+        warChance: 0.02, warRatio: 2.5, warFrom: 10, maxWars: 0, peaceRatio: 0.85, peaceAfter: 6, blocChance: 0.05, betrayChance: 0 },
+    normal: { name: "Normal", desc: "Guerras ocasionales cuando un país es claramente más fuerte que su vecino.",
+        warChance: 0.08, warRatio: 1.6, warFrom: 4, maxWars: 0, peaceRatio: 0.6, peaceAfter: 12, blocChance: 0.15, betrayChance: 0 },
+    agresiva: { name: "Agresiva", desc: "Las potencias atacan a vecinos más débiles, sostienen dos frentes y forman pactos.",
+        warChance: 0.2, warRatio: 1.15, warFrom: 2, maxWars: 1, peaceRatio: 0.4, peaceAfter: 20, blocChance: 0.3, betrayChance: 0.02 },
+    caos: { name: "Caos total", desc: "Todos contra todos: guerras constantes, traiciones entre aliados y paces escasas.",
+        warChance: 0.4, warRatio: 0.85, warFrom: 1, maxWars: 3, peaceRatio: 0.25, peaceAfter: 30, blocChance: 0.4, betrayChance: 0.08 }
+};
+const ALLIANCE_SETUPS = { reales: "Reales: OTAN y OTSC", ninguna: "Ninguna: cada país por su cuenta" };
+const VICTORY_SETUPS = { 0.5: "Dominar el 50 % de Europa", 0.75: "Dominar el 75 % de Europa", 1: "Eliminar a todas las naciones" };
+
+const UNIT_KEYS = Object.keys(CONFIG.TYPES);
+
+// Generador aleatorio con estado en rng.state, para poder guardar y reanudar la partida exactamente.
+function mulberry32(seed) {
+    const rng = () => {
+        rng.state = (rng.state + 0x6D2B79F5) | 0;
+        let t = Math.imul(rng.state ^ (rng.state >>> 15), 1 | rng.state);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    rng.state = seed | 0;
+    return rng;
+}
+
+class MinHeap {
+    constructor() { this.k = []; this.v = []; }
+    get size() { return this.k.length; }
+    push(key, val) {
+        const k = this.k, v = this.v;
+        let i = k.length; k.push(key); v.push(val);
+        while (i > 0) {
+            const p = (i - 1) >> 1;
+            if (k[p] <= key) break;
+            k[i] = k[p]; v[i] = v[p]; i = p;
+        }
+        k[i] = key; v[i] = val;
+    }
+    pop() {
+        const k = this.k, v = this.v, top = [k[0], v[0]];
+        const lk = k.pop(), lv = v.pop();
+        if (k.length) {
+            let i = 0;
+            for (;;) {
+                let c = 2 * i + 1;
+                if (c >= k.length) break;
+                if (c + 1 < k.length && k[c + 1] < k[c]) c++;
+                if (k[c] >= lk) break;
+                k[i] = k[c]; v[i] = v[c]; i = c;
+            }
+            k[i] = lk; v[i] = lv;
+        }
+        return top;
+    }
+}
+
+const emptyUnits = () => ({ infantry: 0, tank: 0, artillery: 0 });
+const copyUnits = u => ({ ...u });
+const countUnits = u => UNIT_KEYS.reduce((s, k) => s + u[k], 0);
+const unitPower = (u, stat) => UNIT_KEYS.reduce((s, k) => s + u[k] * CONFIG.TYPES[k][stat], 0);
+const unitText = u => UNIT_KEYS.filter(k => u[k] > 0).map(k => `${u[k]}${CONFIG.TYPES[k].short}`).join(' ');
+const speedOf = u => Math.min(...UNIT_KEYS.filter(k => u[k] > 0).map(k => CONFIG.TYPES[k].speed), 99);
+const sameUnits = (a, b) => UNIT_KEYS.every(k => a[k] === b[k]);
+const fmtMp = sub => String(Math.round(sub / MOVE * 10) / 10).replace('.', ',');
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+// --- Rejilla hexagonal (vértice arriba, filas impares desplazadas medio hexágono a la derecha) ---
+const G = (() => {
+    const { cols, rows, hex: S, x0, y0 } = E;
+    const W = Math.sqrt(3) * S, STEP = 1.5 * S, N = cols * rows;
+    const cx = new Float32Array(N), cy = new Float32Array(N), nb = new Int32Array(N * 6).fill(-1);
+    // Direcciones E, SE, SO, O, NO, NE: la dirección d comparte la arista entre los vértices d y d+1.
+    const EVEN = [[1, 0], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1]];
+    const ODD = [[1, 0], [1, 1], [0, 1], [-1, 0], [0, -1], [1, -1]];
+    for (let i = 0; i < N; i++) {
+        const r = Math.floor(i / cols), c = i % cols;
+        cx[i] = x0 + W * (c + 0.5 * (r & 1));
+        cy[i] = y0 + STEP * r;
+        (r & 1 ? ODD : EVEN).forEach(([dc, dr], d) => {
+            const nc = c + dc, nr = r + dr;
+            if (nc >= 0 && nc < cols && nr >= 0 && nr < rows) nb[i * 6 + d] = nr * cols + nc;
+        });
+    }
+    const corners = [];
+    for (let i = 0; i < 6; i++) {
+        const a = Math.PI / 180 * (60 * i - 30);
+        corners.push([S * Math.cos(a), S * Math.sin(a)]);
+    }
+    const prov = Int16Array.from(E.cells);
+    const land = [];
+    for (let i = 0; i < N; i++) if (prov[i] >= 0) land.push(i);
+    function cellAt(x, y) {
+        const r0 = Math.round((y - y0) / STEP);
+        let best = -1, bestD = Infinity;
+        for (let r = r0 - 1; r <= r0 + 1; r++) {
+            if (r < 0 || r >= rows) continue;
+            const c0 = Math.round((x - x0) / W - 0.5 * (r & 1));
+            for (let c = c0 - 1; c <= c0 + 1; c++) {
+                if (c < 0 || c >= cols) continue;
+                const i = r * cols + c, d = (cx[i] - x) ** 2 + (cy[i] - y) ** 2;
+                if (d < bestD) { bestD = d; best = i; }
+            }
+        }
+        return bestD <= S * S ? best : -1;
+    }
+    const dirTo = (a, b) => { for (let d = 0; d < 6; d++) if (nb[a * 6 + d] === b) return d; return -1; };
+    return { cols, rows, S, W, N, cx, cy, nb, corners, prov, land, cellAt, dirTo,
+        width: W * (cols + 0.5), height: STEP * (rows - 1) + 2 * S, x0, y0 };
+})();
+const isLand = i => G.prov[i] >= 0;
+
+const PROVINCES = E.provinces.map((p, id) => ({ ...p, id, cells: [] }));
+for (const i of G.land) PROVINCES[G.prov[i]].cells.push(i);
+for (const p of PROVINCES) {
+    p.value = Math.max(1, Math.round(p.population / 1e6 * p.productivity * CONFIG.INCOME_PER_MILLION));
+    p.recruitCap = 1 + Math.floor(p.population / 1e6 * CONFIG.RECRUIT_PER_MILLION);
+}
+const CITY_OF = new Int16Array(G.N).fill(-1);     // celda → provincia de la que es ciudad
+for (const p of PROVINCES) CITY_OF[p.city] = p.id;
+const CAPITAL_OF = new Int16Array(G.N).fill(-1);  // celda → país del que es capital
+E.countries.forEach((c, i) => { CAPITAL_OF[PROVINCES[c.capital].city] = i; });
+const CELL_VALUE = new Float32Array(G.N);
+for (const p of PROVINCES) for (const c of p.cells) CELL_VALUE[c] = p.value / p.cells.length;
+const RESOURCES = E.resources.map(r => ({ ...r, typeName: E.resourceTypes[r.type], province: G.prov[r.cell] }));
+const RESOURCE_AT = new Map(RESOURCES.map(r => [r.cell, r]));
+
+class GameEngine {
+    constructor(seed) {
+        this.seed = seed;
+        this.rng = mulberry32(seed);
+        this.turn = 1;
+        this.player = null;
+        this.over = false;
+        this.won = false;
+        this.logs = [];
+        this.proposals = [];
+        this.proposedThisTurn = new Set();
+        this.version = 0;       // cambia con la propiedad de las casillas
+        this.roadVersion = 0;   // cambia al construir
+        this.blocVersion = 0;   // cambia con las alianzas
+        this.econCache = [];
+        this.supplyCache = [];
+        this.cutLogged = new Set();
+
+        // Carreteras: clase por arista dirigida (0 nada, 1 carretera, 2 autopista). Se empieza sin ninguna: las construyen los jugadores.
+        this.road = new Int8Array(G.N * 6);
+        this.fort = new Uint8Array(G.N);   // 1 = fortificación terminada
+        this.fortWork = new Map();          // celda → { owner, left }: obras en curso
+        this.fortVersion = 0;
+
+        this.owner = new Int16Array(G.N).fill(-1);
+        for (const i of G.land) this.owner[i] = PROVINCES[G.prov[i]].country;
+        this.nations = E.countries.map((c, id) => ({
+            id, key: c.key, name: c.name, color: c.color,
+            capitalCell: PROVINCES[c.capital].city, capitalName: PROVINCES[c.capital].cityName,
+            gold: 0, alive: true, recruited: new Map()
+        }));
+        const n = this.nations.length;
+        this.relations = Array.from({ length: n }, () => []);
+        for (let a = 0; a < n; a++) for (let b = a + 1; b < n; b++) {
+            const r = { state: 'paz', since: 0, truceUntil: 0 };
+            this.relations[a][b] = r; this.relations[b][a] = r;
+        }
+
+        this.armies = new Map();
+        this.armyAt = new Int32Array(G.N);
+        this.nextArmyId = 1;
+        for (const p of PROVINCES) {
+            const units = { infantry: 1, tank: 0, artillery: 0 };   // guarnición en cada ciudad
+            if (p.forces) for (const k of UNIT_KEYS) units[k] += p.forces[k] ?? 0;
+            this.settle(this.newArmy(p.country, p.city, units, 0));
+        }
+        this.configure({ aggression: 'normal', alliances: 'reales', victory: 0.5 });
+        for (const nat of this.nations) nat.gold = this.income(nat.id) * CONFIG.START_GOLD_TURNS;
+        this.log("SISTEMA DE COMANDO ONLINE. Configura la partida y elige tu nación.");
+    }
+
+    // Ajustes elegidos antes de empezar: agresividad de la IA, alianzas iniciales, victoria.
+    configure(settings) {
+        this.settings = settings;
+        this.ai = AGGRESSION[settings.aggression];
+        this.blocs = [];
+        this.nextBlocId = 1;
+        if (settings.alliances === 'reales') {
+            for (const [name, keys] of Object.entries(E.alliances)) {
+                const ids = keys.map(k => this.nations.findIndex(x => x.key === k)).filter(i => i >= 0);
+                const bloc = this.createBloc(ids[0], name, false);
+                for (const id of ids) bloc.members.add(id);
+            }
+        }
+        this.blocsChanged();
+    }
+
+    // --- Guardar / cargar ---
+    serialize() {
+        const runs = [];   // propietarios de las casillas de tierra, comprimidos por tramos [dueño, cuántas]
+        for (const i of G.land) {
+            const o = this.owner[i], last = runs[runs.length - 1];
+            if (last && last[0] === o) last[1]++; else runs.push([o, 1]);
+        }
+        const relations = [];
+        for (let a = 0; a < this.nations.length; a++) for (let b = a + 1; b < this.nations.length; b++) {
+            const r = this.relations[a][b];
+            if (r.state !== 'paz' || r.since || r.truceUntil) relations.push([a, b, r.state, r.since, r.truceUntil]);
+        }
+        return {
+            format: 'eurowar-1', map: `${G.land.length}:${PROVINCES.length}`,
+            seed: this.seed, rng: this.rng.state, turn: this.turn, player: this.player, over: this.over, won: this.won,
+            settings: this.settings, logs: this.logs.slice(-150), proposals: this.proposals, proposed: [...this.proposedThisTurn],
+            owner: runs, roads: this.roadEdges(),
+            forts: G.land.filter(i => this.fort[i]), fortWork: [...this.fortWork].map(([c, w]) => [c, w.owner, w.left]),
+            nations: this.nations.map(n => ({ gold: n.gold, alive: n.alive, recruited: [...n.recruited] })),
+            relations,
+            armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used]),
+            nextArmyId: this.nextArmyId,
+            blocs: this.blocs.map(b => ({ id: b.id, name: b.name, founder: b.founder, secret: b.secret, since: b.since, members: [...b.members] })),
+            nextBlocId: this.nextBlocId
+        };
+    }
+
+    static load(data) {
+        if (data?.format !== 'eurowar-1') throw new Error('El archivo no es una partida de NanWar.');
+        if (data.map !== `${G.land.length}:${PROVINCES.length}`) throw new Error('La partida se guardó con otro mapa (europa-data.js distinto).');
+        const g = new GameEngine(data.seed);
+        g.rng.state = data.rng;
+        Object.assign(g, { turn: data.turn, player: data.player, over: data.over, won: data.won, logs: data.logs, proposals: data.proposals });
+        g.proposedThisTurn = new Set(data.proposed);
+        g.settings = data.settings;
+        g.ai = AGGRESSION[data.settings.aggression];
+        let k = 0;
+        for (const [o, count] of data.owner) for (let j = 0; j < count; j++) g.owner[G.land[k++]] = o;
+        const roads = data.roads ?? data.builtRoads ?? [];   // builtRoads: partidas guardadas antes de que se pudieran cortar
+        for (let i = 0; i < roads.length; i += 3) {
+            const a = roads[i], d = roads[i + 1], cls = roads[i + 2], b = G.nb[a * 6 + d];
+            g.road[a * 6 + d] = cls;
+            g.road[b * 6 + (d + 3) % 6] = cls;
+        }
+        for (const c of data.forts ?? []) g.fort[c] = 1;
+        g.fortWork = new Map((data.fortWork ?? []).map(([c, owner, left]) => [c, { owner, left }]));
+        data.nations.forEach((n, i) => Object.assign(g.nations[i], { gold: n.gold, alive: n.alive, recruited: new Map(n.recruited) }));
+        for (const row of g.relations) for (const r of row) if (r) Object.assign(r, { state: 'paz', since: 0, truceUntil: 0 });
+        for (const [a, b, state, since, truceUntil] of data.relations) Object.assign(g.relations[a][b], { state, since, truceUntil });
+        g.armies = new Map();
+        g.armyAt = new Int32Array(G.N);
+        for (const [id, owner, cell, infantry, tank, artillery, used] of data.armies) {
+            g.armies.set(id, { id, owner, cell, units: { infantry, tank, artillery }, used });
+            g.armyAt[cell] = id;
+        }
+        g.nextArmyId = data.nextArmyId;
+        g.blocs = data.blocs.map(b => ({ ...b, members: new Set(b.members) }));
+        g.nextBlocId = data.nextBlocId;
+        g.blocsChanged();
+        g.version++; g.roadVersion++; g.fortVersion++;
+        return g;
+    }
+
+    log(msg) { this.logs.push({ turn: this.turn, msg }); if (this.logs.length > 400) this.logs.shift(); }
+    nm(id) { return this.nations[id].name; }
+    involvesPlayer(...ids) { return ids.includes(this.player); }
+
+    // --- Relaciones y alianzas ---
+    rel(a, b) { return this.relations[a][b]; }
+    atWar(a, b) { return a !== b && a >= 0 && b >= 0 && this.rel(a, b).state === 'guerra'; }
+    allied(a, b) { return a !== b && a >= 0 && b >= 0 && this.alliedM[a * this.nations.length + b] === 1; }
+    enemiesOf(id) { return this.nations.filter(n => n.alive && this.atWar(id, n.id)).map(n => n.id); }
+    alliesOf(id) { return this.nations.filter(n => n.alive && this.allied(id, n.id)).map(n => n.id); }
+
+    blocsChanged() {
+        const n = this.nations.length;
+        this.alliedM = new Uint8Array(n * n);
+        for (const b of this.blocs) for (const x of b.members) for (const y of b.members) if (x !== y) this.alliedM[x * n + y] = 1;
+        this.blocVersion++;
+    }
+    createBloc(founder, name, secret) {
+        const bloc = { id: this.nextBlocId++, name, founder, secret, members: new Set([founder]), since: this.turn };
+        this.blocs.push(bloc);
+        return bloc;
+    }
+    bloc(id) { return this.blocs.find(b => b.id === id); }
+    blocsOf(id) { return this.blocs.filter(b => b.members.has(id)); }
+    sharedBlocs(a, b) { return this.blocs.filter(bl => bl.members.has(a) && bl.members.has(b)); }
+    // Alianzas que `viewer` conoce: las públicas y las secretas de las que es miembro.
+    visibleBlocs(viewer) { return this.blocs.filter(b => !b.secret || b.members.has(viewer)); }
+    knownAllies(viewer, id) {
+        const out = new Set();
+        for (const b of this.visibleBlocs(viewer)) if (b.members.has(id)) for (const m of b.members) if (m !== id && this.nations[m].alive) out.add(m);
+        return [...out];
+    }
+    joinBloc(bloc, id) {
+        bloc.members.add(id);
+        this.blocsChanged();
+        if (!bloc.secret || this.involvesPlayer(...bloc.members)) this.log(`${this.nm(id)} se une a ${bloc.name}.`);
+    }
+    leaveBloc(bloc, id, reason = '') {
+        if (!bloc.members.delete(id)) return;
+        if (!bloc.secret || this.involvesPlayer(id, ...bloc.members)) this.log(`${this.nm(id)} sale de ${bloc.name}${reason}.`);
+        if (bloc.members.size === 0 || (bloc.members.size === 1 && !bloc.members.has(this.player))) {
+            this.blocs = this.blocs.filter(b => b !== bloc);
+            if (!bloc.secret) this.log(`${bloc.name} se disuelve.`);
+        }
+        this.blocsChanged();
+    }
+    reveal(bloc) {
+        if (!bloc.secret) return;
+        bloc.secret = false;
+        this.log(`Se revela el pacto secreto «${bloc.name}»: ${[...bloc.members].map(m => this.nm(m)).join(', ')}.`);
+    }
+
+    // --- Economía ---
+    // Casillas a las que llega la red de carreteras desde la capital, pasando por territorio propio o aliado.
+    reachedRoadCells(id) {
+        const seen = new Uint8Array(G.N);
+        const cap = this.nations[id].capitalCell;
+        if (this.owner[cap] !== id) return seen;
+        const queue = [cap];
+        seen[cap] = 1;
+        for (let d = 0; d < 6; d++) {
+            const j = G.nb[cap * 6 + d];
+            if (j >= 0 && this.owner[j] === id) { seen[j] = 1; queue.push(j); }
+        }
+        while (queue.length) {
+            const u = queue.pop();
+            for (let d = 0; d < 6; d++) {
+                if (!this.road[u * 6 + d]) continue;
+                const v = G.nb[u * 6 + d];
+                if (seen[v]) continue;
+                const o = this.owner[v];
+                if (o !== id && !this.allied(id, o)) continue;
+                seen[v] = 1;
+                queue.push(v);
+            }
+        }
+        return seen;
+    }
+    nearSeen(seen, cell) {
+        if (seen[cell]) return true;
+        for (let d = 0; d < 6; d++) { const j = G.nb[cell * 6 + d]; if (j >= 0 && seen[j]) return true; }
+        return false;
+    }
+    economy(id) {
+        const key = `${this.version}:${this.roadVersion}:${this.blocVersion}`;
+        const cached = this.econCache[id];
+        if (cached && cached.key === key) return cached;
+        const seen = this.reachedRoadCells(id);
+        const connected = new Set();
+        for (const p of PROVINCES) if (this.owner[p.city] === id && this.nearSeen(seen, p.city)) connected.add(p.id);
+        let base = 0, road = 0, res = 0;
+        for (const i of G.land) {
+            if (this.owner[i] !== id) continue;
+            base += CELL_VALUE[i];
+            if (connected.has(G.prov[i])) road += CELL_VALUE[i] * CONFIG.ROAD_BONUS;
+        }
+        const resources = RESOURCES.filter(r => this.owner[r.cell] === id);
+        for (const r of resources) res += r.value;
+        const e = { key, seen, connected, base: Math.round(base), road: Math.round(road), res, resources,
+            total: Math.round(base + road + res) };
+        this.econCache[id] = e;
+        return e;
+    }
+    income(id) { return this.economy(id).total; }
+    // Alcance del suministro: casillas propias o aliadas cerca de la red de carreteras unida a la capital o de una ciudad propia.
+    // Devuelve, por casilla, el alcance que le queda (−1 = sin suministro).
+    supplyMap(id) {
+        const key = `${this.version}:${this.roadVersion}:${this.blocVersion}`;
+        const cached = this.supplyCache[id];
+        if (cached && cached.key === key) return cached.map;
+        const net = this.economy(id).seen, R = CONFIG.SUPPLY_ROAD_RANGE;
+        const range = new Int8Array(G.N).fill(-1);
+        const buckets = Array.from({ length: R + 1 }, () => []);
+        const seed = (cell, r) => { if (range[cell] < r) { range[cell] = r; buckets[r].push(cell); } };
+        for (const i of G.land) if (net[i]) seed(i, R);
+        for (const p of PROVINCES) if (this.owner[p.city] === id) seed(p.city, CONFIG.SUPPLY_CITY_RANGE);
+        for (let r = R; r > 0; r--) {
+            for (const u of buckets[r]) {
+                if (range[u] !== r) continue;
+                for (let d = 0; d < 6; d++) {
+                    const v = G.nb[u * 6 + d];
+                    if (v < 0 || !isLand(v) || range[v] >= r - 1) continue;
+                    const o = this.owner[v];
+                    if (o !== id && !this.allied(id, o)) continue;
+                    range[v] = r - 1;
+                    buckets[r - 1].push(v);
+                }
+            }
+        }
+        this.supplyCache[id] = { key, map: range };
+        return range;
+    }
+    inSupply(id, cell) { return this.supplyMap(id)[cell] >= 0; }
+    powers() {
+        const p = new Array(this.nations.length).fill(0);
+        for (const a of this.armies.values()) p[a.owner] += unitPower(a.units, 'atk') + unitPower(a.units, 'def');
+        return p;
+    }
+    landCounts() {
+        const n = new Array(this.nations.length).fill(0);
+        for (const i of G.land) n[this.owner[i]]++;
+        return n;
+    }
+    citiesOf(id) { return PROVINCES.filter(p => this.owner[p.city] === id); }
+
+    borderSets() {
+        if (this._borders && this._bordersVersion === this.version) return this._borders;
+        const sets = this.nations.map(() => new Set());
+        for (const i of G.land) {
+            const a = this.owner[i];
+            for (let d = 0; d < 3; d++) {
+                const j = G.nb[i * 6 + d];
+                if (j >= 0 && isLand(j) && this.owner[j] !== a) { sets[a].add(this.owner[j]); sets[this.owner[j]].add(a); }
+            }
+        }
+        this._borders = sets; this._bordersVersion = this.version;
+        return sets;
+    }
+
+    // --- Obras públicas ---
+    roadEdgeCost(u, d, cls) {
+        const cur = this.road[u * 6 + d];
+        if (cur >= cls) return 0.01;   // tramo ya construido: casi gratis, pero se prefiere el trazado corto
+        const v = G.nb[u * 6 + d];
+        const t = Math.max(CONFIG.TERRAIN[PROVINCES[G.prov[u]].terrain].cost, CONFIG.TERRAIN[PROVINCES[G.prov[v]].terrain].cost);
+        const base = cls === 1 ? CONFIG.ROAD_COST : (cur === 1 ? CONFIG.HIGHWAY_COST : CONFIG.ROAD_COST + CONFIG.HIGHWAY_COST);
+        return base * t;
+    }
+    // Trazado más barato por territorio propio desde `from` hasta la primera casilla que cumpla `isTarget`.
+    planRoad(id, from, isTarget, cls) {
+        if (this.owner[from] !== id) return null;
+        const dist = new Map([[from, 0]]), prev = new Map(), heap = new MinHeap();
+        heap.push(0, from);
+        let goal = -1;
+        while (heap.size) {
+            const [d0, u] = heap.pop();
+            if (d0 > dist.get(u)) continue;
+            if (u !== from && isTarget(u)) { goal = u; break; }
+            for (let d = 0; d < 6; d++) {
+                const v = G.nb[u * 6 + d];
+                if (v < 0 || !isLand(v) || this.owner[v] !== id) continue;
+                const nd = d0 + this.roadEdgeCost(u, d, cls);
+                if (nd < (dist.get(v) ?? Infinity)) { dist.set(v, nd); prev.set(v, u); heap.push(nd, v); }
+            }
+        }
+        if (goal < 0) return null;
+        const path = [goal];
+        for (let c = goal; c !== from; c = prev.get(c)) path.push(prev.get(c));
+        path.reverse();
+        return { path, cost: Math.round(dist.get(goal)), cls };
+    }
+    // Construye los tramos que falten del trazado; devuelve cuántos se construyeron (0 si ya existían o no hay fondos).
+    roadEdges() {
+        const out = [];
+        for (const i of G.land) for (let d = 0; d < 3; d++) if (this.road[i * 6 + d]) out.push(i, d, this.road[i * 6 + d]);
+        return out;
+    }
+    // Camino más corto (en casillas) por territorio propio: la línea que se fortifica.
+    planFort(id, from, to) {
+        if (this.owner[from] !== id || this.owner[to] !== id) return null;
+        const prev = new Map([[from, -1]]), queue = [from];
+        for (let i = 0; i < queue.length && !prev.has(to); i++) {
+            const u = queue[i];
+            for (let d = 0; d < 6; d++) {
+                const v = G.nb[u * 6 + d];
+                if (v < 0 || prev.has(v) || !isLand(v) || this.owner[v] !== id) continue;
+                prev.set(v, u);
+                queue.push(v);
+            }
+        }
+        if (!prev.has(to)) return null;
+        const path = [];
+        for (let c = to; c !== -1; c = prev.get(c)) path.push(c);
+        path.reverse();
+        const cells = path.filter(c => !this.fort[c] && !this.fortWork.has(c));
+        return { path, cells, cost: cells.length * CONFIG.FORT_COST, cls: 'fort' };
+    }
+    buildFort(id, plan) {
+        const n = this.nations[id];
+        if (!plan || !plan.cells.length || plan.cost > n.gold) return 0;
+        for (const c of plan.cells) this.fortWork.set(c, { owner: id, left: CONFIG.FORT_TURNS });
+        n.gold -= plan.cost;
+        this.fortVersion++;
+        return plan.cells.length;
+    }
+    // Al tomar una casilla por la fuerza se cortan sus carreteras y se arrasa su fortificación.
+    wreck(cell, prev, a) {
+        let cut = false;
+        for (let d = 0; d < 6; d++) {
+            if (!this.road[cell * 6 + d]) continue;
+            const j = G.nb[cell * 6 + d];
+            this.road[cell * 6 + d] = 0;
+            this.road[j * 6 + (d + 3) % 6] = 0;
+            cut = true;
+        }
+        const pname = PROVINCES[G.prov[cell]].name;
+        if (cut) {
+            this.roadVersion++;
+            const key = `${this.turn}:${prev}:${G.prov[cell]}`;
+            if (prev === this.player && !this.cutLogged.has(key)) { this.cutLogged.add(key); this.log(`${this.nm(a)} corta tu carretera en ${pname}.`); }
+        }
+        if (this.fort[cell] || this.fortWork.has(cell)) {
+            this.fort[cell] = 0;
+            this.fortWork.delete(cell);
+            this.fortVersion++;
+            if (this.involvesPlayer(a, prev)) this.log(`${this.nm(a)} arrasa la fortificación de ${pname}.`);
+        }
+    }
+
+    buildRoad(id, plan) {
+        const n = this.nations[id];
+        if (!plan || plan.cost > n.gold) return 0;
+        let built = 0;
+        for (let i = 0; i + 1 < plan.path.length; i++) {
+            const a = plan.path[i], b = plan.path[i + 1], d = G.dirTo(a, b);
+            if (d < 0 || this.road[a * 6 + d] >= plan.cls) continue;
+            this.road[a * 6 + d] = plan.cls;
+            this.road[b * 6 + (d + 3) % 6] = plan.cls;
+            built++;
+        }
+        if (!built) return 0;
+        n.gold -= plan.cost;
+        this.roadVersion++;
+        return built;
+    }
+
+    // --- Ejércitos ---
+    newArmy(owner, cell, units, used) {
+        const a = { id: this.nextArmyId++, owner, cell, units: copyUnits(units), used };
+        this.armies.set(a.id, a);
+        return a;
+    }
+    // Subpuntos de movimiento que quedan.
+    // Subpuntos de movimiento que quedan; sin suministro, la mitad.
+    moveBudget(owner, cell, units, used) {
+        const full = speedOf(units) * MOVE * (this.inSupply(owner, cell) ? 1 : CONFIG.NO_SUPPLY_MOVE);
+        return Math.max(0, Math.floor(full) - used);
+    }
+    mp(a) { return this.moveBudget(a.owner, a.cell, a.units, a.used); }
+    armyOn(cell) { const id = this.armyAt[cell]; return id ? this.armies.get(id) : null; }
+    removeArmy(a) {
+        if (this.armyAt[a.cell] === a.id) this.armyAt[a.cell] = 0;
+        this.armies.delete(a.id);
+    }
+    settle(a) {
+        const other = this.armyAt[a.cell];
+        if (!other) { this.armyAt[a.cell] = a.id; return a; }
+        if (other === a.id) return a;
+        const o = this.armies.get(other);
+        for (const k of UNIT_KEYS) o.units[k] += a.units[k];
+        o.used = Math.max(o.used, a.used);
+        this.armies.delete(a.id);
+        return o;
+    }
+    split(a, send) {
+        if (sameUnits(a.units, send)) return a;
+        for (const k of UNIT_KEYS) a.units[k] -= send[k];
+        return this.newArmy(a.owner, a.cell, send, a.used);
+    }
+
+    zoc(cell, a) {
+        for (let d = 0; d < 6; d++) {
+            const j = G.nb[cell * 6 + d];
+            if (j >= 0 && this.armyAt[j] && this.atWar(a, this.armies.get(this.armyAt[j]).owner)) return true;
+        }
+        return false;
+    }
+
+    // Alcance con `mp` subpuntos. exp: casillas desde las que se puede seguir; term: donde hay que detenerse
+    // (desembarco o contacto con el enemigo); attacks: casilla con ejército enemigo → casilla desde la que se ataca.
+    reach(a, start, mp) {
+        const exp = new Map([[start, { cost: 0, prev: -1 }]]);
+        const term = new Map(), attacks = new Map();
+        const buckets = Array.from({ length: mp + 1 }, () => []);
+        buckets[0].push(start);
+        const tryAttack = (from, cost) => {
+            if (cost >= mp || !isLand(from)) return;
+            for (let d = 0; d < 6; d++) {
+                const v = G.nb[from * 6 + d];
+                if (v < 0 || !this.armyAt[v]) continue;
+                const o = this.armies.get(this.armyAt[v]).owner;
+                if (o === a || !this.atWar(a, o)) continue;
+                const prev = attacks.get(v);
+                const prevCost = prev === undefined ? Infinity : (exp.get(prev) ?? term.get(prev)).cost;
+                if (cost < prevCost) attacks.set(v, from);
+            }
+        };
+        for (let c = 0; c <= mp; c++) {
+            for (const u of buckets[c]) {
+                if (exp.get(u).cost !== c) continue;
+                tryAttack(u, c);
+                const uSea = !isLand(u);
+                for (let d = 0; d < 6; d++) {
+                    const v = G.nb[u * 6 + d];
+                    if (v < 0) continue;
+                    if (!isLand(v)) {
+                        const nc = c + MOVE;
+                        if (nc >= mp) continue;   // hay que poder desembarcar
+                        if ((exp.get(v)?.cost ?? Infinity) > nc) { exp.set(v, { cost: nc, prev: u }); buckets[nc].push(v); }
+                        continue;
+                    }
+                    const av = this.armyAt[v];
+                    if (av && this.armies.get(av).owner !== a) continue;
+                    const o = this.owner[v];
+                    const hostile = this.atWar(a, o);
+                    if (!(o === a || hostile || this.allied(a, o))) continue;
+                    const roadCls = uSea ? 0 : this.road[u * 6 + d];
+                    const step = roadCls ? CONFIG.ROAD_MOVE[roadCls] : MOVE * CONFIG.TERRAIN[PROVINCES[G.prov[v]].terrain].cost;
+                    const walled = hostile && this.fort[v] === 1;   // muro enemigo: un punto más y detiene la marcha
+                    const nc = c + step + (hostile ? MOVE / 2 : 0) + (walled ? MOVE : 0);
+                    if (nc > mp) continue;
+                    if (uSea || walled || this.zoc(v, a)) {
+                        if ((term.get(v)?.cost ?? Infinity) > nc) term.set(v, { cost: nc, prev: u, landing: uSea });
+                    } else if ((exp.get(v)?.cost ?? Infinity) > nc) {
+                        exp.set(v, { cost: nc, prev: u });
+                        buckets[nc].push(v);
+                    }
+                }
+            }
+        }
+        for (const [v, t] of term) if (!t.landing) tryAttack(v, t.cost);
+        return { start, mp, exp, term, attacks };
+    }
+
+    destinations(r) {
+        const out = new Set();
+        for (const v of r.exp.keys()) if (v !== r.start && isLand(v)) out.add(v);
+        for (const v of r.term.keys()) out.add(v);
+        return out;
+    }
+
+    entry(r, v) {
+        const e = isLand(v) ? r.exp.get(v) : null, t = r.term.get(v);
+        if (e && (!t || e.cost <= t.cost)) return { ...e, terminal: false };
+        return t ? { ...t, terminal: true } : null;
+    }
+
+    moveArmy(army, dest, r) {
+        const e = this.entry(r, dest);
+        if (!e) return army;
+        const path = [dest];
+        for (let p = e.prev; p !== r.start; p = r.exp.get(p).prev) path.push(p);
+        path.reverse();
+        if (this.armyAt[army.cell] === army.id) this.armyAt[army.cell] = 0;
+        for (const c of path) {
+            army.cell = c;
+            if (isLand(c) && this.atWar(army.owner, this.owner[c])) this.capture(c, army.owner, true);
+        }
+        army.used = e.terminal ? 999 : army.used + e.cost;
+        return this.settle(army);
+    }
+
+    attack(army, from, target, r) {
+        // Un destacamento que ataca desde su propia casilla aún no está registrado en ella: battle() lo asienta al final.
+        if (from !== army.cell) army = this.moveArmy(army, from, r);
+        const def = this.armyOn(target);
+        if (!def) { this.settle(army); return; }
+        this.battle(army, def, target);
+    }
+
+    battle(att, def, cell) {
+        const roll = () => 0.8 + this.rng() * 0.4;
+        const p = PROVINCES[G.prov[cell]];
+        const terrain = CONFIG.TERRAIN[p.terrain];
+        const fort = (CITY_OF[cell] >= 0 ? CONFIG.CITY_DEFENSE : 1) * (CAPITAL_OF[cell] >= 0 ? CONFIG.CAPITAL_DEFENSE : 1)
+            * (this.fort[cell] === 1 ? CONFIG.FORT_DEFENSE : 1);
+        const atk = unitPower(att.units, 'atk') * roll();
+        const dfn = Math.max(0.5, unitPower(def.units, 'def') * roll() * terrain.def * fort);
+        const attWins = atk > dfn;
+        const [w, l] = attWins ? [atk, dfn] : [dfn, atk];
+        const winnerLoss = 0.3 * l / w;
+        const loserLoss = Math.min(1, 0.35 + 0.35 * (w / l - 1));
+        const lostA = this.applyLosses(att.units, attWins ? winnerLoss : loserLoss, attWins);
+        const lostD = this.applyLosses(def.units, attWins ? loserLoss : winnerLoss, !attWins);
+        att.used = 999;
+        if (this.involvesPlayer(att.owner, def.owner)) {
+            this.log(`${this.nm(att.owner)} ataca ${p.name} (${this.nm(def.owner)}): ${Math.round(atk)} vs ${Math.round(dfn)}. ` +
+                `${attWins ? 'VICTORIA' : 'REPELIDO'}. Bajas: atacante ${unitText(lostA) || '0'}, defensor ${unitText(lostD) || '0'}.`);
+        }
+        if (attWins) {
+            this.removeArmy(def);
+            if (countUnits(def.units) > 0) {
+                const retreat = this.retreatCell(def, cell);
+                if (retreat >= 0) { def.cell = retreat; def.used = 999; this.armies.set(def.id, def); this.settle(def); }
+            }
+            if (this.armyAt[att.cell] === att.id) this.armyAt[att.cell] = 0;
+            att.cell = cell;
+            this.settle(att);
+            if (this.owner[cell] !== att.owner) this.capture(cell, att.owner, true);
+        } else {
+            if (countUnits(att.units) === 0) this.removeArmy(att);
+            else this.settle(att);
+        }
+    }
+
+    retreatCell(army, from) {
+        for (let d = 0; d < 6; d++) {
+            const j = G.nb[from * 6 + d];
+            if (j >= 0 && isLand(j) && !this.armyAt[j] && (this.owner[j] === army.owner || this.allied(army.owner, this.owner[j]))) return j;
+        }
+        return -1;
+    }
+
+    applyLosses(units, frac, keepOne) {
+        const before = copyUnits(units), lost = emptyUnits();
+        for (const k of UNIT_KEYS) {
+            lost[k] = Math.min(units[k], Math.floor(units[k] * frac + this.rng()));
+            units[k] -= lost[k];
+        }
+        if (keepOne && countUnits(units) === 0) {
+            const k = UNIT_KEYS.find(t => before[t] > 0);
+            if (k) { units[k] = 1; lost[k]--; }
+        }
+        return lost;
+    }
+
+    // Tomar la ciudad de una provincia entrega toda la provincia, salvo donde aún resisten tropas del anterior dueño
+    // o una fortificación terminada. `byForce`: la casilla la ocupan tropas (se cortan carreteras y muros).
+    capture(cell, a, byForce = false) {
+        const prev = this.owner[cell];
+        if (prev === a) return;
+        this.owner[cell] = a;
+        this.version++;
+        if (byForce) this.wreck(cell, prev, a);
+        const res = RESOURCE_AT.get(cell);
+        if (res && this.involvesPlayer(a, prev)) this.log(`${this.nm(a)} se hace con ${res.typeName.toLowerCase()} de ${res.name}.`);
+        const pid = CITY_OF[cell];
+        if (pid < 0) return;
+        const p = PROVINCES[pid];
+        for (const c of p.cells) {
+            if (this.owner[c] !== prev) continue;
+            const ar = this.armyOn(c);
+            if ((!ar || ar.owner !== prev) && this.fort[c] !== 1) this.owner[c] = a;
+        }
+        if (CAPITAL_OF[cell] >= 0 || this.involvesPlayer(a, prev)) {
+            this.log(`${this.nm(a)} toma ${p.cityName} (${p.name})${CAPITAL_OF[cell] >= 0 ? `, capital de ${this.nm(CAPITAL_OF[cell])}` : ''}.`);
+        }
+        this.checkElimination(prev, a);
+        this.checkGameOver();
+    }
+
+    checkElimination(id, captor) {
+        const n = this.nations[id];
+        if (!n.alive || PROVINCES.some(p => this.owner[p.city] === id)) return;
+        n.alive = false;
+        for (const i of G.land) if (this.owner[i] === id) this.owner[i] = captor;
+        for (const a of [...this.armies.values()]) if (a.owner === id) this.removeArmy(a);
+        for (const o of this.nations) if (o.id !== id) Object.assign(this.rel(id, o.id), { state: 'paz' });
+        for (const b of this.blocsOf(id)) this.leaveBloc(b, id);
+        this.proposals = this.proposals.filter(p => p.from !== id && p.against !== id);
+        this.version++;
+        this.log(`${n.name} HA SIDO ELIMINADA por ${this.nm(captor)}.`);
+    }
+
+    checkGameOver() {
+        if (this.over || this.player === null) return;
+        const p = this.player;
+        if (!this.nations[p].alive) {
+            this.over = true; this.won = false;
+            this.log("DERROTA: tu nación ha caído.");
+            return;
+        }
+        const share = this.landCounts()[p] / G.land.length;
+        if (share >= this.settings.victory || this.nations.every(n => n.id === p || !n.alive)) {
+            this.over = true; this.won = true;
+            this.log("VICTORIA: Europa está bajo tu mando.");
+        }
+    }
+
+    // --- Reclutamiento ---
+    recruitLeft(nation, p) { return p.recruitCap - (this.nations[nation].recruited.get(p.id) ?? 0); }
+    canRecruitAt(nation, p) {
+        const ar = this.armyOn(p.city);
+        return this.owner[p.city] === nation && (!ar || ar.owner === nation) && this.recruitLeft(nation, p) > 0;
+    }
+    recruit(nation, p, type) {
+        const n = this.nations[nation], cost = CONFIG.TYPES[type].cost;
+        if (n.gold < cost || !this.canRecruitAt(nation, p)) return false;
+        n.gold -= cost;
+        n.recruited.set(p.id, (n.recruited.get(p.id) ?? 0) + 1);
+        const units = emptyUnits(); units[type] = 1;
+        this.settle(this.newArmy(nation, p.city, units, 999));   // los reclutas no se mueven este turno
+        return true;
+    }
+
+    // --- Turnos ---
+    start(playerId) {
+        this.player = playerId;
+        this.log(`Asumes el mando de ${this.nm(playerId)}. IA ${this.ai.name.toLowerCase()}, alianzas ${this.settings.alliances}.`);
+        this.beginNationTurn(playerId);
+    }
+
+    beginNationTurn(id) {
+        for (const a of this.armies.values()) if (a.owner === id) a.used = 0;
+        let done = 0;
+        for (const [c, w] of this.fortWork) {
+            if (w.owner !== id) continue;
+            if (this.owner[c] !== id) { this.fortWork.delete(c); this.fortVersion++; continue; }
+            if (--w.left <= 0) { this.fort[c] = 1; this.fortWork.delete(c); done++; }
+        }
+        if (done) {
+            this.fortVersion++;
+            if (id === this.player) this.log(`Fortificación terminada en ${done} casilla${done > 1 ? 's' : ''}.`);
+        }
+        this.nations[id].recruited.clear();
+        const inc = this.income(id);
+        this.nations[id].gold += inc;
+        return inc;
+    }
+
+    endTurn() {
+        if (this.over || this.player === null) return;
+        for (const p of [...this.proposals]) this.answerProposal(this.proposals.indexOf(p), false, true);
+        this.proposals = [];
+        for (let i = 1; i < this.nations.length && !this.over; i++) {
+            const id = (this.player + i) % this.nations.length;
+            if (!this.nations[id].alive) continue;
+            this.beginNationTurn(id);
+            this.aiTurn(id);
+        }
+        if (this.over) return;
+        this.turn++;
+        this.proposedThisTurn.clear();
+        const inc = this.beginNationTurn(this.player);
+        this.log(`— TURNO ${this.turn} — Ingresos: +${inc}g`);
+    }
+
+    // --- Diplomacia ---
+    declareWar(a, b) {
+        const r = this.rel(a, b);
+        if (r.state === 'guerra' || this.turn < r.truceUntil || !this.nations[b].alive || a === b) return false;
+        for (const bl of this.sharedBlocs(a, b)) this.leaveBloc(bl, a, ` por atacar a ${this.nm(b)}`);
+        Object.assign(r, { state: 'guerra', since: this.turn });
+        this.log(`${this.nm(a)} DECLARA LA GUERRA a ${this.nm(b)}.`);
+        const joined = [], handled = new Set([a, b]);
+        for (const bl of this.blocsOf(b)) {
+            for (const c of [...bl.members]) {
+                if (handled.has(c) || !this.nations[c].alive || this.atWar(c, a)) continue;
+                handled.add(c);
+                this.reveal(bl);
+                if (c === this.player) { this.proposals.push({ kind: 'llamada', from: b, against: a }); continue; }
+                for (const bl2 of this.sharedBlocs(c, a)) this.leaveBloc(bl2, c, ` para defender a ${this.nm(b)}`);
+                Object.assign(this.rel(c, a), { state: 'guerra', since: this.turn });
+                joined.push(this.nm(c));
+            }
+        }
+        if (joined.length) this.log(`En defensa de ${this.nm(b)} entran en guerra contra ${this.nm(a)}: ${joined.join(', ')}.`);
+        return true;
+    }
+    makePeace(a, b) {
+        Object.assign(this.rel(a, b), { state: 'paz', since: this.turn, truceUntil: this.turn + CONFIG.TRUCE_TURNS });
+        this.log(`PAZ entre ${this.nm(a)} y ${this.nm(b)} (tregua hasta el turno ${this.turn + CONFIG.TRUCE_TURNS}).`);
+    }
+    wantsPeace(ai, other, powers = this.powers()) {
+        const r = this.rel(ai, other);
+        if (r.state !== 'guerra') return false;
+        return powers[ai] < powers[other] * this.ai.peaceRatio || (this.turn - r.since >= this.ai.peaceAfter && this.rng() < 0.25);
+    }
+    // ¿Acepta `ai` entrar en `bloc` (o fundar uno con `inviter` si bloc es null)?
+    acceptsBloc(ai, bloc, inviter) {
+        const members = bloc ? [...bloc.members] : [inviter];
+        if (members.includes(ai) || members.some(m => this.atWar(ai, m))) return false;
+        if (members.some(m => this.enemiesOf(m).some(e => this.allied(ai, e)))) return false;   // chocaría con sus aliados
+        const powers = this.powers();
+        const shared = this.enemiesOf(ai).some(e => members.some(m => this.atWar(m, e)));
+        const strength = members.reduce((s, m) => s + powers[m], 0);
+        let p = shared ? 0.8 : 0.12;
+        if (strength > 2 * powers[ai]) p += 0.15;
+        if (bloc?.secret) p -= 0.05;
+        return this.rng() < p;
+    }
+    // ¿Admite el bloque a `applicant`? Decide su miembro más fuerte.
+    admits(bloc, applicant) {
+        const members = [...bloc.members];
+        if (members.some(m => this.atWar(m, applicant))) return false;
+        const powers = this.powers();
+        const shared = this.enemiesOf(applicant).some(e => members.some(m => this.atWar(m, e)));
+        const leader = members.sort((x, y) => powers[y] - powers[x])[0];
+        const p = 0.25 + (shared ? 0.45 : 0) + (powers[applicant] >= powers[leader] * 0.3 ? 0.15 : 0);
+        return this.rng() < p;
+    }
+
+    // --- Acciones del jugador ---
+    playerMove(army, send, dest) {
+        if (this.over || army.owner !== this.player) return null;
+        if (UNIT_KEYS.some(k => send[k] < 0 || send[k] > army.units[k]) || countUnits(send) === 0) return null;
+        const r = this.reach(army.owner, army.cell, this.moveBudget(army.owner, army.cell, send, army.used));
+        const isAttack = r.attacks.has(dest);
+        if (!isAttack && !this.destinations(r).has(dest)) return null;
+        const mover = this.split(army, copyUnits(send));
+        if (isAttack) { this.attack(mover, r.attacks.get(dest), dest, r); return this.armyOn(dest) ?? this.armyOn(r.attacks.get(dest)); }
+        return this.moveArmy(mover, dest, r);
+    }
+    playerRecruit(p, type) {
+        if (this.over) return;
+        if (this.recruit(this.player, p, type)) this.log(`Reclutas ${CONFIG.TYPES[type].name} en ${p.cityName}.`);
+        else this.log("No se puede reclutar ahí (fondos o cupo de la provincia agotados).");
+    }
+    playerBuild(plan) {
+        if (this.over || !plan) return false;
+        if (plan.cost > this.nations[this.player].gold) { this.log(`Fondos insuficientes: la obra cuesta ${plan.cost}g.`); return false; }
+        const built = this.buildRoad(this.player, plan);
+        if (!built) { this.log(`Ese trazado ya es ${plan.cls === 2 ? 'autopista' : 'carretera'}.`); return true; }
+        this.log(`Construyes ${plan.cls === 2 ? 'autopista' : 'carretera'}: ${built} tramos por ${plan.cost}g.`);
+        return true;
+    }
+    playerFortify(plan) {
+        if (this.over || !plan) return false;
+        if (!plan.cells.length) { this.log("Esas casillas ya están fortificadas o en obras."); return true; }
+        if (plan.cost > this.nations[this.player].gold) { this.log(`Fondos insuficientes: la fortificación cuesta ${plan.cost}g.`); return false; }
+        const n = this.buildFort(this.player, plan);
+        this.log(`Empiezas a fortificar ${n} casilla${n > 1 ? 's' : ''} por ${plan.cost}g: listas en ${CONFIG.FORT_TURNS} turnos.`);
+        return true;
+    }
+    playerDiplomacy(action, target) {
+        const p = this.player;
+        if (this.over || target === p || !this.nations[target].alive) return;
+        if (action === 'war') {
+            if (!this.declareWar(p, target)) this.log(`No puedes declarar la guerra a ${this.nm(target)} ahora.`);
+        } else if (action === 'peace' && !this.proposedThisTurn.has(`paz${target}`)) {
+            this.proposedThisTurn.add(`paz${target}`);
+            if (!this.atWar(p, target)) return;
+            if (this.wantsPeace(target, p)) this.makePeace(p, target);
+            else this.log(`${this.nm(target)} rechaza la paz.`);
+        }
+    }
+    playerCreateBloc(name, secret) {
+        if (this.over) return null;
+        const clean = name.trim().slice(0, 40) || `Pacto de ${this.nations[this.player].capitalName}`;
+        const bloc = this.createBloc(this.player, clean, secret);
+        this.blocsChanged();
+        this.log(`Fundas ${secret ? 'el pacto secreto' : 'la alianza'} «${clean}».`);
+        return bloc;
+    }
+    playerInvite(blocId, target) {
+        const bloc = this.bloc(blocId), key = `inv${blocId}:${target}`;
+        if (this.over || !bloc || !bloc.members.has(this.player) || bloc.members.has(target) || this.proposedThisTurn.has(key)) return;
+        this.proposedThisTurn.add(key);
+        if (this.acceptsBloc(target, bloc, this.player)) this.joinBloc(bloc, target);
+        else this.log(`${this.nm(target)} rechaza unirse a ${bloc.name}.`);
+    }
+    playerRequestJoin(blocId) {
+        const bloc = this.bloc(blocId), key = `req${blocId}`;
+        if (this.over || !bloc || bloc.members.has(this.player) || this.proposedThisTurn.has(key)) return;
+        this.proposedThisTurn.add(key);
+        if (this.admits(bloc, this.player)) this.joinBloc(bloc, this.player);
+        else this.log(`${bloc.name} rechaza tu solicitud de ingreso.`);
+    }
+    playerLeaveBloc(blocId) {
+        const bloc = this.bloc(blocId);
+        if (bloc) this.leaveBloc(bloc, this.player);
+    }
+    answerProposal(index, accept, ignored = false) {
+        const pr = this.proposals.splice(index, 1)[0];
+        if (!pr) return;
+        const p = this.player, verb = ignored ? 'Ignoras' : 'Rechazas';
+        if (pr.kind === 'llamada') {
+            if (accept && !this.atWar(p, pr.against)) {
+                for (const bl of this.sharedBlocs(p, pr.against)) this.leaveBloc(bl, p, ` para defender a ${this.nm(pr.from)}`);
+                Object.assign(this.rel(p, pr.against), { state: 'guerra', since: this.turn });
+                this.log(`Acudes en defensa de ${this.nm(pr.from)}: guerra contra ${this.nm(pr.against)}.`);
+            } else if (!accept) {
+                this.log(`${verb} la llamada de ${this.nm(pr.from)}.`);
+                for (const bl of this.sharedBlocs(p, pr.from)) this.leaveBloc(bl, p, ` por abandonar a ${this.nm(pr.from)}`);
+            }
+            return;
+        }
+        if (!accept) { this.log(`${verb} la propuesta de ${pr.kind === 'paz' ? 'paz' : 'alianza'} de ${this.nm(pr.from)}.`); return; }
+        if (pr.kind === 'paz' && this.atWar(pr.from, p)) this.makePeace(p, pr.from);
+        else if (pr.kind === 'bloque' && !this.atWar(pr.from, p)) {
+            let bloc = pr.blocId ? this.bloc(pr.blocId) : null;
+            if (!bloc) { bloc = this.createBloc(pr.from, `Pacto de ${this.nations[pr.from].capitalName}`, false); this.blocsChanged(); this.log(`Nace ${bloc.name}.`); }
+            this.joinBloc(bloc, p);
+        }
+    }
+
+    // --- IA ---
+    aiTurn(id) {
+        const powers = this.powers();
+        this.aiDiplomacy(id, powers);
+        this.aiForts(id);   // antes de reclutar: en guerra el reclutamiento gasta todo el oro
+        this.aiRecruit(id);
+        this.aiArmies(id);
+        if (!this.over) this.aiRoads(id);
+    }
+
+    aiDiplomacy(id, powers) {
+        const S = this.ai;
+        for (const e of this.enemiesOf(id)) {
+            if (!this.wantsPeace(id, e, powers)) continue;
+            if (e === this.player) { if (!this.proposals.some(p => p.kind === 'paz' && p.from === id)) this.proposals.push({ kind: 'paz', from: id }); }
+            else if (this.wantsPeace(e, id, powers) || this.rng() < 0.3) this.makePeace(id, e);
+        }
+        const enemies = this.enemiesOf(id);
+        if (enemies.length <= S.maxWars && this.turn >= S.warFrom && this.rng() < S.warChance) {
+            const side = t => powers[t] + this.knownAllies(id, t).filter(x => x !== id).reduce((s, x) => s + powers[x], 0);
+            const target = [...this.borderSets()[id]]
+                .filter(b => this.nations[b].alive && !this.atWar(id, b) && this.turn >= this.rel(id, b).truceUntil
+                    && (!this.allied(id, b) || this.rng() < S.betrayChance))
+                .sort((x, y) => side(x) - side(y))[0];
+            if (target !== undefined && powers[id] > S.warRatio * side(target)) this.declareWar(id, target);
+        }
+        if (enemies.length && this.rng() < S.blocChance) {
+            const partner = this.nations.find(n => n.alive && n.id !== id && !this.allied(id, n.id) && !this.atWar(id, n.id)
+                && enemies.some(e => this.atWar(n.id, e)));
+            if (!partner) return;
+            const own = this.blocs.find(b => b.founder === id && b.members.has(id));
+            if (partner.id === this.player) {
+                if (!this.proposals.some(p => p.kind === 'bloque' && p.from === id)) this.proposals.push({ kind: 'bloque', from: id, blocId: own?.id ?? null });
+            } else if (this.acceptsBloc(partner.id, own ?? null, id)) {
+                const bloc = own ?? this.createBloc(id, `Pacto de ${this.nations[id].capitalName}`, false);
+                if (!own) { this.blocsChanged(); this.log(`Nace ${bloc.name}.`); }
+                this.joinBloc(bloc, partner.id);
+            }
+        }
+    }
+
+    // Distancia (en pasos) a `sources` por terreno transitable para la nación `id` (incluye el mar).
+    field(id, sources) {
+        const dist = new Int32Array(G.N).fill(1e9), queue = new Int32Array(G.N);
+        let head = 0, tail = 0;
+        for (const s of sources) { dist[s] = 0; queue[tail++] = s; }
+        while (head < tail) {
+            const u = queue[head++];
+            for (let d = 0; d < 6; d++) {
+                const v = G.nb[u * 6 + d];
+                if (v < 0 || dist[v] <= dist[u] + 1) continue;
+                if (isLand(v)) {
+                    const o = this.owner[v];
+                    if (!(o === id || this.allied(id, o) || this.atWar(id, o))) continue;
+                }
+                dist[v] = dist[u] + 1;
+                queue[tail++] = v;
+            }
+        }
+        return dist;
+    }
+
+    aiReserve(id) { return this.enemiesOf(id).length ? 0 : this.income(id) * 4; }
+
+    aiRecruit(id) {
+        const n = this.nations[id];
+        const enemies = this.enemiesOf(id);
+        const reserve = this.aiReserve(id);
+        let cities = this.citiesOf(id);
+        if (!cities.length) return;
+        if (enemies.length) {
+            const dist = this.field(id, PROVINCES.filter(p => enemies.includes(this.owner[p.city])).map(p => p.city));
+            cities = cities.sort((x, y) => dist[x.city] - dist[y.city]);
+        } else {
+            // Barajado Fisher-Yates: consume siempre los mismos números aleatorios (sort con comparador aleatorio no).
+            for (let i = cities.length - 1; i > 0; i--) {
+                const j = Math.floor(this.rng() * (i + 1));
+                [cities[i], cities[j]] = [cities[j], cities[i]];
+            }
+        }
+        for (let guard = 0; guard < 200 && n.gold - reserve >= CONFIG.TYPES.infantry.cost; guard++) {
+            const p = cities.find(c => this.canRecruitAt(id, c));
+            if (!p) break;
+            const r = this.rng(), budget = n.gold - reserve;
+            let type = 'infantry';
+            if (budget >= CONFIG.TYPES.artillery.cost && r < 0.2) type = 'artillery';
+            else if (budget >= CONFIG.TYPES.tank.cost && r < 0.55) type = 'tank';
+            if (!this.recruit(id, p, type)) break;
+        }
+    }
+
+    aiArmies(id) {
+        const enemies = this.enemiesOf(id);
+        if (!enemies.length) return;
+        const targets = PROVINCES.filter(p => enemies.includes(this.owner[p.city])).map(p => p.city);
+        if (!targets.length) return;
+        const dist = this.field(id, targets);
+        const mine = [...this.armies.values()].filter(a => a.owner === id && this.mp(a) > 0)
+            .sort((x, y) => unitPower(y.units, 'atk') - unitPower(x.units, 'atk'));
+        for (const army0 of mine) {
+            if (this.over) return;
+            if (!this.armies.has(army0.id) || army0.owner !== id || this.mp(army0) <= 0) continue;
+            let army = army0;
+            const onCity = CITY_OF[army.cell] >= 0;
+            if (onCity && unitPower(army.units, 'atk') <= 10) continue;               // guarnición
+            if (onCity && army.units.infantry >= 1 && countUnits(army.units) > 1) {   // deja una infantería de guarnición
+                const send = copyUnits(army.units); send.infantry--;
+                army = this.split(army, send);
+            }
+            const r = this.reach(id, army.cell, this.mp(army));
+            const atk = unitPower(army.units, 'atk');
+            let best = null, bestScore = 0;
+            for (const [target, from] of r.attacks) {
+                const def = this.armyOn(target);
+                const fort = (CITY_OF[target] >= 0 ? CONFIG.CITY_DEFENSE : 1) * (CAPITAL_OF[target] >= 0 ? CONFIG.CAPITAL_DEFENSE : 1)
+                    * (this.fort[target] === 1 ? CONFIG.FORT_DEFENSE : 1);
+                const ratio = atk / Math.max(0.5, unitPower(def.units, 'def') * CONFIG.TERRAIN[PROVINCES[G.prov[target]].terrain].def * fort);
+                if (ratio < 1.3) continue;
+                const score = 1000 + Math.min(ratio, 5) * 20 + (CITY_OF[target] >= 0 ? 300 : 0);
+                if (score > bestScore) { bestScore = score; best = { kind: 'attack', target, from }; }
+            }
+            for (const v of this.destinations(r)) {
+                const hostile = this.atWar(id, this.owner[v]);
+                const gain = dist[army.cell] - dist[v];
+                if (gain <= 0 && !(CITY_OF[v] >= 0 && hostile)) continue;
+                const score = gain * 10 + (CITY_OF[v] >= 0 && hostile ? 600 : 0) + (RESOURCE_AT.has(v) && hostile ? 150 : 0) + (hostile ? 2 : 0);
+                if (score > bestScore) { bestScore = score; best = { kind: 'move', target: v }; }
+            }
+            if (!best) { this.settle(army); continue; }
+            if (best.kind === 'attack') this.attack(army, best.from, best.target, r);
+            else this.moveArmy(army, best.target, r);
+        }
+    }
+
+    // En guerra fortifica la ciudad propia más valiosa que tenga territorio enemigo a 3 casillas o menos.
+    aiForts(id) {
+        const enemies = this.enemiesOf(id), n = this.nations[id];
+        if (!enemies.length || n.gold < CONFIG.FORT_COST * 4 || this.rng() > 0.35) return;
+        const nearEnemy = cell => {
+            const seen = new Set([cell]);
+            let front = [cell];
+            for (let r = 0; r < 3; r++) {
+                const next = [];
+                for (const u of front) for (let d = 0; d < 6; d++) {
+                    const v = G.nb[u * 6 + d];
+                    if (v < 0 || seen.has(v)) continue;
+                    seen.add(v);
+                    if (isLand(v) && enemies.includes(this.owner[v])) return true;
+                    next.push(v);
+                }
+                front = next;
+            }
+            return false;
+        };
+        const free = c => c >= 0 && isLand(c) && this.owner[c] === id && !this.fort[c] && !this.fortWork.has(c);
+        const city = this.citiesOf(id).filter(p => free(p.city) && nearEnemy(p.city)).sort((x, y) => y.value - x.value)[0];
+        if (!city) return;
+        const ring = [city.city, ...[0, 1, 2, 3, 4, 5].map(d => G.nb[city.city * 6 + d])].filter(free);
+        const cells = ring.slice(0, Math.floor(n.gold * 0.4 / CONFIG.FORT_COST));
+        if (cells.length) this.buildFort(id, { cells, cost: cells.length * CONFIG.FORT_COST });
+    }
+
+    // En paz, con dinero de sobra, une a la red una provincia que no lo está.
+    aiRoads(id) {
+        if (this.enemiesOf(id).length || this.rng() > 0.5) return;
+        const n = this.nations[id], budget = n.gold - this.aiReserve(id) * 0.5;
+        if (budget < CONFIG.ROAD_COST * 2) return;
+        const e = this.economy(id);
+        const cap = n.capitalCell;
+        if (this.owner[cap] !== id) return;
+        const loose = this.citiesOf(id).filter(p => !e.connected.has(p.id)).sort((x, y) => y.value - x.value)[0];
+        if (!loose) return;
+        const plan = this.planRoad(id, loose.city, c => e.seen[c] === 1, 1);
+        if (plan && plan.cost <= budget * 0.5) this.buildRoad(id, plan);
+    }
+}
+
+// ================= Interfaz =================
+const $ = sel => document.querySelector(sel);
+const INK = '#151a12';
+const SIGNAL = '#f0c419';
+
+// Partidas guardadas (localStorage del navegador; también exportables a archivo)
+const SAVE_KEY = 'eurowar.saves.v1';
+const SLOTS = { auto: 'Autoguardado', s1: 'Ranura 1', s2: 'Ranura 2', s3: 'Ranura 3' };
+function readSaves() {
+    try { return JSON.parse(localStorage.getItem(SAVE_KEY)) || {}; } catch { return {}; }
+}
+function writeSave(slot, g) {
+    try {
+        const all = readSaves();
+        all[slot] = { date: new Date().toISOString(), turn: g.turn, nation: g.nm(g.player), data: g.serialize() };
+        localStorage.setItem(SAVE_KEY, JSON.stringify(all));
+        return true;
+    } catch { return false; }
+}
+
+const ICONS = {
+    command: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M5 21V3.5M5 4h12l-2.5 4L17 12H5"/></svg>',
+    road: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3 5 21M16 3l3 18M12 4v3M12 10.5v3M12 17v3"/></svg>',
+    highway: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 3 3 21M17 3l4 18M10.5 3 9.5 21M13.5 3l1 18"/></svg>',
+    fort: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 21V9h3V5h3v4h2V5h2v4h2V5h3v4h3v12zM10 21v-5h4v5"/></svg>',
+    globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"/></svg>',
+    supply: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M2 6h11v10H2zM13 9h4.5l3.5 3.5V16h-8"/><circle cx="6" cy="18" r="2"/><circle cx="17" cy="18" r="2"/></svg>'
+};
+const TOOLS = [
+    { id: 'command', label: 'Mando', key: '1', icon: ICONS.command, title: 'Seleccionar y dar órdenes' },
+    { id: 'road', label: 'Carretera', key: '2', icon: ICONS.road, cls: 1, title: `Construir carretera (${CONFIG.ROAD_COST} de oro por tramo)` },
+    { id: 'highway', label: 'Autopista', key: '3', icon: ICONS.highway, cls: 2, title: `Convertir en autopista (+${CONFIG.HIGHWAY_COST} de oro por tramo)` },
+    { id: 'fort', label: 'Fortificar', key: '4', icon: ICONS.fort, title: `Fortificar casillas (${CONFIG.FORT_COST} de oro cada una, ${CONFIG.FORT_TURNS} turnos)` }
+];
+
+// Símbolo OTAN de cada tipo de unidad (SVG para el panel; el mapa lo dibuja en canvas).
+const NATO_MARK = {
+    infantry: '<path d="M1 1l24 14M25 1 1 15" stroke="#151a12" stroke-width="1.4"/>',
+    tank: '<ellipse cx="13" cy="8" rx="7" ry="3.6" fill="none" stroke="#151a12" stroke-width="1.4"/>',
+    artillery: '<circle cx="13" cy="8" r="2.7" fill="#151a12"/>'
+};
+const unitIcon = (type, color) =>
+    `<svg class="nato" viewBox="0 0 26 16" aria-hidden="true"><rect x="1" y="1" width="24" height="14" fill="${color}" stroke="#151a12" stroke-width="1.5"/>${NATO_MARK[type]}</svg>`;
+// Tipo que más pesa en un ejército: decide el símbolo de su ficha en el mapa.
+const dominantType = u => UNIT_KEYS.reduce((best, k) => (u[k] * CONFIG.TYPES[k].cost > u[best] * CONFIG.TYPES[best].cost ? k : best), 'infantry');
+const isMobile = () => matchMedia('(max-width: 760px)').matches;
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+class MapView {
+    constructor(game, canvas) {
+        this.game = game;
+        this.canvas = canvas;
+        this.ctx = canvas.getContext('2d');
+        this.scale = 1; this.ox = 0; this.oy = 0;
+        this.builtVersion = -1;
+        this.builtRoads = -1;
+        this.builtForts = -1;
+        this.showSupply = false;
+        this.highlight = null;   // { moves:Set, attacks:Set }
+        this.preview = null;     // obra en curso de trazar
+        this.selectedCell = -1;
+        this.hoverCell = -1;
+        this.hoverNation = -1;
+        this.buildStatic();
+        this.resize();
+        this.fit();
+        new ResizeObserver(() => { this.resize(); this.draw(); }).observe(canvas.parentElement);
+    }
+
+    resize() {
+        const r = this.canvas.parentElement.getBoundingClientRect();
+        this.dpr = Math.min(2, window.devicePixelRatio || 1);   // más de 2 no se nota y en el móvil cuesta fluidez
+        this.w = r.width; this.h = r.height;
+        this.canvas.width = Math.round(r.width * this.dpr);
+        this.canvas.height = Math.round(r.height * this.dpr);
+    }
+
+    // Encaja Europa en el hueco que dejan libre los paneles flotantes (padLeft píxeles a la izquierda).
+    fit(padLeft = 0, padBottom = 0) {
+        const w = this.w - padLeft, hh = this.h - padBottom;
+        this.scale = Math.min(w / G.width, hh / G.height) * 0.98;
+        this.ox = padLeft + (w - G.width * this.scale) / 2 - (G.x0 - G.W / 2) * this.scale;
+        this.oy = (hh - G.height * this.scale) / 2 - (G.y0 - G.S) * this.scale;
+    }
+
+    toWorld(px, py) { return [(px - this.ox) / this.scale, (py - this.oy) / this.scale]; }
+    toScreen(x, y) { return [x * this.scale + this.ox, y * this.scale + this.oy]; }
+    cellAtScreen(px, py) { const [x, y] = this.toWorld(px, py); return G.cellAt(x, y); }
+
+    zoomAt(px, py, factor) {
+        const hexPx = G.S * this.scale * factor;
+        if (hexPx < 1.5 || hexPx > 60) return;
+        const [x, y] = this.toWorld(px, py);
+        this.scale *= factor;
+        this.ox = px - x * this.scale;
+        this.oy = py - y * this.scale;
+    }
+
+    // yFrac: altura de pantalla donde queda la casilla (en el móvil, por encima de la ficha inferior).
+    centerOn(cell, hexPx = 8, yFrac = isMobile() ? 0.27 : 0.5) {
+        this.scale = Math.max(this.scale, hexPx / G.S);
+        this.ox = this.w / 2 - G.cx[cell] * this.scale;
+        this.oy = this.h * yFrac - G.cy[cell] * this.scale;
+    }
+
+    hexPath(path, i, r = 1) {
+        const x = G.cx[i], y = G.cy[i], k = G.corners;
+        path.moveTo(x + k[0][0] * r, y + k[0][1] * r);
+        for (let j = 1; j < 6; j++) path.lineTo(x + k[j][0] * r, y + k[j][1] * r);
+        path.closePath();
+    }
+
+    edge(path, i, d) {
+        const x = G.cx[i], y = G.cy[i], a = G.corners[d], b = G.corners[(d + 1) % 6];
+        path.moveTo(x + a[0], y + a[1]);
+        path.lineTo(x + b[0], y + b[1]);
+    }
+
+    buildStatic() {
+        this.provBorders = new Path2D();
+        this.coast = new Path2D();
+        for (const i of G.land) {
+            for (let d = 0; d < 6; d++) {
+                const j = G.nb[i * 6 + d];
+                if (j < 0 || !isLand(j)) this.edge(this.coast, i, d);
+                else if (d < 3 && G.prov[j] !== G.prov[i]) this.edge(this.provBorders, i, d);
+            }
+        }
+    }
+
+    buildRoads() {
+        const road = this.game.road;
+        this.roads = { 1: new Path2D(), 2: new Path2D() };
+        for (const i of G.land) {
+            for (let d = 0; d < 3; d++) {
+                const cls = road[i * 6 + d];
+                if (!cls) continue;
+                const j = G.nb[i * 6 + d];
+                this.roads[cls].moveTo(G.cx[i], G.cy[i]);
+                this.roads[cls].lineTo(G.cx[j], G.cy[j]);
+            }
+        }
+        this.builtRoads = this.game.roadVersion;
+    }
+
+    // Fortificaciones: relleno de piedra y muro en el contorno de cada bloque; obras en curso, discontinuas.
+    buildForts() {
+        const g = this.game;
+        this.fortFill = new Path2D();
+        this.walls = new Path2D();
+        this.works = new Path2D();
+        for (const i of G.land) {
+            if (!g.fort[i]) continue;
+            this.hexPath(this.fortFill, i);
+            for (let d = 0; d < 6; d++) {
+                const j = G.nb[i * 6 + d];
+                if (j < 0 || !g.fort[j]) this.edge(this.walls, i, d);
+            }
+        }
+        for (const c of g.fortWork.keys()) this.hexPath(this.works, c, 0.8);
+        this.builtForts = g.fortVersion;
+    }
+
+    buildDynamic() {
+        const g = this.game;
+        this.fills = new Map();
+        this.occupied = new Path2D();
+        this.borders = new Path2D();
+        const sums = g.nations.map(() => [0, 0, 0]);
+        for (const i of G.land) {
+            const o = g.owner[i];
+            if (!this.fills.has(o)) this.fills.set(o, new Path2D());
+            this.hexPath(this.fills.get(o), i);
+            if (o !== PROVINCES[G.prov[i]].country) this.hexPath(this.occupied, i);
+            for (let d = 0; d < 3; d++) {
+                const j = G.nb[i * 6 + d];
+                if (j >= 0 && isLand(j) && g.owner[j] !== o) this.edge(this.borders, i, d);
+            }
+            sums[o][0] += G.cx[i]; sums[o][1] += G.cy[i]; sums[o][2]++;
+        }
+        this.labels = sums.map(([x, y, n], id) => (n ? { id, x: x / n, y: y / n, n } : null)).filter(Boolean);
+        this.nationPaths = new Map();
+        this.builtVersion = g.version;
+    }
+
+    nationPath(id) {
+        if (!this.nationPaths.has(id)) {
+            const p = new Path2D();
+            for (const i of G.land) if (this.game.owner[i] === id) this.hexPath(p, i);
+            this.nationPaths.set(id, p);
+        }
+        return this.nationPaths.get(id);
+    }
+
+    draw() {
+        const g = this.game, ctx = this.ctx, s = this.scale, dpr = this.dpr;
+        if (this.builtVersion !== g.version) this.buildDynamic();
+        if (this.builtRoads !== g.roadVersion) this.buildRoads();
+        if (this.builtForts !== g.fortVersion) this.buildForts();
+        const hexPx = G.S * s;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.fillStyle = '#16232b';
+        ctx.fillRect(0, 0, this.w, this.h);
+
+        ctx.setTransform(dpr * s, 0, 0, dpr * s, dpr * this.ox, dpr * this.oy);
+        ctx.globalAlpha = 0.86;
+        for (const [o, path] of this.fills) { ctx.fillStyle = g.nations[o].color; ctx.fill(path); }
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = 'rgba(0,0,0,0.32)';
+        ctx.fill(this.occupied);
+        if (this.hoverNation >= 0) { ctx.fillStyle = 'rgba(255,255,255,0.28)'; ctx.fill(this.nationPath(this.hoverNation)); }
+
+        if (this.showSupply && g.player !== null) {
+            const sup = g.supplyMap(g.player), out = new Path2D();
+            for (const i of G.land) if (g.owner[i] === g.player && sup[i] < 0) this.hexPath(out, i);
+            ctx.fillStyle = 'rgba(255,150,30,0.5)'; ctx.fill(out);
+        }
+        if (this.highlight) {
+            const mv = new Path2D(), at = new Path2D();
+            for (const c of this.highlight.moves) this.hexPath(mv, c);
+            for (const c of this.highlight.attacks) this.hexPath(at, c);
+            ctx.fillStyle = 'rgba(143,209,107,0.42)'; ctx.fill(mv);
+            ctx.fillStyle = 'rgba(224,90,71,0.7)'; ctx.fill(at);
+        }
+
+        if (hexPx >= 3) {
+            ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+            ctx.lineWidth = 0.7 / s;
+            ctx.stroke(this.provBorders);
+        }
+        ctx.strokeStyle = '#5c8197'; ctx.lineWidth = 1 / s; ctx.stroke(this.coast);
+        ctx.strokeStyle = INK; ctx.lineWidth = 1.9 / s; ctx.stroke(this.borders);
+
+        // Carreteras
+        ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        ctx.strokeStyle = 'rgba(21,26,18,0.6)'; ctx.lineWidth = Math.min(3.6, 1.4 + hexPx * 0.12) / s;
+        ctx.stroke(this.roads[1]);
+        ctx.strokeStyle = '#efe9d6'; ctx.lineWidth = Math.min(1.8, 0.6 + hexPx * 0.07) / s;
+        ctx.stroke(this.roads[1]);
+        ctx.strokeStyle = 'rgba(21,26,18,0.7)'; ctx.lineWidth = Math.min(5, 2 + hexPx * 0.16) / s;
+        ctx.stroke(this.roads[2]);
+        ctx.strokeStyle = SIGNAL; ctx.lineWidth = Math.min(2.8, 1 + hexPx * 0.1) / s;
+        ctx.stroke(this.roads[2]);
+
+        // Fortificaciones
+        ctx.fillStyle = 'rgba(214,203,178,0.5)'; ctx.fill(this.fortFill);
+        ctx.strokeStyle = '#2b2620'; ctx.lineWidth = 3.8 / s; ctx.stroke(this.walls);
+        ctx.strokeStyle = '#e3d9c0'; ctx.lineWidth = 2.1 / s; ctx.stroke(this.walls);
+        ctx.setLineDash([3 / s, 2 / s]);
+        ctx.strokeStyle = '#e3d9c0'; ctx.lineWidth = 1.5 / s; ctx.stroke(this.works);
+        ctx.setLineDash([]);
+
+        if (this.preview) {
+            const p = new Path2D();
+            const ok = this.preview.affordable ? '#8fd16b' : '#e05a47';
+            if (this.preview.cls === 'fort') {
+                for (const c of this.preview.path) this.hexPath(p, c);
+                ctx.fillStyle = this.preview.affordable ? 'rgba(143,209,107,0.35)' : 'rgba(224,90,71,0.4)';
+                ctx.fill(p);
+                ctx.strokeStyle = ok; ctx.lineWidth = 1.5 / s; ctx.stroke(p);
+            } else {
+                this.preview.path.forEach((c, i) => (i ? p.lineTo(G.cx[c], G.cy[c]) : p.moveTo(G.cx[c], G.cy[c])));
+                ctx.setLineDash([5 / s, 3 / s]);
+                ctx.strokeStyle = ok;
+                ctx.lineWidth = 3.2 / s;
+                ctx.stroke(p);
+                ctx.setLineDash([]);
+            }
+        }
+
+        if (this.hoverCell >= 0 && isLand(this.hoverCell) && this.hoverCell !== this.selectedCell) {
+            const p = new Path2D(); this.hexPath(p, this.hoverCell);
+            ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1.4 / s; ctx.stroke(p);
+        }
+        if (this.selectedCell >= 0) {
+            const p = new Path2D(); this.hexPath(p, this.selectedCell);
+            ctx.strokeStyle = INK; ctx.lineWidth = 4.5 / s; ctx.stroke(p);
+            ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.2 / s; ctx.stroke(p);
+        }
+
+        // Capa en píxeles de pantalla: recursos, ciudades, ejércitos, rótulos.
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        const visible = (x, y, m = 40) => x > -m && y > -m && x < this.w + m && y < this.h + m;
+        const font = (size, weight = 600) => `${weight} ${size}px 'Barlow Semi Condensed', Bahnschrift, 'Arial Narrow', sans-serif`;
+
+        for (const r of RESOURCES) {
+            const [x, y] = this.toScreen(G.cx[r.cell], G.cy[r.cell]);
+            if (!visible(x, y)) continue;
+            const rad = Math.max(4, Math.min(11, hexPx * 0.9));
+            ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2);
+            ctx.fillStyle = CONFIG.RESOURCE_COLOR[r.type]; ctx.fill();
+            ctx.lineWidth = 1.5; ctx.strokeStyle = g.nations[g.owner[r.cell]].color; ctx.stroke();
+            if (rad >= 6) {
+                ctx.font = `${Math.round(rad * 1.2)}px sans-serif`;
+                ctx.fillStyle = '#fff';
+                ctx.fillText(CONFIG.RESOURCE_ICON[r.type], x, y + 1);
+            }
+        }
+
+        for (const p of PROVINCES) {
+            const [x, y] = this.toScreen(G.cx[p.city], G.cy[p.city]);
+            if (!visible(x, y)) continue;
+            if (CAPITAL_OF[p.city] >= 0) {
+                ctx.font = `bold ${Math.max(11, Math.min(17, hexPx * 1.6))}px sans-serif`;
+                ctx.lineWidth = 3; ctx.strokeStyle = INK; ctx.strokeText('★', x, y);
+                ctx.fillStyle = SIGNAL; ctx.fillText('★', x, y);
+            } else if (hexPx >= 2.5) {
+                ctx.beginPath(); ctx.arc(x, y, Math.max(1.6, Math.min(3.5, hexPx * 0.35)), 0, Math.PI * 2);
+                ctx.fillStyle = '#fff'; ctx.fill(); ctx.lineWidth = 1; ctx.strokeStyle = INK; ctx.stroke();
+            }
+        }
+
+        // Ejércitos: fichas con símbolo OTAN del tipo dominante y el número de unidades.
+        const big = hexPx >= 6;
+        for (const a of g.armies.values()) {
+            if (g.armyOn(a.cell) !== a) continue;
+            const [x, y] = this.toScreen(G.cx[a.cell], G.cy[a.cell]);
+            if (!visible(x, y)) continue;
+            const mine = a.owner === g.player;
+            const spent = mine && g.mp(a) === 0;
+            const noSupply = mine && !g.inSupply(a.owner, a.cell);
+            const selected = a.cell === this.selectedCell;
+            if (!big) {
+                ctx.fillStyle = g.nations[a.owner].color;
+                ctx.fillRect(x - 3, y - 3, 6, 6);
+                ctx.lineWidth = 1; ctx.strokeStyle = INK; ctx.strokeRect(x - 3, y - 3, 6, 6);
+                continue;
+            }
+            const w = Math.max(22, Math.min(40, hexPx * 2.2)), hh = w * 0.62;
+            const x0 = x - w / 2, y0 = y - hh / 2 - hexPx * 0.12;
+            ctx.globalAlpha = spent ? 0.55 : 1;
+            ctx.fillStyle = g.nations[a.owner].color;
+            ctx.fillRect(x0, y0, w, hh);
+            ctx.strokeStyle = INK; ctx.lineWidth = 1.4;
+            const type = dominantType(a.units);
+            ctx.beginPath();
+            if (type === 'infantry') { ctx.moveTo(x0, y0); ctx.lineTo(x0 + w, y0 + hh); ctx.moveTo(x0 + w, y0); ctx.lineTo(x0, y0 + hh); ctx.stroke(); }
+            else if (type === 'tank') { ctx.ellipse(x, y0 + hh / 2, w * 0.28, hh * 0.24, 0, 0, Math.PI * 2); ctx.stroke(); }
+            else { ctx.arc(x, y0 + hh / 2, hh * 0.17, 0, Math.PI * 2); ctx.fillStyle = INK; ctx.fill(); }
+            ctx.lineWidth = selected ? 3 : noSupply ? 2.4 : 1.6;
+            ctx.strokeStyle = selected ? '#fff' : noSupply ? '#ff9f1c' : INK;
+            ctx.strokeRect(x0, y0, w, hh);
+            // número de unidades
+            const n = String(countUnits(a.units)), r = Math.max(7, hh * 0.42);
+            const bx = x0 + w, by = y0;
+            ctx.beginPath(); ctx.arc(bx, by, r + (n.length > 2 ? 2 : 0), 0, Math.PI * 2);
+            ctx.fillStyle = mine ? SIGNAL : '#ebe7d8'; ctx.fill();
+            ctx.lineWidth = 1.4; ctx.strokeStyle = INK; ctx.stroke();
+            ctx.fillStyle = INK; ctx.font = font(Math.round(r * (n.length > 2 ? 0.95 : 1.15)), 700);
+            ctx.fillText(n, bx, by + 1);
+            ctx.globalAlpha = 1;
+        }
+
+        if (hexPx >= 7) {
+            ctx.font = font(Math.round(Math.min(15, 10 + hexPx * 0.2)));
+            ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(21,26,18,0.9)'; ctx.fillStyle = '#f3efe2';
+            for (const p of PROVINCES) {
+                const [x, y] = this.toScreen(G.cx[p.city], G.cy[p.city]);
+                if (!visible(x, y, 100)) continue;
+                ctx.strokeText(p.cityName, x, y + hexPx * 1.1 + 7);
+                ctx.fillText(p.cityName, x, y + hexPx * 1.1 + 7);
+            }
+        } else {
+            // Nombres de país, de mayor a menor; se omite el que se solaparía con uno ya dibujado.
+            const placed = [];
+            for (const l of [...this.labels].sort((a, b) => b.n - a.n)) {
+                if (l.n < 25) continue;
+                const [x, y] = this.toScreen(l.x, l.y);
+                if (!visible(x, y, 100)) continue;
+                const size = Math.max(10, Math.min(20, Math.sqrt(l.n) * hexPx * 0.38));
+                ctx.font = font(Math.round(size), 700);
+                const t = g.nations[l.id].name;
+                const w = ctx.measureText(t).width / 2 + 2, h = size / 2 + 1;
+                if (placed.some(r => Math.abs(r.x - x) < r.w + w && Math.abs(r.y - y) < r.h + h)) continue;
+                placed.push({ x, y, w, h });
+                ctx.lineWidth = 3.5; ctx.strokeStyle = 'rgba(21,26,18,0.85)'; ctx.fillStyle = '#fff';
+                ctx.strokeText(t, x, y); ctx.fillText(t, x, y);
+            }
+        }
+    }
+}
+
+class GameUI {
+    constructor(game) {
+        this.game = game;
+        this.view = new MapView(game, $('#map'));
+        this.selected = -1;
+        this.send = emptyUnits();
+        this.reachInfo = null;
+        this.choice = null;          // nación elegida antes de empezar
+        this.tool = 'command';
+        this.anchor = -1;            // origen de la obra que se está trazando
+        this.tab = 'paises';
+        this.drawerOpen = !isMobile();
+        this.pending = null;         // obra trazada con el dedo, a la espera de confirmar
+        this.touch = false;          // último puntero usado: dedo o ratón
+        this.installPrompt = null;
+        window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); this.installPrompt = e; this.renderTop(); });
+        window.addEventListener('appinstalled', () => { this.installPrompt = null; this.renderTop(); });
+        this.focusNation = null;     // ficha de país abierta en el panel derecho
+        this.filter = '';
+        this.blocName = '';
+        this.blocSecret = false;
+        this.seenLog = 0;
+
+        this.bindMap();
+        document.addEventListener('click', e => this.onAction(e));
+        document.addEventListener('input', e => this.onInput(e));
+        document.addEventListener('change', e => this.onChange(e));
+        document.addEventListener('keydown', e => this.onKey(e));
+        $('#import-file').addEventListener('change', async e => {
+            const file = e.target.files[0];
+            e.target.value = '';
+            if (!file) return;
+            try { this.setGame(GameEngine.load(JSON.parse(await file.text()))); this.game.log(`Partida importada de ${file.name}.`); }
+            catch (err) { this.game.log(`No se pudo importar: ${err.message}`); }
+            $('#game-dialog').close();
+            this.render();
+        });
+        if (game.player === null && isMobile()) this.view.fit(0, this.view.h * 0.64);
+        else if (game.player === null && this.view.w > 900) this.view.fit(410);
+        $('#legend').innerHTML = `<summary>Leyenda</summary><ul>
+            <li>${unitIcon('infantry', '#9aa57a')} Infantería &nbsp;${unitIcon('tank', '#9aa57a')} Blindados &nbsp;${unitIcon('artillery', '#9aa57a')} Artillería</li>
+            <li><i class="line" style="border-top:3px solid ${SIGNAL}"></i>Autopista: ⅓ de punto por tramo</li>
+            <li><i class="line" style="border-top:2px solid #efe9d6"></i>Carretera: ½ punto por tramo</li>
+            <li><i class="line" style="border-top:3px solid #e3d9c0"></i>Fortificación</li>
+            <li>★ capital &nbsp; ● ciudad &nbsp; Más oscuro: territorio ocupado</li>
+            <li>${Object.entries(E.resourceTypes).map(([k, name]) => `${CONFIG.RESOURCE_ICON[k]} ${name}`).join(' &nbsp;')}</li></ul>`;
+        this.render();
+    }
+
+    // Sustituye la partida en curso (al cargar).
+    setGame(g) {
+        game = g;
+        this.game = g;
+        Object.assign(this.view, { game: g, builtVersion: -1, builtRoads: -1, builtForts: -1, preview: null, hoverNation: -1 });
+        this.tool = 'command';
+        this.anchor = -1;
+        this.choice = g.player;
+        this.focusNation = null;
+        this.seenLog = g.logs.length;
+        if (g.player !== null) this.view.centerOn(g.nations[g.player].capitalCell, 5);
+        this.select(g.player !== null ? g.nations[g.player].capitalCell : -1);
+    }
+
+    // --- Mapa ---
+    // Ratón y pantalla táctil: arrastrar mueve el mapa, la rueda o el pellizco hacen zoom, un toque o clic selecciona.
+    bindMap() {
+        const c = this.view.canvas;
+        const pointers = new Map();
+        let drag = null, pinch = null;
+        const startDrag = (x, y, moved = false) => { drag = { x, y, ox: this.view.ox, oy: this.view.oy, moved }; };
+        c.addEventListener('pointerdown', e => {
+            if (e.pointerType === 'mouse' && e.button !== 0) return;
+            c.setPointerCapture(e.pointerId);
+            this.touch = e.pointerType !== 'mouse';
+            pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            if (pointers.size === 1) startDrag(e.clientX, e.clientY);
+            else if (pointers.size === 2) {
+                const [a, b] = [...pointers.values()];
+                pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), scale: this.view.scale };
+                if (drag) drag.moved = true;
+            }
+        });
+        c.addEventListener('pointermove', e => {
+            if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            if (pinch && pointers.size === 2) {
+                const [a, b] = [...pointers.values()];
+                const r = c.getBoundingClientRect();
+                const target = pinch.scale * Math.hypot(a.x - b.x, a.y - b.y) / pinch.d;
+                this.view.zoomAt((a.x + b.x) / 2 - r.left, (a.y + b.y) / 2 - r.top, target / this.view.scale);
+                this.requestDraw();
+                return;
+            }
+            if (drag && pointers.has(e.pointerId)) {
+                const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+                if (Math.abs(dx) + Math.abs(dy) > (e.pointerType === 'mouse' ? 4 : 10)) drag.moved = true;
+                if (drag.moved) {
+                    c.classList.add('dragging');
+                    this.view.ox = drag.ox + dx; this.view.oy = drag.oy + dy;
+                    this.requestDraw();
+                }
+            }
+            if (e.pointerType === 'mouse') this.hover(e);
+        });
+        const end = e => {
+            const tap = drag && !drag.moved && !pinch && pointers.size === 1 && e.type === 'pointerup';
+            pointers.delete(e.pointerId);
+            if (pointers.size < 2) pinch = null;
+            if (pointers.size === 1) { const [p] = pointers.values(); startDrag(p.x, p.y, true); }   // tras el pellizco sigue arrastrando
+            if (pointers.size === 0) {
+                if (tap) this.clickCell(this.cellFromEvent(e));
+                drag = null;
+                c.classList.remove('dragging');
+            }
+        };
+        c.addEventListener('pointerup', end);
+        c.addEventListener('pointercancel', end);
+        c.addEventListener('contextmenu', e => { e.preventDefault(); this.cancel(); });
+        c.addEventListener('wheel', e => {
+            e.preventDefault();
+            const r = c.getBoundingClientRect();
+            this.view.zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.2 : 1 / 1.2);
+            this.requestDraw();
+        }, { passive: false });
+        c.addEventListener('pointerleave', e => {
+            if (e.pointerType !== 'mouse') return;
+            $('#tooltip').hidden = true;
+            this.view.hoverCell = -1;
+            this.view.hoverNation = -1;
+            this.requestDraw();
+        });
+    }
+
+    cellFromEvent(e) {
+        const r = this.view.canvas.getBoundingClientRect();
+        return this.view.cellAtScreen(e.clientX - r.left, e.clientY - r.top);
+    }
+
+    requestDraw() {
+        if (this.drawPending) return;
+        this.drawPending = true;
+        requestAnimationFrame(() => { this.drawPending = false; this.view.draw(); });
+    }
+
+    toolDef() { return TOOLS.find(t => t.id === this.tool); }
+
+    planTo(cell) {
+        const g = this.game, t = this.toolDef();
+        if (this.tool === 'command' || this.anchor < 0 || cell < 0 || !isLand(cell) || g.owner[cell] !== g.player) return null;
+        if (this.tool === 'fort') return g.planFort(g.player, this.anchor, cell);
+        if (cell === this.anchor) return null;
+        return g.planRoad(g.player, this.anchor, c => c === cell, t.cls);
+    }
+
+    hover(e) {
+        const g = this.game, cell = this.cellFromEvent(e), tip = $('#tooltip');
+        if (cell !== this.view.hoverCell) {
+            this.view.hoverCell = cell;
+            if (this.tool !== 'command') {
+                const plan = this.planTo(cell);
+                this.view.preview = plan ? { ...plan, affordable: plan.cost <= g.nations[g.player].gold } : null;
+            }
+            const hn = g.player === null && cell >= 0 && isLand(cell) ? g.owner[cell] : -1;
+            this.view.hoverNation = hn;
+            this.requestDraw();
+        }
+        if (cell < 0 || !isLand(cell)) { tip.hidden = true; return; }
+        const p = PROVINCES[G.prov[cell]], o = g.owner[cell], a = g.armyOn(cell), res = RESOURCE_AT.get(cell);
+        const lines = [`<b>${esc(p.name)}</b>${o !== p.country ? ` <span class="muted">(de ${g.nm(p.country)})</span>` : ''}`,
+            `<span style="color:${g.nations[o].color}">■</span> ${g.nm(o)}${g.player !== null && o !== g.player ? ` ${this.relationChip(o)}` : ''}`];
+        if (CITY_OF[cell] >= 0) lines.push(`${CAPITAL_OF[cell] >= 0 ? '★ Capital' : '● Ciudad'}: ${esc(p.cityName)}`);
+        if (res) lines.push(`${CONFIG.RESOURCE_ICON[res.type]} ${res.typeName} de ${esc(res.name)}: +${res.value} de oro`);
+        if (g.fort[cell]) lines.push(`Fortificada: defensa ×${CONFIG.FORT_DEFENSE}`);
+        else if (g.fortWork.has(cell)) lines.push(`Fortificando: ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}`);
+        if (a) lines.push(`Ejército de ${g.nm(a.owner)}: ${this.unitsLong(a.units)}`);
+        if (g.player !== null && o === g.player && !g.inSupply(g.player, cell)) lines.push('<span style="color:#ffb347">Sin suministro</span>');
+        if (this.reachInfo?.attacks.has(cell)) lines.push('<b style="color:#ff8a78">Clic para atacar</b>');
+        else if (this.reachInfo?.moves.has(cell)) lines.push('<b style="color:#a8e38a">Clic para mover aquí</b>');
+        const prev = this.view.preview;
+        if (prev && cell === this.view.hoverCell) {
+            const what = prev.cls === 'fort' ? `Fortificar ${plural(prev.cells.length, 'casilla', 'casillas')}` : `${plural(prev.path.length - 1, 'tramo', 'tramos')} de ${prev.cls === 2 ? 'autopista' : 'carretera'}`;
+            lines.push(`<b style="color:${prev.affordable ? '#a8e38a' : '#ff8a78'}">${what}: ${prev.cost} de oro${prev.affordable ? '' : ' (no te alcanza)'}</b>`);
+        }
+        tip.innerHTML = lines.join('<br>');
+        tip.hidden = false;
+        const box = this.view.canvas.parentElement.getBoundingClientRect();
+        const x = e.clientX - box.left + 16, y = e.clientY - box.top + 16;
+        tip.style.left = `${Math.min(x, box.width - tip.offsetWidth - 8)}px`;
+        tip.style.top = `${Math.min(y, box.height - tip.offsetHeight - 8)}px`;
+    }
+
+    clickCell(cell) {
+        const g = this.game;
+        if (cell < 0 || !isLand(cell)) { if (this.tool === 'command') this.select(-1); return; }
+        if (g.player === null) { this.choice = g.owner[cell]; this.render(); return; }
+        if (g.over) return;
+        if (this.tool !== 'command') { this.buildClick(cell); return; }
+        const army = this.selectedArmy();
+        if (army && this.reachInfo && (this.reachInfo.attacks.has(cell) || this.reachInfo.moves.has(cell))) {
+            const result = g.playerMove(army, copyUnits(this.send), cell);
+            const next = result && g.armies.has(result.id) && result.owner === g.player ? result.cell : cell;
+            this.select(next);
+            return;
+        }
+        this.select(cell === this.selected ? -1 : cell);
+    }
+
+    buildClick(cell) {
+        const g = this.game;
+        if (g.owner[cell] !== g.player) { this.flash('Solo puedes construir en tu territorio.'); return; }
+        const fort = this.tool === 'fort';
+        this.pending = null;
+        if (this.anchor < 0 || (cell === this.anchor && !fort)) {
+            this.anchor = cell;
+        } else {
+            const plan = this.planTo(cell);
+            if (!plan) this.flash('No hay camino por tu territorio hasta esa casilla.');
+            else if (this.touch) {
+                // Sin ratón no hay vista previa al pasar por encima: se enseña el trazado y se pide confirmación.
+                this.pending = { ...plan, to: cell };
+                this.view.preview = { ...plan, affordable: plan.cost <= g.nations[g.player].gold };
+                this.selected = cell;
+                this.render();
+                return;
+            }
+            else if (fort ? g.playerFortify(plan) : g.playerBuild(plan)) this.anchor = cell;
+        }
+        this.view.preview = null;
+        this.view.hoverCell = -2;
+        this.selected = cell;
+        this.render();
+    }
+
+    confirmBuild() {
+        const g = this.game, plan = this.pending;
+        if (!plan) return;
+        if (plan.cls === 'fort' ? g.playerFortify(plan) : g.playerBuild(plan)) this.anchor = plan.to;
+        this.pending = null;
+        this.view.preview = null;
+        this.render();
+    }
+
+    flash(msg) { this.game.log(msg); this.hintOverride = msg; this.render(); }
+
+    setTool(id) {
+        if (this.game.player === null || this.game.over) return;
+        this.tool = id;
+        this.anchor = -1;
+        this.pending = null;
+        this.view.preview = null;
+        this.view.canvas.classList.toggle('building', id !== 'command');
+        this.render();
+    }
+
+    cancel() {
+        if (this.pending) { this.pending = null; this.view.preview = null; this.render(); return; }
+        if (this.tool !== 'command') {
+            if (this.anchor >= 0) { this.anchor = -1; this.view.preview = null; this.render(); }
+            else this.setTool('command');
+        } else this.select(-1);
+    }
+
+    selectedArmy() {
+        if (this.selected < 0 || this.tool !== 'command') return null;
+        const a = this.game.armyOn(this.selected);
+        return a && a.owner === this.game.player && !this.game.over ? a : null;
+    }
+
+    select(cell) {
+        this.selected = cell;
+        const a = this.selectedArmy();
+        this.send = a ? copyUnits(a.units) : emptyUnits();
+        this.render();
+    }
+
+    nextArmy() {
+        const g = this.game;
+        if (g.player === null || g.over) return;
+        const ready = [...g.armies.values()].filter(a => a.owner === g.player && g.armyOn(a.cell) === a && g.mp(a) > 0).sort((x, y) => x.id - y.id);
+        if (!ready.length) { this.flash('Ningún ejército puede moverse más este turno.'); return; }
+        const cur = g.armyOn(this.selected);
+        const next = ready.find(a => cur && a.id > cur.id) ?? ready[0];
+        this.setTool('command');
+        this.view.centerOn(next.cell, 9);
+        this.select(next.cell);
+    }
+
+    updateReach() {
+        const g = this.game, a = this.selectedArmy();
+        this.reachInfo = null;
+        if (a) {
+            for (const k of UNIT_KEYS) this.send[k] = Math.min(this.send[k], a.units[k]);
+            if (countUnits(this.send) > 0) {
+                const r = g.reach(a.owner, a.cell, g.moveBudget(a.owner, a.cell, this.send, a.used));
+                this.reachInfo = { moves: g.destinations(r), attacks: new Set(r.attacks.keys()) };
+            }
+        }
+        this.view.highlight = this.reachInfo;
+        this.view.selectedCell = this.selected;
+    }
+
+    // --- Entrada ---
+    onAction(e) {
+        const b = e.target.closest('[data-action]');
+        if (!b || b.disabled) return;
+        const g = this.game, d = b.dataset;
+        const p = this.selected >= 0 ? PROVINCES[G.prov[this.selected]] : null;
+        switch (d.action) {
+            case 'setting': g.configure({ ...g.settings, [d.key]: d.key === 'victory' ? +d.value : d.value }); break;
+            case 'start':
+                if (this.choice === null) return;
+                g.start(this.choice);
+                this.seenLog = g.logs.length;
+                this.view.hoverNation = -1;
+                this.view.centerOn(g.nations[this.choice].capitalCell, 5);
+                this.select(g.nations[this.choice].capitalCell);
+                return;
+            case 'end-turn':
+                if (g.player === null || g.over) return;
+                this.setTool('command');
+                g.endTurn();
+                writeSave('auto', g);
+                this.select(this.selected);
+                return;
+            case 'next-army': this.nextArmy(); return;
+            case 'install':
+                if (this.installPrompt) { this.installPrompt.prompt(); this.installPrompt.userChoice.finally(() => { this.installPrompt = null; this.renderTop(); }); }
+                return;
+            case 'confirm-build': this.confirmBuild(); return;
+            case 'cancel-build': this.cancel(); return;
+            case 'stop-build': this.setTool('command'); return;
+            case 'open-drawer': this.drawerOpen = true; break;
+            case 'tool': this.setTool(d.tool === this.tool && d.tool !== 'command' ? 'command' : d.tool); return;
+            case 'supply': this.view.showSupply = !this.view.showSupply; break;
+            case 'close-card': this.select(-1); return;
+            case 'step': {
+                const a = this.selectedArmy();
+                if (!a) return;
+                this.send[d.unit] = Math.max(0, Math.min(a.units[d.unit], this.send[d.unit] + +d.delta));
+                break;
+            }
+            case 'send-all': { const a = this.selectedArmy(); if (a) this.send = copyUnits(a.units); break; }
+            case 'recruit': g.playerRecruit(p, d.unit); break;
+            case 'diplo': g.playerDiplomacy(d.kind, +d.target); break;
+            case 'invite': g.playerInvite(+d.bloc, +d.target); break;
+            case 'accept': case 'reject': g.answerProposal(+d.index, d.action === 'accept'); break;
+            case 'tab': this.tab = d.tab; this.drawerOpen = true; this.focusNation = null; break;
+            case 'drawer': this.drawerOpen = !this.drawerOpen; break;
+            case 'nation': this.focusNation = +d.id; this.tab = 'paises'; this.drawerOpen = true; break;
+            case 'nation-back': this.focusNation = null; break;
+            case 'goto':
+                if (isMobile()) this.drawerOpen = false;
+                this.view.centerOn(+d.cell, 8); this.setTool('command'); this.select(+d.cell); return;
+            case 'bloc-create': g.playerCreateBloc(this.blocName, this.blocSecret); this.blocName = ''; this.blocSecret = false; break;
+            case 'bloc-invite': {
+                const sel = document.querySelector(`select[data-bloc-invite="${d.bloc}"]`);
+                if (sel && sel.value !== '') g.playerInvite(+d.bloc, +sel.value);
+                break;
+            }
+            case 'bloc-request': g.playerRequestJoin(+d.bloc); break;
+            case 'bloc-leave': g.playerLeaveBloc(+d.bloc); break;
+            case 'open-game': this.renderGameDialog(); $('#game-dialog').showModal(); return;
+            case 'close-game': $('#game-dialog').close(); return;
+            case 'save': {
+                const ok = writeSave(d.slot, g);
+                g.log(ok ? `Partida guardada en ${SLOTS[d.slot]}.` : 'No se pudo guardar: el navegador bloquea el almacenamiento. Usa «Exportar a archivo».');
+                this.renderGameDialog();
+                break;
+            }
+            case 'load': {
+                const save = readSaves()[d.slot];
+                if (!save) return;
+                try { this.setGame(GameEngine.load(save.data)); this.game.log(`Partida cargada de ${SLOTS[d.slot]}.`); }
+                catch (err) { g.log(`No se pudo cargar: ${err.message}`); }
+                $('#game-dialog').close();
+                this.render();
+                return;
+            }
+            case 'export': {
+                const blob = new Blob([JSON.stringify(g.serialize())], { type: 'application/json' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `nanwar-${g.nations[g.player].key}-turno${g.turn}.json`;
+                a.click();
+                setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+                g.log(`Partida exportada a ${a.download}.`);
+                break;
+            }
+            case 'import': $('#import-file').click(); return;
+            case 'restart': location.href = location.pathname; return;
+            default: return;
+        }
+        this.render();
+    }
+
+    onInput(e) {
+        if (e.target.id === 'nation-search') { this.filter = e.target.value; this.renderNationList(); }
+        if (e.target.id === 'bloc-name') this.blocName = e.target.value;
+    }
+
+    onChange(e) {
+        if (e.target.id === 'nation-select') { this.choice = +e.target.value; this.render(); }
+        if (e.target.id === 'bloc-secret') this.blocSecret = e.target.checked;
+    }
+
+    onKey(e) {
+        if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || $('#game-dialog').open) return;
+        const g = this.game;
+        if (e.key === 'Escape') { this.cancel(); return; }
+        if (g.player === null || g.over) return;
+        const tool = TOOLS.find(t => t.key === e.key);
+        if (tool) { this.setTool(tool.id); return; }
+        if (e.key === 'l' || e.key === 'L') { this.view.showSupply = !this.view.showSupply; this.render(); }
+        else if (e.key === 'n' || e.key === 'N') this.nextArmy();
+        else if (e.key === 'Enter') { e.preventDefault(); $('#end-turn').click(); }
+    }
+
+    // --- Pintado ---
+    render() {
+        $('#tooltip').hidden = true;
+        this.updateReach();
+        this.view.draw();
+        this.renderTop();
+        this.renderTools();
+        this.renderSetup();
+        this.renderCard();
+        this.renderToasts();
+        this.renderDrawer();
+        this.renderHint();
+        this.renderConfirm();
+        this.renderOverlay();
+        this.hintOverride = null;
+    }
+
+    relationChip(id) {
+        const g = this.game;
+        if (!g.nations[id].alive) return '<span class="chip">eliminado</span>';
+        if (g.player === null) return '';
+        if (id === g.player) return '<span class="chip tu">tú</span>';
+        if (g.atWar(g.player, id)) return '<span class="chip guerra">en guerra</span>';
+        if (g.allied(g.player, id)) return '<span class="chip alianza">aliado</span>';
+        const r = g.rel(g.player, id);
+        return g.turn < r.truceUntil ? `<span class="chip">tregua hasta el turno ${r.truceUntil}</span>` : '<span class="chip">en paz</span>';
+    }
+    nationChip(id) { return `<span class="chip"><i style="background:${this.game.nations[id].color}"></i>${this.game.nm(id)}</span>`; }
+    unitsLong(u) {
+        return UNIT_KEYS.filter(k => u[k] > 0).map(k => `${u[k]} ${CONFIG.TYPES[k].name.toLowerCase()}`).join(', ') || 'sin tropas';
+    }
+
+    renderTop() {
+        const g = this.game, p0 = g.player;
+        $('#turn').textContent = g.turn;
+        $('#end-turn').disabled = p0 === null || g.over;
+        $('#btn-next').hidden = p0 === null;
+        $('#btn-install').hidden = !this.installPrompt;
+        if (p0 === null) {
+            $('#nation-name').textContent = 'NanWar';
+            $('#flag').style.background = SIGNAL;
+            $('#gold').textContent = '—';
+            return;
+        }
+        const n = g.nations[p0];
+        $('#nation-name').textContent = n.name;
+        $('#flag').style.background = n.color;
+        $('#gold').innerHTML = `${n.gold}<small>+${g.income(p0)}</small>`;
+    }
+
+    renderTools() {
+        const playing = this.game.player !== null && !this.game.over;
+        $('#tools').innerHTML = TOOLS.map(t => `
+            <button class="tool ${this.tool === t.id ? 'on' : ''}" data-action="tool" data-tool="${t.id}" title="${t.title}" ${playing ? '' : 'disabled'}>
+                ${t.icon}${t.label}<kbd>${t.key}</kbd></button>`).join('') + `<hr>
+            <button class="tool ${this.view.showSupply ? 'on' : ''}" data-action="supply" title="Mostrar en naranja tu territorio sin suministro" ${playing ? '' : 'disabled'}>
+                ${ICONS.supply}Logística<kbd>L</kbd></button>
+            <button class="tool mobile-only" data-action="open-drawer" ${playing ? '' : 'disabled'}>${ICONS.globe}Países</button>`;
+    }
+
+    renderSetup() {
+        const g = this.game, el = $('#setup');
+        el.hidden = g.player !== null;
+        if (g.player !== null) return;
+        const s = g.settings, c = this.choice;
+        const seg = (key, options, cur) => `<div class="seg" role="group">${(Array.isArray(options) ? options : Object.entries(options)).map(([v, label]) =>
+            `<button data-action="setting" data-key="${key}" data-value="${v}" class="${String(cur) === v ? 'on' : ''}">${label}</button>`).join('')}</div>`;
+        const sorted = [...g.nations].sort((a, b) => a.name.localeCompare(b.name, 'es'));
+        let pick = '<p class="note">Haz clic en un país del mapa o elígelo en la lista.</p>';
+        if (c !== null) {
+            const e = g.economy(c), lands = g.landCounts(), powers = g.powers();
+            pick = `<div class="pick" style="border-left-color:${g.nations[c].color}">
+                <h3>${g.nm(c)}</h3>
+                <dl class="facts" style="margin-top:8px">
+                    <dt>Capital</dt><dd>${esc(g.nations[c].capitalName)}</dd>
+                    <dt>Territorio</dt><dd>${plural(g.citiesOf(c).length, 'provincia', 'provincias')}, ${(100 * lands[c] / G.land.length).toFixed(1)} % de Europa</dd>
+                    <dt>Ejército</dt><dd>fuerza ${powers[c]}</dd>
+                    <dt>Economía</dt><dd>${e.total} de oro por turno, ${g.nations[c].gold} en el tesoro</dd>
+                    <dt>Recursos</dt><dd>${e.resources.map(r => `${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}`).join(', ') || 'ninguno'}</dd>
+                    <dt>Alianzas</dt><dd>${g.blocsOf(c).map(b => esc(b.name)).join(', ') || 'ninguna'}</dd>
+                </dl></div>
+                <button class="btn primary wide" style="margin-top:12px;padding:11px" data-action="start">Empezar con ${g.nm(c)}</button>`;
+        }
+        el.innerHTML = `
+            <h2>Nueva partida</h2>
+            <p class="lead">Europa, 2025. Elige cómo será la partida y qué país diriges.</p>
+            <div class="field"><span>Agresividad de los demás países</span>
+                ${seg('aggression', Object.fromEntries(Object.entries(AGGRESSION).map(([k, v]) => [k, v.name])), s.aggression)}
+                <p class="note">${g.ai.desc}</p></div>
+            <div class="field"><span>Alianzas al empezar</span>${seg('alliances', { reales: 'OTAN y OTSC', ninguna: 'Ninguna' }, s.alliances)}</div>
+            <div class="field"><span>Para ganar</span>${seg('victory', [['0.5', '50 % de Europa'], ['0.75', '75 %'], ['1', 'Toda Europa']], s.victory)}</div>
+            <div class="field"><span>Tu país</span>
+                <select id="nation-select"><option value="" ${c === null ? 'selected' : ''} disabled>Elige un país…</option>
+                ${sorted.map(n => `<option value="${n.id}" ${c === n.id ? 'selected' : ''}>${n.name}</option>`).join('')}</select>
+                ${pick}</div>
+            <button class="btn ghost wide" style="margin-top:12px" data-action="open-game">Cargar una partida guardada</button>
+            ${this.installPrompt ? '<button class="btn wide" style="margin-top:6px" data-action="install">Instalar NanWar en este dispositivo</button>' : ''}
+            ${isIOS() && !isStandalone() ? '<p class="note" style="margin-top:10px">Para instalarlo en el iPhone o iPad: botón Compartir de Safari y «Añadir a pantalla de inicio». Después funciona sin conexión.</p>' : ''}`;
+    }
+
+    renderCard() {
+        const g = this.game, cell = this.selected, p0 = g.player, el = $('#card');
+        if (p0 === null || g.over || cell < 0 || !isLand(cell) || (isMobile() && this.tool !== 'command')) { el.hidden = true; return; }
+        el.hidden = false;
+        const p = PROVINCES[G.prov[cell]], o = g.owner[cell], a = g.armyOn(cell);
+        el.style.setProperty('--owner', g.nations[o].color);
+        const sections = [];
+
+        // Ejército
+        if (a && a.owner === p0 && this.tool === 'command') {
+            const full = speedOf(this.send) * MOVE, left = g.moveBudget(a.owner, a.cell, this.send, a.used);
+            const supplied = g.inSupply(p0, a.cell);
+            const rows = UNIT_KEYS.filter(k => a.units[k] > 0).map(k => `
+                <div class="unit-row">${unitIcon(k, g.nations[o].color)}
+                    <div>${CONFIG.TYPES[k].name}<div class="small muted">ataque ${CONFIG.TYPES[k].atk}, defensa ${CONFIG.TYPES[k].def}, velocidad ${CONFIG.TYPES[k].speed}</div></div>
+                    <div class="stepper"><button data-action="step" data-unit="${k}" data-delta="-1" ${this.send[k] ? '' : 'disabled'} aria-label="Una menos">−</button>
+                    <output>${this.send[k]} de ${a.units[k]}</output>
+                    <button data-action="step" data-unit="${k}" data-delta="1" ${this.send[k] < a.units[k] ? '' : 'disabled'} aria-label="Una más">+</button></div>
+                </div>`).join('');
+            const partial = !sameUnits(this.send, a.units);
+            sections.push(`<section class="sec">
+                <h3>Tu ejército</h3>
+                <div class="units">${rows}</div>
+                ${partial ? '<div class="row"><span class="small muted">Mueves solo una parte: el resto se queda.</span><button class="btn ghost" data-action="send-all">Todas</button></div>' : ''}
+                <div class="meter"><i style="width:${full ? Math.round(100 * left / full) : 0}%"></i></div>
+                <p class="small">${left > 0 ? `Le quedan ${fmtMp(left)} de ${fmtMp(speedOf(this.send) * MOVE)} puntos de movimiento.` : 'Ya no puede moverse este turno.'}</p>
+                ${supplied ? '' : '<p class="note warn">Sin suministro: está lejos de tus ciudades y carreteras, así que mueve la mitad.</p>'}
+                ${left > 0 ? '<p class="note">Haz clic en una casilla verde para mover o en una roja para atacar. Por carretera llegas más lejos.</p>' : ''}
+            </section>`);
+        } else if (a) {
+            sections.push(`<section class="sec"><h3>Ejército de ${g.nm(a.owner)}</h3>
+                <div class="units">${UNIT_KEYS.filter(k => a.units[k] > 0).map(k => `<div class="unit-row">${unitIcon(k, g.nations[a.owner].color)}<div>${a.units[k]} ${CONFIG.TYPES[k].name.toLowerCase()}</div><span></span></div>`).join('')}</div>
+                <p class="small muted">Ataque ${unitPower(a.units, 'atk')}, defensa ${unitPower(a.units, 'def')}${g.fort[cell] ? `, ×${CONFIG.FORT_DEFENSE} por la fortificación` : ''}.</p></section>`);
+        }
+
+        // Reclutar
+        if (this.tool === 'command' && g.owner[p.city] === p0) {
+            const left = g.recruitLeft(p0, p), ok = g.canRecruitAt(p0, p), gold = g.nations[p0].gold;
+            sections.push(`<section class="sec">
+                <h3>Reclutar en ${esc(p.cityName)}</h3>
+                <p class="small muted" style="margin:-3px 0 8px">${left > 0 ? `Puedes reclutar ${plural(left, 'unidad', 'unidades')} más este turno.` : 'Ya no puedes reclutar más aquí este turno.'}</p>
+                <div class="recruit">${UNIT_KEYS.map(k => {
+                    const t = CONFIG.TYPES[k];
+                    return `<button class="btn" data-action="recruit" data-unit="${k}" ${!ok || gold < t.cost ? 'disabled' : ''}>
+                        ${unitIcon(k, g.nations[p0].color)}${t.name}<b>${t.cost} oro</b></button>`;
+                }).join('')}</div>
+                <p class="note">Las tropas nuevas aparecen en la ciudad y se mueven a partir del turno siguiente.</p></section>`);
+        }
+
+        // Diplomacia rápida con el dueño de la casilla
+        if (o !== p0 && g.nations[o].alive) sections.push(`<section class="sec">${this.diplomacyActions(o)}</section>`);
+
+        // Provincia
+        const control = new Map();
+        for (const c of p.cells) control.set(g.owner[c], (control.get(g.owner[c]) ?? 0) + 1);
+        const bar = [...control.entries()].sort((x, y) => y[1] - x[1])
+            .map(([id, n]) => `<i title="${g.nm(id)}: ${Math.round(100 * n / p.cells.length)} %" style="width:${100 * n / p.cells.length}%;background:${g.nations[id].color}"></i>`).join('');
+        const cityOwner = g.owner[p.city];
+        const connected = g.economy(cityOwner).connected.has(p.id);
+        const res = RESOURCES.filter(r => r.province === p.id);
+        sections.push(`<section class="sec">
+            <h3>Provincia</h3>
+            <div class="control-bar">${bar}</div>
+            <dl class="facts">
+                <dt>Ciudad</dt><dd>${esc(p.cityName)}${CAPITAL_OF[p.city] >= 0 ? ' ★' : ''}, en manos de ${g.nm(cityOwner)}</dd>
+                <dt>Población</dt><dd>${(p.population / 1e6).toLocaleString('es-ES', { maximumFractionDigits: 2 })} millones</dd>
+                <dt>Renta</dt><dd>${p.value} de oro${connected ? ` (+${CONFIG.ROAD_BONUS * 100} % por carretera)` : ', sin carretera a la capital'}</dd>
+                <dt>Terreno</dt><dd>${CONFIG.TERRAIN[p.terrain].name.toLowerCase()}${CONFIG.TERRAIN[p.terrain].def > 1 ? `, defensa ×${CONFIG.TERRAIN[p.terrain].def}` : ''}</dd>
+                ${res.map(r => `<dt>${r.typeName}</dt><dd>${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}, +${r.value} de oro</dd>`).join('')}
+                ${g.fort[cell] ? `<dt>Casilla</dt><dd>fortificada</dd>` : g.fortWork.has(cell) ? `<dt>Casilla</dt><dd>fortificando, ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}</dd>` : ''}
+            </dl></section>`);
+
+        el.innerHTML = `
+            <header class="card-head">
+                <div><h2>${esc(p.name)}</h2>
+                    <p class="row">${this.nationChip(o)} ${this.relationChip(o)}${o !== p.country ? ` <span class="small muted">ocupada a ${g.nm(p.country)}</span>` : ''}</p></div>
+                <button class="btn ghost" data-action="close-card" aria-label="Cerrar" title="Cerrar (Esc)">✕</button>
+            </header>${sections.join('')}`;
+    }
+
+    // Botones de diplomacia con una nación (en la ficha y en el panel de países).
+    diplomacyActions(t) {
+        const g = this.game, p0 = g.player, r = g.rel(p0, t);
+        let html = `<h3>Diplomacia con ${g.nm(t)}</h3>`;
+        if (g.atWar(p0, t)) {
+            const asked = g.proposedThisTurn.has(`paz${t}`);
+            html += `<p class="small muted">En guerra desde el turno ${r.since}.</p>
+                <div class="row" style="margin-top:8px"><button class="btn" data-action="diplo" data-kind="peace" data-target="${t}" ${asked ? 'disabled' : ''}>${asked ? 'Paz ya propuesta este turno' : 'Proponer la paz'}</button></div>`;
+            return html;
+        }
+        const allies = g.knownAllies(p0, t).filter(x => x !== p0);
+        const shared = g.sharedBlocs(p0, t);
+        const truce = g.turn < r.truceUntil;
+        const invites = g.blocsOf(p0).filter(b => !b.members.has(t));
+        if (allies.length) html += `<p class="small muted">Si le atacas, también te declaran la guerra: ${allies.map(x => g.nm(x)).join(', ')}.</p>`;
+        if (shared.length) html += `<p class="note warn">Sois aliados: atacarle te expulsa de ${shared.map(b => esc(b.name)).join(', ')}.</p>`;
+        html += `<div class="row" style="margin-top:8px">
+            <button class="btn war" data-action="diplo" data-kind="war" data-target="${t}" ${truce ? 'disabled' : ''}>${truce ? `Tregua hasta el turno ${r.truceUntil}` : 'Declarar la guerra'}</button>
+            ${invites.map(b => {
+                const asked = g.proposedThisTurn.has(`inv${b.id}:${t}`);
+                return `<button class="btn" data-action="invite" data-bloc="${b.id}" data-target="${t}" ${asked ? 'disabled' : ''}>Invitar a ${esc(b.name)}</button>`;
+            }).join('')}</div>`;
+        return html;
+    }
+
+    renderToasts() {
+        const g = this.game;
+        $('#toasts').innerHTML = g.proposals.map((pr, i) => {
+            const who = `<b>${g.nm(pr.from)}</b>`;
+            let text, yes = 'Aceptar', no = 'Rechazar';
+            if (pr.kind === 'paz') text = `${who} te propone la paz.`;
+            else if (pr.kind === 'bloque') text = `${who} te invita a ${pr.blocId && g.bloc(pr.blocId) ? `unirte a ${esc(g.bloc(pr.blocId).name)}` : 'formar una alianza'}.`;
+            else { text = `${who}, tu aliado, ha sido atacado por <b>${g.nm(pr.against)}</b>. Si no acudes, saldrás de vuestras alianzas.`; yes = 'Ir a la guerra'; no = 'No intervenir'; }
+            return `<div class="toast float" style="border-left-color:${g.nations[pr.from].color}"><p>${text}</p>
+                <div class="row"><button class="btn primary" data-action="accept" data-index="${i}">${yes}</button>
+                <button class="btn" data-action="reject" data-index="${i}">${no}</button></div></div>`;
+        }).join('');
+    }
+
+    renderConfirm() {
+        const g = this.game, el = $('#confirm'), plan = this.pending;
+        if (!plan || g.player === null) {
+            // Con el dedo, mientras se construye, un botón visible para terminar (no hay clic derecho ni Esc).
+            el.hidden = !(this.touch && this.tool !== 'command' && g.player !== null);
+            if (!el.hidden) el.innerHTML = `<span class="small">${this.anchor < 0 ? 'Toca una casilla tuya para empezar' : 'Toca dónde termina la obra'}</span>
+                <button class="btn" data-action="stop-build">Terminar obras</button>`;
+            return;
+        }
+        const ok = plan.cost <= g.nations[g.player].gold;
+        const what = plan.cls === 'fort' ? `Fortificar ${plural(plan.cells.length, 'casilla', 'casillas')}` : `${plural(plan.path.length - 1, 'tramo', 'tramos')} de ${plan.cls === 2 ? 'autopista' : 'carretera'}`;
+        el.hidden = false;
+        el.innerHTML = `<span>${what}: <b style="color:${ok ? 'var(--signal)' : 'var(--war)'}">${plan.cost} de oro</b></span>
+            <button class="btn primary" data-action="confirm-build" ${ok ? '' : 'disabled'}>Confirmar</button>
+            <button class="btn" data-action="cancel-build">Cancelar</button>`;
+    }
+
+    renderHint() {
+        const g = this.game, el = $('#hint');
+        let text;
+        if (this.hintOverride) text = this.hintOverride;
+        else if (g.player === null) text = 'Haz clic en un país para elegirlo. Rueda del ratón: zoom; arrastrar: mover el mapa.';
+        else if (g.over) text = '';
+        else if (this.tool === 'fort') text = this.anchor < 0 ? 'Fortificar: haz clic en una casilla tuya.' : 'Clic en otra casilla para fortificar la línea, o en la misma para solo esa. Clic derecho para terminar.';
+        else if (this.tool !== 'command') text = this.anchor < 0 ? `${this.toolDef().label}: haz clic en una casilla tuya para empezar.` : 'Haz clic donde termina el tramo; se construye el camino más barato. Clic derecho para terminar.';
+        else if (this.reachInfo) text = 'Verde: mover. Rojo: atacar. Clic derecho o Esc para cancelar.';
+        else text = 'Clic en un ejército tuyo para darle órdenes, o en una provincia para ver qué puedes hacer.';
+        el.textContent = text;
+        el.hidden = !text;
+        el.classList.toggle('beside-card', !$('#card').hidden);
+    }
+
+    renderDrawer() {
+        const g = this.game, el = $('#drawer');
+        el.hidden = g.player === null;
+        el.classList.toggle('closed', !this.drawerOpen);
+        if (g.player === null) return;
+        const unread = g.logs.length - this.seenLog;
+        if (this.tab === 'registro' && this.drawerOpen) this.seenLog = g.logs.length;
+        const tabs = [['paises', 'Países'], ['alianzas', 'Alianzas'], ['registro', 'Registro']];
+        el.innerHTML = `<div class="tabs">
+            ${tabs.map(([id, label]) => `<button data-action="tab" data-tab="${id}" class="${this.tab === id ? 'on' : ''}">${label}${id === 'registro' && unread > 0 && this.tab !== 'registro' ? `<span class="count">${unread}</span>` : ''}</button>`).join('')}
+            <button class="toggle" data-action="drawer" title="${this.drawerOpen ? 'Ocultar el panel' : 'Mostrar el panel'}" aria-label="${this.drawerOpen ? 'Cerrar' : 'Abrir'}">${isMobile() ? '✕' : this.drawerOpen ? '›' : '‹'}</button></div>
+            <div class="drawer-body" id="drawer-body"></div>`;
+        if (!this.drawerOpen) return;
+        if (this.tab === 'paises') this.renderNations();
+        else if (this.tab === 'alianzas') this.renderBlocs();
+        else this.renderLog();
+    }
+
+    renderNations() {
+        const g = this.game, body = $('#drawer-body');
+        if (this.focusNation !== null) {
+            const t = this.focusNation, n = g.nations[t], lands = g.landCounts(), powers = g.powers();
+            const blocs = g.visibleBlocs(g.player).filter(b => b.members.has(t));
+            body.innerHTML = `<button class="btn ghost" data-action="nation-back">‹ Todos los países</button>
+                <div class="pick" style="border-left-color:${n.color}">
+                    <h3>${n.name}</h3><p class="row" style="margin-top:4px">${this.relationChip(t)}</p>
+                    <dl class="facts" style="margin-top:8px">
+                        <dt>Capital</dt><dd>${esc(n.capitalName)}${g.owner[n.capitalCell] !== t ? ` (en manos de ${g.nm(g.owner[n.capitalCell])})` : ''}</dd>
+                        <dt>Territorio</dt><dd>${(100 * lands[t] / G.land.length).toFixed(1)} % de Europa</dd>
+                        <dt>Fuerza</dt><dd>${powers[t]}</dd>
+                        <dt>Alianzas</dt><dd>${blocs.map(b => esc(b.name) + (b.secret ? ' (secreta)' : '')).join(', ') || 'ninguna conocida'}</dd>
+                    </dl>
+                    <button class="btn" style="margin-top:10px" data-action="goto" data-cell="${n.capitalCell}" ${n.alive ? '' : 'disabled'}>Ver en el mapa</button>
+                </div>
+                ${n.alive && t !== g.player ? `<div style="margin-top:12px">${this.diplomacyActions(t)}</div>` : ''}`;
+            return;
+        }
+        body.innerHTML = `<input type="search" id="nation-search" placeholder="Buscar país" value="${esc(this.filter)}" aria-label="Buscar país">
+            <div id="nation-list"></div>`;
+        this.renderNationList();
+    }
+
+    renderNationList() {
+        const g = this.game, p0 = g.player, list = $('#nation-list');
+        if (!list) return;
+        const lands = g.landCounts(), powers = g.powers();
+        const q = this.filter.trim().toLowerCase();
+        const groups = [
+            ['Tu país', n => n.id === p0],
+            ['En guerra contigo', n => n.alive && g.atWar(p0, n.id)],
+            ['Aliados', n => n.alive && g.allied(p0, n.id) && !g.atWar(p0, n.id)],
+            ['Resto de Europa', n => n.alive && n.id !== p0 && !g.atWar(p0, n.id) && !g.allied(p0, n.id)],
+            ['Eliminados', n => !n.alive]
+        ];
+        list.innerHTML = groups.map(([title, test]) => {
+            const rows = g.nations.filter(n => test(n) && (!q || n.name.toLowerCase().includes(q)))
+                .sort((a, b) => powers[b.id] - powers[a.id])
+                .map(n => `<button class="nation-row" data-action="nation" data-id="${n.id}">
+                    <span class="sw" style="background:${n.color}"></span><span>${n.name}</span>
+                    <span class="num" title="Parte de Europa">${(100 * lands[n.id] / G.land.length).toFixed(1)} %</span>
+                    <span class="num" title="Fuerza militar">${powers[n.id]}</span></button>`).join('');
+            return rows ? `<p class="group-title">${title}</p>${rows}` : '';
+        }).join('') || '<p class="note">Ningún país coincide con la búsqueda.</p>';
+    }
+
+    renderBlocs() {
+        const g = this.game, p0 = g.player, body = $('#drawer-body');
+        const visible = g.visibleBlocs(p0);
+        const mine = visible.filter(b => b.members.has(p0));
+        const others = visible.filter(b => !b.members.has(p0));
+        const memberChips = b => `<div class="members">${[...b.members].map(m => this.nationChip(m)).join('')}</div>`;
+        const eligible = b => g.nations.filter(n => n.alive && !b.members.has(n.id) && !g.atWar(p0, n.id)).sort((x, y) => x.name.localeCompare(y.name, 'es'));
+        body.innerHTML = `
+            <p class="group-title" style="margin-top:0">Tus alianzas</p>
+            ${mine.map(b => `<div class="bloc mine">
+                <h3>${esc(b.name)}${b.secret ? ' <span class="chip">secreta</span>' : ''}</h3>
+                ${memberChips(b)}
+                <div class="row"><select data-bloc-invite="${b.id}" style="flex:1">${eligible(b).map(n => `<option value="${n.id}">${n.name}</option>`).join('')}</select>
+                <button class="btn" data-action="bloc-invite" data-bloc="${b.id}">Invitar</button></div>
+                <button class="btn ghost" style="margin-top:6px" data-action="bloc-leave" data-bloc="${b.id}">Abandonar la alianza</button>
+            </div>`).join('') || '<p class="note" style="margin:0 0 8px 8px">No perteneces a ninguna alianza.</p>'}
+            <div class="bloc">
+                <h3>Fundar una alianza</h3>
+                <div class="stack">
+                    <input type="text" id="bloc-name" maxlength="40" placeholder="Pacto de ${esc(g.nations[p0].capitalName)}" value="${esc(this.blocName)}" aria-label="Nombre de la alianza">
+                    <label class="check small"><input type="checkbox" id="bloc-secret" ${this.blocSecret ? 'checked' : ''}><span>Secreta: solo la conocen sus miembros hasta que una guerra la active</span></label>
+                    <button class="btn primary" data-action="bloc-create">Fundar alianza</button>
+                </div>
+                <p class="note">Puedes estar en varias a la vez, OTAN incluida. Si atacan a un miembro, los demás entran en guerra.</p>
+            </div>
+            ${others.length ? `<p class="group-title">Otras alianzas</p>${others.map(b => `<div class="bloc">
+                <h3>${esc(b.name)}</h3>${memberChips(b)}
+                <button class="btn" data-action="bloc-request" data-bloc="${b.id}" ${g.proposedThisTurn.has(`req${b.id}`) ? 'disabled' : ''}>Pedir el ingreso</button></div>`).join('')}` : ''}`;
+    }
+
+    renderLog() {
+        const body = $('#drawer-body');
+        const entries = this.game.logs.slice(-250).reverse();
+        let html = '', turn = null;
+        for (const { turn: t, msg } of entries) {
+            if (msg.startsWith('— TURNO')) continue;
+            if (t !== turn) { html += `<p class="log-turn">Turno ${t}</p>`; turn = t; }
+            html += `<p class="log-line">${esc(msg)}</p>`;
+        }
+        body.innerHTML = html || '<p class="note">Todavía no ha pasado nada.</p>';
+    }
+
+    renderGameDialog() {
+        const g = this.game, saves = readSaves(), playing = g.player !== null;
+        const when = s => new Date(s.date).toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' });
+        $('#game-dialog-body').innerHTML = `
+            <div class="row" style="justify-content:space-between"><h2>Partida</h2><button class="btn ghost" data-action="close-game" aria-label="Cerrar">✕</button></div>
+            <p class="note" style="margin-bottom:8px">Se guarda sola al terminar cada turno. Las ranuras viven en este navegador; para hacer copias o jugar en otro equipo, exporta a archivo.</p>
+            ${Object.entries(SLOTS).map(([slot, label]) => {
+                const s = saves[slot];
+                return `<div class="slot"><div><b>${label}</b><div class="small muted">${s ? `${esc(s.nation)}, turno ${s.turn}, ${when(s)}` : 'vacía'}</div></div>
+                    ${slot === 'auto' ? '<span></span>' : `<button class="btn" data-action="save" data-slot="${slot}" ${playing && !g.over ? '' : 'disabled'}>Guardar aquí</button>`}
+                    <button class="btn" data-action="load" data-slot="${slot}" ${s ? '' : 'disabled'}>Cargar</button></div>`;
+            }).join('')}
+            <div class="row" style="margin-top:14px">
+                <button class="btn" data-action="export" ${playing ? '' : 'disabled'}>Exportar a archivo</button>
+                <button class="btn" data-action="import">Importar archivo</button>
+            </div>`;
+    }
+
+    renderOverlay() {
+        const g = this.game, overlay = $('#overlay');
+        overlay.hidden = !g.over;
+        if (!g.over) return;
+        $('#overlay-card').innerHTML = `
+            <h2 style="color:${g.won ? SIGNAL : 'var(--war)'}">${g.won ? 'Victoria' : 'Derrota'}</h2>
+            <p>${g.won ? `${g.nm(g.player)} domina Europa en el turno ${g.turn}.` : `${g.nm(g.player)} ha caído en el turno ${g.turn}.`}</p>
+            <button class="btn primary" style="margin-top:16px" data-action="restart">Nueva partida</button>`;
+    }
+}
+
+const seedParam = Number(new URLSearchParams(location.search).get('seed'));
+let game = new GameEngine(Number.isFinite(seedParam) && seedParam > 0 ? seedParam : Date.now() % 2147483647);
+const ui = new GameUI(game);
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    navigator.serviceWorker.register('sw.js').catch(err => console.warn('Sin modo sin conexión:', err));
+}
+</script>
+</body>
+</html>
