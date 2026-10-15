@@ -326,7 +326,6 @@ const CONFIG = {
     FORT_DEFENSE: 1.75,             // defensa en casilla fortificada
     SUPPLY_ROAD_RANGE: 4,           // casillas abastecidas alrededor de la red de carreteras unida a la capital
     SUPPLY_CITY_RANGE: 2,           // casillas abastecidas alrededor de cada ciudad propia
-    NO_SUPPLY_MOVE: 0.5,            // movimiento sin suministro
     VISION_TERRITORY: 2,            // niebla de guerra: casillas que se ven más allá del territorio propio o aliado
     VISION_ARMY: 3,                 // ... y alrededor de cada ejército propio o aliado
     SPY_COST: 60,                   // oro por enviar un espía (uno por provincia)
@@ -888,11 +887,11 @@ class GameEngine {
         this.armies.set(a.id, a);
         return a;
     }
-    // Subpuntos de movimiento que quedan.
-    // Subpuntos de movimiento que quedan; sin suministro, la mitad.
+    // Subpuntos de movimiento que quedan. Sin suministro solo queda 1 subpunto: no basta para ningún tramo, así que
+    // el ejército únicamente puede dar el paso mínimo garantizado de reach() (una casilla por turno) o atacar a un vecino.
     moveBudget(owner, cell, units, used) {
-        const full = speedOf(units) * MOVE * (this.inSupply(owner, cell) ? 1 : CONFIG.NO_SUPPLY_MOVE);
-        return Math.max(0, Math.floor(full) - used);
+        if (!this.inSupply(owner, cell)) return Math.max(0, 1 - used);
+        return Math.max(0, speedOf(units) * MOVE - used);
     }
     mp(a) { return this.moveBudget(a.owner, a.cell, a.units, a.used); }
     armyOn(cell) { const id = this.armyAt[cell]; return id ? this.armies.get(id) : null; }
@@ -928,7 +927,9 @@ class GameEngine {
 
     // Alcance con `mp` subpuntos. exp: casillas desde las que se puede seguir; term: donde hay que detenerse
     // (desembarco o contacto con el enemigo); attacks: casilla con ejército enemigo → casilla desde la que se ataca.
-    reach(a, start, mp) {
+    // `fresh`: el ejército aún no se ha movido este turno, así que siempre puede avanzar al menos una casilla de tierra
+    // aunque cueste más de lo que le queda (ese paso gasta todo el movimiento).
+    reach(a, start, mp, fresh = false) {
         const exp = new Map([[start, { cost: 0, prev: -1 }]]);
         const term = new Map(), attacks = new Map();
         const buckets = Array.from({ length: mp + 1 }, () => []);
@@ -968,7 +969,10 @@ class GameEngine {
                     const step = roadCls ? CONFIG.ROAD_MOVE[roadCls] : MOVE * CONFIG.TERRAIN[PROVINCES[G.prov[v]].terrain].cost;
                     const walled = hostile && this.fort[v] === 1;   // muro enemigo: un punto más y detiene la marcha
                     const nc = c + step + (hostile ? MOVE / 2 : 0) + (walled ? MOVE : 0);
-                    if (nc > mp) continue;
+                    if (nc > mp) {
+                        if (fresh && mp > 0 && u === start && !uSea && !exp.has(v) && !term.has(v)) term.set(v, { cost: mp, prev: u, landing: false });
+                        continue;
+                    }
                     if (uSea || walled || this.zoc(v, a)) {
                         if ((term.get(v)?.cost ?? Infinity) > nc) term.set(v, { cost: nc, prev: u, landing: uSea });
                     } else if ((exp.get(v)?.cost ?? Infinity) > nc) {
@@ -1339,7 +1343,7 @@ class GameEngine {
     playerMove(army, send, dest) {
         if (this.over || army.owner !== this.player) return null;
         if (UNIT_KEYS.some(k => send[k] < 0 || send[k] > army.units[k]) || countUnits(send) === 0) return null;
-        const r = this.reach(army.owner, army.cell, this.moveBudget(army.owner, army.cell, send, army.used));
+        const r = this.reach(army.owner, army.cell, this.moveBudget(army.owner, army.cell, send, army.used), army.used === 0);
         const isAttack = r.attacks.has(dest);
         if (!isAttack && !this.destinations(r).has(dest)) return null;
         const mover = this.split(army, copyUnits(send));
@@ -1538,7 +1542,7 @@ class GameEngine {
                 const send = copyUnits(army.units); send.infantry--;
                 army = this.split(army, send);
             }
-            const r = this.reach(id, army.cell, this.mp(army));
+            const r = this.reach(id, army.cell, this.mp(army), army.used === 0);
             const atk = unitPower(army.units, 'atk');
             let best = null, bestScore = 0;
             for (const [target, from] of r.attacks) {
@@ -2308,7 +2312,7 @@ class GameUI {
         if (a) {
             for (const k of UNIT_KEYS) this.send[k] = Math.min(this.send[k], a.units[k]);
             if (countUnits(this.send) > 0) {
-                const r = g.reach(a.owner, a.cell, g.moveBudget(a.owner, a.cell, this.send, a.used));
+                const r = g.reach(a.owner, a.cell, g.moveBudget(a.owner, a.cell, this.send, a.used), a.used === 0);
                 this.reachInfo = { moves: g.destinations(r), attacks: new Set(r.attacks.keys()) };
             }
         }
@@ -2562,10 +2566,12 @@ class GameUI {
                 <h3>Tu ejército</h3>
                 <div class="units">${rows}</div>
                 ${partial ? '<div class="row"><span class="small muted">Mueves solo una parte: el resto se queda.</span><button class="btn ghost" data-action="send-all">Todas</button></div>' : ''}
-                <div class="meter"><i style="width:${full ? Math.round(100 * left / full) : 0}%"></i></div>
-                <p class="small">${left > 0 ? `Le quedan ${fmtMp(left)} de ${fmtMp(speedOf(this.send) * MOVE)} puntos de movimiento.` : 'Ya no puede moverse este turno.'}</p>
-                ${supplied ? '' : '<p class="note warn">Sin suministro: está lejos de tus ciudades y carreteras, así que mueve la mitad.</p>'}
-                ${left > 0 ? '<p class="note">Haz clic en una casilla verde para mover o en una roja para atacar. Por carretera llegas más lejos.</p>' : ''}
+                <div class="meter"><i style="width:${!supplied ? (left > 0 ? 100 : 0) : full ? Math.round(100 * left / full) : 0}%"></i></div>
+                <p class="small">${left <= 0 ? 'Ya no puede moverse este turno.'
+                    : supplied ? `Le quedan ${fmtMp(left)} de ${fmtMp(speedOf(this.send) * MOVE)} puntos de movimiento.`
+                    : 'Puede avanzar una casilla este turno.'}</p>
+                ${supplied ? '' : `<p class="note warn">Sin suministro: lejos de tus ciudades y de tu red de carreteras solo avanza una casilla por turno. Construye carreteras hasta el frente para abastecerlo (llegan a ${CONFIG.SUPPLY_ROAD_RANGE} casillas de la red).</p>`}
+                ${left > 0 ? '<p class="note">Haz clic en una casilla verde para mover o en una roja para atacar. Por carretera llegas más lejos; si no se ha movido este turno, siempre puede avanzar al menos una casilla.</p>' : ''}
             </section>`);
         } else if (a && g.sees(p0, cell)) {
             sections.push(`<section class="sec"><h3>Ejército de ${g.nm(a.owner)}</h3>
