@@ -351,6 +351,10 @@ const CONFIG = {
         artillery: { hierro: 0.06, carbon: 0.05, minerales: 0.04 }
     },
     MAX_DISCOUNT: 0.5,
+    LOOT_FACTOR: 2,                 // saqueo al tomar una ciudad: 2 × el peso de la provincia en la renta del defensor...
+    LOOT_MAX: 0.5,                  // ... hasta la mitad de su tesoro
+    LOOT_CAPITAL: 0.3,              // tomar la capital se lleva como mínimo el 30 %
+    LOOT_RESOURCE_TURNS: 3,         // y cada yacimiento de la provincia, 3 turnos de su producción
     DISPUTED_INCOME: 0.5,           // renta del territorio ocupado en guerra hasta que se anexiona en la paz
     TRIBUTE: 0.25,                  // parte de sus ingresos que un satélite paga a su señor
     VISION_TERRITORY: 2,            // niebla de guerra: casillas que se ven más allá del territorio propio o aliado
@@ -764,7 +768,11 @@ class GameEngine {
             dev += v * this.dev[G.prov[i]] / 1000;
             if (!disputed && connected.has(G.prov[i])) road += CELL_VALUE[i] * CONFIG.ROAD_BONUS;
         }
-        const resources = RESOURCES.filter(r => this.owner[r.cell] === id);
+        // Un yacimiento solo produce (renta, refuerzo entre yacimientos y abaratamiento de tropas) si la red de
+        // carreteras unida a la capital llega hasta él.
+        const owned = RESOURCES.filter(r => this.owner[r.cell] === id);
+        const resources = owned.filter(r => this.nearSeen(seen, r.cell));
+        const looseResources = owned.filter(r => !resources.includes(r));
         const byType = {};
         for (const r of resources) byType[r.type] = (byType[r.type] ?? 0) + 1;
         const cluster = t => 1 + Math.min(CONFIG.RESOURCE_CLUSTER_MAX, CONFIG.RESOURCE_CLUSTER * (byType[t] - 1));
@@ -773,12 +781,14 @@ class GameEngine {
         const empireRate = Math.max(0, Math.min(CONFIG.EMPIRE_MAX, (legalProvinces - START_PROVINCES[id]) * CONFIG.EMPIRE_PER_PROVINCE));
         const empire = (base + dev + road) * empireRate;
         const e = { key, seen, connected, base: Math.round(base), dev: Math.round(dev), road: Math.round(road), res: Math.round(res),
-            empire: Math.round(empire), empireRate, legalProvinces, byType, resources,
+            empire: Math.round(empire), empireRate, legalProvinces, byType, resources, looseResources,
             total: Math.round(base + dev + road + empire + res) };
         this.econCache[id] = e;
         return e;
     }
     // Tributo: el satélite entrega una parte de sus ingresos a su señor.
+    // ¿Produce el yacimiento para quien lo controla? (la carretera de su dueño llega hasta él)
+    resourceLinked(r) { const o = this.owner[r.cell]; return o >= 0 && this.economy(o).resources.includes(r); }
     tribute(id) {
         const n = this.nations[id];
         const out = n.overlord >= 0 ? Math.round(this.economy(id).total * CONFIG.TRIBUTE) : 0;
@@ -1166,11 +1176,29 @@ class GameEngine {
             const ar = this.armyOn(c);
             if ((!ar || ar.owner !== prev) && this.fort[c] !== 1) this.owner[c] = holder(c);
         }
+        if (byForce && prev >= 0) this.plunder(a, prev, p);
         if (CAPITAL_OF[cell] >= 0 || this.involvesPlayer(a, prev)) {
             this.log(`${this.nm(a)} toma ${p.cityName} (${p.name})${CAPITAL_OF[cell] >= 0 ? `, capital de ${this.nm(CAPITAL_OF[cell])}` : ''}.`);
         }
         this.checkElimination(prev, a);
         this.checkGameOver();
+    }
+
+    // Saqueo: quien toma una ciudad se lleva parte del tesoro del defensor, más cuanto más pesa la provincia en
+    // su renta (y mucho si es la capital), y unos turnos de producción de los yacimientos de la provincia.
+    plunder(a, prev, p) {
+        const victim = this.nations[prev];
+        if (victim.gold <= 0) return;
+        const value = p.value * (1 + this.dev[p.id] / 1000);
+        let share = Math.min(CONFIG.LOOT_MAX, CONFIG.LOOT_FACTOR * value / Math.max(1, this.economy(prev).total + value));
+        if (CAPITAL_OF[p.city] === prev) share = Math.max(share, CONFIG.LOOT_CAPITAL);
+        const fromMines = RESOURCES.filter(r => r.province === p.id).reduce((s, r) => s + r.value * CONFIG.LOOT_RESOURCE_TURNS, 0);
+        const loot = Math.min(victim.gold, Math.round(victim.gold * share) + fromMines);
+        if (loot <= 0) return;
+        victim.gold -= loot;
+        this.nations[a].gold += loot;
+        if (a === this.player) this.log(`Saqueas ${loot} de oro en ${p.cityName}.`);
+        else if (prev === this.player) this.log(`${this.nm(a)} te saquea ${loot} de oro en ${p.cityName}.`);
     }
 
     checkElimination(id, captor) {
@@ -1848,18 +1876,23 @@ class GameEngine {
         if (cells.length) this.buildFort(id, { cells, cost: cells.length * CONFIG.FORT_COST });
     }
 
-    // En paz, con dinero de sobra, une a la red una provincia que no lo está.
+    // Une a la red de carreteras la ciudad o el yacimiento más valioso que aún no lo esté (una obra por turno;
+    // en guerra solo con el oro que sobre tras reclutar).
     aiRoads(id) {
-        if (this.enemiesOf(id).length || this.rng() > 0.5) return;
-        const n = this.nations[id], budget = n.gold - this.aiReserve(id) * 0.5;
+        const atWar = this.enemiesOf(id).length > 0;
+        const n = this.nations[id], budget = atWar ? n.gold * 0.5 : n.gold - this.aiReserve(id) * 0.5;
         if (budget < CONFIG.ROAD_COST * 2) return;
         const e = this.economy(id);
         const cap = n.capitalCell;
         if (this.owner[cap] !== id) return;
-        const loose = this.citiesOf(id).filter(p => !e.connected.has(p.id)).sort((x, y) => y.value - x.value)[0];
+        const targets = [
+            ...this.citiesOf(id).filter(p => !e.connected.has(p.id)).map(p => ({ cell: p.city, value: p.value })),
+            ...e.looseResources.map(r => ({ cell: r.cell, value: r.value * 2 }))   // un yacimiento conectado rinde y abarata tropas
+        ].sort((x, y) => y.value - x.value);
+        const loose = targets[0];
         if (!loose) return;
-        const plan = this.planRoad(id, loose.city, c => e.seen[c] === 1, 1);
-        if (plan && plan.cost <= budget * 0.5) this.buildRoad(id, plan);
+        const plan = this.planRoad(id, loose.cell, c => e.seen[c] === 1, 1);
+        if (plan && plan.cost <= budget * 0.7) this.buildRoad(id, plan);
     }
 }
 
@@ -2192,6 +2225,7 @@ class MapView {
             const [x, y] = this.toScreen(G.cx[r.cell], G.cy[r.cell]);
             if (!visible(x, y)) continue;
             const rad = Math.max(4, Math.min(11, hexPx * 0.9));
+            ctx.globalAlpha = g.resourceLinked(r) ? 1 : 0.45;
             ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2);
             ctx.fillStyle = CONFIG.RESOURCE_COLOR[r.type]; ctx.fill();
             ctx.lineWidth = 1.5; ctx.strokeStyle = g.nations[g.owner[r.cell]].color; ctx.stroke();
@@ -2200,6 +2234,7 @@ class MapView {
                 ctx.fillStyle = '#fff';
                 ctx.fillText(CONFIG.RESOURCE_ICON[r.type], x, y + 1);
             }
+            ctx.globalAlpha = 1;
         }
 
         for (const p of PROVINCES) {
@@ -2343,7 +2378,8 @@ class GameUI {
             <li><i class="line" style="border-top:3px solid #e3d9c0"></i>Fortificación</li>
             <li>★ capital &nbsp; ● ciudad &nbsp; A rayas: territorio en disputa (ocupado en guerra)</li>
             <li>Con niebla de guerra, en sombra: lo que no ves. Ojo junto a una ciudad: tu espía</li>
-            <li>${Object.entries(E.resourceTypes).map(([k, name]) => `${CONFIG.RESOURCE_ICON[k]} ${name}`).join(' &nbsp;')}</li></ul>`;
+            <li>${Object.entries(E.resourceTypes).map(([k, name]) => `${CONFIG.RESOURCE_ICON[k]} ${name}`).join(' &nbsp;')}</li>
+            <li>Yacimiento apagado: no produce hasta que una carretera lo une a la capital</li></ul>`;
         this.render();
     }
 
@@ -2468,7 +2504,7 @@ class GameUI {
         const lines = [`<b>${esc(p.name)}</b>${g.isDisputed(cell) ? ` <span class="muted">(en disputa: es de ${g.nm(g.legal[cell])})</span>` : ''}`,
             `<span style="color:${g.nations[o].color}">■</span> ${g.nm(o)}${g.player !== null && o !== g.player ? ` ${this.relationChip(o)}` : ''}`];
         if (CITY_OF[cell] >= 0) lines.push(`${CAPITAL_OF[cell] >= 0 ? '★ Capital' : '● Ciudad'}: ${esc(p.cityName)}`);
-        if (res) lines.push(`${CONFIG.RESOURCE_ICON[res.type]} ${res.typeName} de ${esc(res.name)}: +${res.value} de oro`);
+        if (res) lines.push(`${CONFIG.RESOURCE_ICON[res.type]} ${res.typeName} de ${esc(res.name)}: ${g.resourceLinked(res) ? `+${res.value} de oro` : '<span class="warn-text">sin carretera a la capital, no produce</span>'}`);
         if (g.fort[cell]) lines.push(`Fortificada: defensa ×${CONFIG.FORT_DEFENSE}`);
         else if (g.fortWork.has(cell)) lines.push(`Fortificando: ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}`);
         if (!g.sees(g.player, cell)) lines.push('<span class="muted">Niebla de guerra: no sabes qué tropas hay</span>');
@@ -2816,7 +2852,7 @@ class GameUI {
                     <dt>Territorio</dt><dd>${plural(g.citiesOf(c).length, 'provincia', 'provincias')}, ${(100 * lands[c] / G.land.length).toFixed(1)} % de Europa</dd>
                     <dt>Ejército</dt><dd>fuerza ${powers[c]}</dd>
                     <dt>Economía</dt><dd>${e.total} de oro por turno, ${g.nations[c].gold} en el tesoro</dd>
-                    <dt>Recursos</dt><dd>${e.resources.map(r => `${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}`).join(', ') || 'ninguno'}</dd>
+                    <dt>Recursos</dt><dd>${[...e.resources, ...e.looseResources].map(r => `${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}`).join(', ') || 'ninguno'}${e.looseResources.length ? '<br><span class="small muted">Producen cuando una carretera los une a tu capital.</span>' : ''}</dd>
                     <dt>Alianzas</dt><dd>${g.blocsOf(c).map(b => esc(b.name)).join(', ') || 'ninguna'}</dd>
                 </dl></div>
                 <button class="btn primary wide" style="margin-top:12px;padding:11px" data-action="start">Empezar con ${g.nm(c)}</button>`;
@@ -2934,7 +2970,7 @@ class GameUI {
                 <dt>Desarrollo</dt><dd>+${Math.round(g.dev[p.id] / 10)} % de renta${g.dev[p.id] < (connected ? CONFIG.DEV_MAX_CONNECTED : CONFIG.DEV_MAX) && g.legal[p.city] === cityOwner ? `, crece un ${(connected ? CONFIG.DEV_GROWTH_CONNECTED : CONFIG.DEV_GROWTH) / 10} % por turno${connected ? '' : ' (con carretera a la capital crecería más)'}` : ''}</dd>
                 <dt>Terreno</dt><dd>${CONFIG.TERRAIN[p.terrain].name.toLowerCase()}${CONFIG.TERRAIN[p.terrain].def > 1 ? `, defensa ×${CONFIG.TERRAIN[p.terrain].def}` : ''}</dd>
                 ${g.isDisputed(cell) ? `<dt>Estado</dt><dd class="warn-text">en disputa: la ocupa ${g.nm(o)} pero es de ${g.nm(g.legal[cell])}. Rinde la mitad y se anexiona al firmar la paz.</dd>` : ''}
-                ${res.map(r => `<dt>${r.typeName}</dt><dd>${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}, +${r.value} de oro</dd>`).join('')}
+                ${res.map(r => `<dt>${r.typeName}</dt><dd>${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}, ${g.resourceLinked(r) ? `+${r.value} de oro` : '<span class="warn-text">sin carretera a la capital de su dueño: no produce ni abarata tropas</span>'}</dd>`).join('')}
                 ${g.fort[cell] ? `<dt>Casilla</dt><dd>fortificada</dd>` : g.fortWork.has(cell) ? `<dt>Casilla</dt><dd>fortificando, ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}</dd>` : ''}
             </dl></section>`);
 
@@ -3089,7 +3125,7 @@ class GameUI {
             <dt>Desarrollo</dt><dd>+${e.dev}</dd>
             <dt>Carreteras</dt><dd>+${e.road}</dd>
             <dt>Imperio</dt><dd>+${e.empire}${e.empireRate > 0 ? ` (+${Math.round(e.empireRate * 100)} % por ${e.legalProvinces - START_PROVINCES[id]} provincias ganadas)` : ' (crece al anexionar provincias)'}</dd>
-            <dt>Recursos</dt><dd>+${e.res}${counts ? ` (${counts})` : ''}</dd>
+            <dt>Recursos</dt><dd>+${e.res}${counts ? ` (${counts})` : ''}${e.looseResources.length ? `<br><span class="warn-text">${plural(e.looseResources.length, 'yacimiento', 'yacimientos')} sin carretera a la capital: no producen</span>` : ''}</dd>
             ${tr.in || tr.out ? `<dt>Tributo</dt><dd>${tr.in ? `+${tr.in}` : ''}${tr.out ? ` −${tr.out}` : ''}</dd>` : ''}
             <dt>Total</dt><dd><b>${g.income(id)} de oro por turno</b></dd>
             <dt>Precios</dt><dd>${UNIT_KEYS.map(k => `${CONFIG.TYPES[k].name.toLowerCase()} ${g.unitCost(id, k)}`).join(', ')}</dd>
@@ -3241,9 +3277,49 @@ class GameUI {
 const seedParam = Number(new URLSearchParams(location.search).get('seed'));
 let game = new GameEngine(Number.isFinite(seedParam) && seedParam > 0 ? seedParam : Date.now() % 2147483647);
 const ui = new GameUI(game);
-if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-    navigator.serviceWorker.register('sw.js').catch(err => console.warn('Sin modo sin conexión:', err));
+// --- Actualizaciones ---
+// La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
+// nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
+const APP_VERSION = '2026.10.16-135906';
+const RESUME_KEY = 'nanwar.resume';
+let updating = false;
+async function checkForUpdate() {
+    if (location.protocol === 'file:' || updating) return;
+    try {
+        const res = await fetch(`version.json?t=${Date.now()}`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const { version } = await res.json();
+        if (version && version !== APP_VERSION && APP_VERSION !== 'dev') applyUpdate(version);
+    } catch { /* sin conexión: se seguirá con esta versión */ }
 }
+function applyUpdate(version) {
+    // Un solo intento por versión y sesión: si la recarga trajera aún la página vieja, no se entra en bucle.
+    try { if (sessionStorage.getItem('nanwar.updateTried') === version) return; sessionStorage.setItem('nanwar.updateTried', version); } catch { /* sin almacenamiento */ }
+    updating = true;
+    if (game.player !== null && !game.over && writeSave('auto', game)) {
+        try { localStorage.setItem(RESUME_KEY, 'auto'); } catch { /* sin almacenamiento no se puede reanudar */ }
+    }
+    const box = document.createElement('div');
+    box.className = 'toast float';
+    box.innerHTML = '<p style="margin:0"><b>Actualizando NanWar…</b> Tu partida se ha guardado y continuará en un momento.</p>';
+    $('#toasts').prepend(box);
+    const reg = navigator.serviceWorker ? navigator.serviceWorker.getRegistration() : Promise.resolve(null);
+    reg.then(r => r && r.update()).catch(() => {}).finally(() => setTimeout(() => location.reload(), 1200));
+}
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(err => console.warn('Sin modo sin conexión:', err));
+}
+// Tras una actualización, se reanuda la partida que se estaba jugando.
+try {
+    if (localStorage.getItem(RESUME_KEY)) {
+        localStorage.removeItem(RESUME_KEY);
+        const save = readSaves().auto;
+        if (save) { ui.setGame(GameEngine.load(save.data)); game.log(`NanWar se ha actualizado a la versión ${APP_VERSION}. Continúas tu partida.`); ui.render(); }
+    }
+} catch { /* sin almacenamiento local */ }
+setTimeout(checkForUpdate, 2000);
+setInterval(checkForUpdate, 15 * 60 * 1000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkForUpdate(); });
 </script>
 </body>
 </html>

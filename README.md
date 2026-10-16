@@ -10,6 +10,8 @@ Es una aplicación web instalable (PWA) que funciona sin conexión:
 - **iPhone / iPad (Safari):** botón Compartir → «Añadir a pantalla de inicio».
 - **Ordenador (Chrome o Edge):** icono de instalar en la barra de direcciones.
 
+La app instalada comprueba sola si hay una versión nueva (al abrirse, al volver a primer plano y cada 15 minutos) y, si la hay, se actualiza y continúa la partida en curso.
+
 Las partidas se guardan en el propio dispositivo (autoguardado al final de cada turno y tres ranuras). Para pasar una partida a otro dispositivo, usa «Partida → Exportar a archivo» e «Importar archivo».
 
 ## Archivos
@@ -21,6 +23,7 @@ Las partidas se guardan en el propio dispositivo (autoguardado al final de cada 
 | `manifest.webmanifest`, `sw.js`, `icons/` | Lo que la convierte en aplicación instalable y sin conexión. |
 | `fonts/` | Barlow Semi Condensed, incluida para que se vea igual sin conexión. |
 | `tools/build-map.mjs` | Genera `europa-data.js` a partir de los datos del simulador GeoSim (no incluidos aquí). |
+| `tools/release.mjs` | Marca una versión nueva (`index.html`, `sw.js`, `version.json`) antes de publicar. |
 | `tools/resources.json` | Yacimientos (petróleo, gas, carbón, hierro, minerales), editable a mano. |
 
 ## Fuentes y licencias de los datos

@@ -1,7 +1,10 @@
 // Service worker de NanWar: guarda el juego en caché para jugar sin conexión.
-// La página se pide primero a la red (así llegan las actualizaciones) y, si no hay conexión, sale de la caché.
-// El resto de archivos sale de la caché y se refresca en segundo plano.
-const CACHE = 'nanwar-v1';
+// La página, el mapa y el manifiesto se piden siempre a la red (saltándose la caché HTTP), así que con conexión
+// siempre llega la última versión; sin conexión salen de la copia guardada. Iconos y tipografía no cambian: caché.
+// version.json nunca se guarda: la página lo consulta para saber si hay una versión nueva.
+// VERSION la escribe tools/release.mjs en cada publicación (cambiarla hace que el navegador instale este worker de nuevo).
+const VERSION = '2026.10.16-135906';
+const CACHE = `nanwar-${VERSION}`;
 const SHELL = [
     './',
     './index.html',
@@ -21,7 +24,11 @@ const SHELL = [
 ];
 
 self.addEventListener('install', event => {
-    event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));
+    event.waitUntil(
+        caches.open(CACHE)
+            .then(cache => cache.addAll(SHELL.map(url => new Request(url, { cache: 'no-cache' }))))
+            .then(() => self.skipWaiting())
+    );
 });
 
 self.addEventListener('activate', event => {
@@ -33,30 +40,24 @@ self.addEventListener('activate', event => {
 });
 
 self.addEventListener('fetch', event => {
-    const req = event.request;
-    if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
+    const req = event.request, url = new URL(req.url);
+    if (req.method !== 'GET' || url.origin !== self.location.origin) return;
+    if (url.pathname.endsWith('/version.json')) return;   // siempre a la red, nunca a la caché
 
-    if (req.mode === 'navigate') {
-        event.respondWith(
-            fetch(req)
-                .then(res => {
-                    if (res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put(req, copy)); }
-                    return res;
-                })
-                .catch(() => caches.match(req).then(hit => hit || caches.match('./index.html')))
-        );
+    const store = res => {
+        if (res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put(req, copy)); }
+        return res;
+    };
+
+    if (/\/(icons|fonts)\//.test(url.pathname)) {
+        event.respondWith(caches.match(req).then(hit => hit || fetch(req).then(store)));
         return;
     }
 
     event.respondWith(
-        caches.match(req).then(hit => {
-            const network = fetch(req)
-                .then(res => {
-                    if (res.ok) { const copy = res.clone(); caches.open(CACHE).then(c => c.put(req, copy)); }
-                    return res;
-                })
-                .catch(() => hit);
-            return hit || network;
-        })
+        fetch(req, { cache: 'no-cache' })
+            .then(store)
+            .catch(() => caches.match(req, { ignoreSearch: true })
+                .then(hit => hit || (req.mode === 'navigate' ? caches.match('./index.html') : undefined)))
     );
 });
