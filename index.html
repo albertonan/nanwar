@@ -169,6 +169,9 @@
         #confirm { position: absolute; left: 50%; bottom: 62px; transform: translateX(-50%); padding: 10px 12px; display: flex; gap: 10px; align-items: center; z-index: 3; max-width: calc(100% - 24px); }
         .mobile-only { display: none !important; }
         #hint.beside-card { left: calc(50% + 185px); max-width: calc(100% - 560px); }
+        #replay { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); display: flex; gap: 12px; align-items: center; padding: 8px 10px 8px 14px; z-index: 4; max-width: calc(100% - 24px); }
+        .alert { padding: 10px 12px; border-left: 5px solid var(--war); background: var(--raised); border-radius: 8px; margin-top: 8px; }
+        .alert.ally { border-left-color: var(--signal); }
         #tooltip {
             position: absolute; pointer-events: none; background: rgba(21, 26, 18, 0.94); border: 1px solid var(--line);
             padding: 7px 10px; border-radius: 6px; font-size: 13px; line-height: 1.45; max-width: 290px; z-index: 4;
@@ -301,6 +304,7 @@
             <aside id="setup" class="float" hidden></aside>
             <aside id="card" class="float" hidden></aside>
             <div id="confirm" class="float" hidden></div>
+            <div id="replay" class="float" hidden></div>
             <div id="hint"></div>
             <details id="legend" class="float"></details>
             <div id="tooltip" hidden></div>
@@ -310,6 +314,7 @@
 </div>
 <dialog id="game-dialog"><div class="float" id="game-dialog-body"></div></dialog>
 <dialog id="peace-dialog"><div class="float" id="peace-body"></div></dialog>
+<dialog id="alerts-dialog"><div class="float" id="alerts-body"></div></dialog>
 <div id="overlay" hidden><div class="float" id="overlay-card"></div></div>
 <input type="file" id="import-file" accept=".json,application/json" hidden>
 <script src="europa-data.js"></script>
@@ -521,6 +526,7 @@ class GameEngine {
         this.won = false;
         this.logs = [];
         this.proposals = [];
+        this.alerts = [];           // partes de guerra para el jugador (se muestran al volver a su turno)
         this.proposedThisTurn = new Set();
         this.version = 0;       // cambia con la propiedad de las casillas
         this.roadVersion = 0;   // cambia al construir
@@ -1462,16 +1468,31 @@ class GameEngine {
         return inc;
     }
 
+    // El fin de turno en tres pasos, para que la interfaz pueda enseñar la jugada de cada país (el resultado es el mismo).
     endTurn() {
-        if (this.over || this.player === null) return;
+        if (!this.beginAiPhase()) return;
+        for (const id of this.aiOrder()) this.aiStep(id);
+        this.finishAiPhase();
+    }
+    beginAiPhase() {
+        if (this.over || this.player === null) return false;
         for (const p of [...this.proposals]) this.answerProposal(this.proposals.indexOf(p), false, true);
         this.proposals = [];
-        for (let i = 1; i < this.nations.length && !this.over; i++) {
-            const id = (this.player + i) % this.nations.length;
-            if (!this.nations[id].alive) continue;
-            this.beginNationTurn(id);
-            this.aiTurn(id);
-        }
+        this.alerts = [];
+        return true;
+    }
+    aiOrder() {
+        const out = [];
+        for (let i = 1; i < this.nations.length; i++) out.push((this.player + i) % this.nations.length);
+        return out;
+    }
+    aiStep(id) {
+        if (this.over || !this.nations[id].alive) return false;
+        this.beginNationTurn(id);
+        this.aiTurn(id);
+        return true;
+    }
+    finishAiPhase() {
         if (this.over) return;
         this.turn++;
         this.proposedThisTurn.clear();
@@ -1487,6 +1508,7 @@ class GameEngine {
         for (const bl of this.sharedBlocs(a, b)) this.leaveBloc(bl, a, ` por atacar a ${this.nm(b)}`);
         Object.assign(r, { state: 'guerra', since: this.turn });
         this.log(`${this.nm(a)} DECLARA LA GUERRA a ${this.nm(b)}.`);
+        if (b === this.player) this.alerts.push({ kind: 'war', from: a });
         const joined = [], handled = new Set([a, b]);
         for (const bl of this.blocsOf(b)) {
             for (const c of [...bl.members]) {
@@ -1497,6 +1519,7 @@ class GameEngine {
                 for (const bl2 of this.sharedBlocs(c, a)) this.leaveBloc(bl2, c, ` para defender a ${this.nm(b)}`);
                 Object.assign(this.rel(c, a), { state: 'guerra', since: this.turn });
                 joined.push(this.nm(c));
+                if (a === this.player) this.alerts.push({ kind: 'joined', from: c, defending: b });
             }
         }
         if (joined.length) this.log(`En defensa de ${this.nm(b)} entran en guerra contra ${this.nm(a)}: ${joined.join(', ')}.`);
@@ -1509,6 +1532,7 @@ class GameEngine {
             if (this.atWar(s.id, foe)) continue;
             Object.assign(this.rel(s.id, foe), { state: 'guerra', since: this.turn });
             this.log(`${s.name}, satélite de ${this.nm(side)}, entra en la guerra contra ${this.nm(foe)}.`);
+            if (foe === this.player) this.alerts.push({ kind: 'joined', from: s.id, defending: side });
         }
         const lord = this.nations[b].overlord;
         if (lord >= 0 && !handled.has(lord) && lord !== a && !this.atWar(lord, a)) {
@@ -2049,6 +2073,15 @@ const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.
 const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
+// Preferencias de visualización (en este dispositivo, no en la partida).
+const PREFS_KEY = 'nanwar.prefs';
+const SPEEDS = { lenta: 1200, normal: 500, rapida: 150 };
+function readPrefs() {
+    const def = { watch: 'directo', speed: 'normal' };
+    try { return { ...def, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; } catch { return def; }
+}
+function writePrefs(p) { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch { /* sin almacenamiento */ } }
+
 class MapView {
     constructor(game, canvas) {
         this.game = game;
@@ -2457,6 +2490,8 @@ class GameUI {
         this.blocName = '';
         this.blocSecret = false;
         this.seenLog = 0;
+        this.prefs = readPrefs();
+        this.replaying = false;
 
         this.bindMap();
         document.addEventListener('click', e => this.onAction(e));
@@ -2636,6 +2671,7 @@ class GameUI {
 
     clickCell(cell) {
         const g = this.game;
+        if (this.replaying) return;
         if (cell < 0 || !isLand(cell)) { if (this.tool === 'command') this.select(-1); return; }
         if (g.player === null) { this.choice = g.owner[cell]; this.render(); return; }
         if (g.over) return;
@@ -2749,6 +2785,7 @@ class GameUI {
         const b = e.target.closest('[data-action]');
         if (!b || b.disabled) return;
         const g = this.game, d = b.dataset;
+        if (this.replaying && !['skip-replay', 'watch', 'speed'].includes(d.action)) return;
         const p = this.selected >= 0 ? PROVINCES[G.prov[this.selected]] : null;
         switch (d.action) {
             case 'setting': g.configure({ ...g.settings, [d.key]: d.key === 'victory' ? +d.value : d.key === 'fog' ? d.value === 'si' : d.value }); break;
@@ -2783,13 +2820,12 @@ class GameUI {
                 this.view.centerOn(g.nations[this.choice].capitalCell, 5);
                 this.select(g.nations[this.choice].capitalCell);
                 return;
-            case 'end-turn':
-                if (g.player === null || g.over) return;
-                this.setTool('command');
-                g.endTurn();
-                writeSave('auto', g);
-                this.select(this.selected);
-                return;
+            case 'end-turn': this.endTurnFlow(); return;
+            case 'skip-replay': this.skipReplay(); return;
+            case 'watch': this.prefs.watch = d.value; writePrefs(this.prefs); if ($('#game-dialog').open) this.renderGameDialog(); break;
+            case 'speed': this.prefs.speed = d.value; writePrefs(this.prefs); if ($('#game-dialog').open) this.renderGameDialog(); break;
+            case 'alerts-close': $('#alerts-dialog').close(); g.alerts = []; break;
+            case 'alert-goto': $('#alerts-dialog').close(); g.alerts = []; this.view.centerOn(+d.cell, 6); this.setTool('command'); this.select(+d.cell); return;
             case 'next-army': this.nextArmy(); return;
             case 'install':
                 if (this.installPrompt) { this.installPrompt.prompt(); this.installPrompt.userChoice.finally(() => { this.installPrompt = null; this.renderTop(); }); }
@@ -2812,7 +2848,10 @@ class GameUI {
             case 'recruit-qty': this.recruitQty = d.qty === 'max' ? Infinity : +d.qty; break;
             case 'diplo': g.playerDiplomacy(d.kind, +d.target); break;
             case 'invite': g.playerInvite(+d.bloc, +d.target); break;
-            case 'accept': case 'reject': g.answerProposal(+d.index, d.action === 'accept'); break;
+            case 'accept': case 'reject':
+                g.answerProposal(+d.index, d.action === 'accept');
+                if ($('#alerts-dialog').open) this.renderAlerts();
+                break;
             case 'tab': this.tab = d.tab; this.drawerOpen = true; this.focusNation = null; break;
             case 'drawer': this.drawerOpen = !this.drawerOpen; break;
             case 'nation': this.focusNation = +d.id; this.tab = 'paises'; this.drawerOpen = true; break;
@@ -2862,6 +2901,76 @@ class GameUI {
         this.render();
     }
 
+    // Fin de turno: los demás países juegan de golpe ("directo") o uno a uno, enseñando cada jugada ("ver").
+    async endTurnFlow() {
+        const g = this.game;
+        if (this.replaying || g.player === null || g.over || !g.beginAiPhase()) return;
+        this.setTool('command');
+        const order = g.aiOrder();
+        if (this.prefs.watch !== 'ver') {
+            for (const id of order) g.aiStep(id);
+        } else {
+            this.replaying = true;
+            this.skipping = false;
+            $('#tooltip').hidden = true;
+            $('#hint').hidden = true;
+            $('#card').hidden = true;
+            const delay = SPEEDS[this.prefs.speed] ?? SPEEDS.normal;
+            for (let i = 0; i < order.length; i++) {
+                const id = order[i];
+                if (this.skipping || g.over || !g.nations[id].alive) { g.aiStep(id); continue; }
+                const before = `${g.version}:${g.armyVersion}:${g.roadVersion}:${g.fortVersion}:${g.logs.length}`;
+                this.view.hoverNation = id;
+                this.renderReplay(id, i + 1, order.length);
+                g.aiStep(id);
+                const changed = before !== `${g.version}:${g.armyVersion}:${g.roadVersion}:${g.fortVersion}:${g.logs.length}`;
+                if (!changed) continue;   // quien no hace nada no hace esperar
+                this.view.draw();
+                this.renderTop();
+                await new Promise(res => { this.wakeReplay = res; setTimeout(res, delay); });
+            }
+            this.view.hoverNation = -1;
+            this.replaying = false;
+            $('#replay').hidden = true;
+        }
+        g.finishAiPhase();
+        writeSave('auto', g);
+        this.select(this.selected);
+        if (g.alerts.length || g.proposals.some(p => p.kind === 'llamada')) this.openAlerts();
+    }
+    skipReplay() { this.skipping = true; this.wakeReplay?.(); }
+    renderReplay(id, n, total) {
+        const g = this.game, el = $('#replay');
+        el.hidden = false;
+        el.innerHTML = `<span class="chip"><i style="background:${g.nations[id].color}"></i>${g.nm(id)}</span>
+            <span class="small muted">turno ${n} de ${total}</span>
+            <button class="btn" data-action="skip-replay" title="Terminar al instante (Esc)">Saltar</button>`;
+    }
+
+    // Partes de guerra al volver a tu turno: quién te ataca y qué aliados piden ayuda.
+    openAlerts() { this.renderAlerts(); if (!$('#alerts-dialog').open) $('#alerts-dialog').showModal(); }
+    renderAlerts() {
+        const g = this.game, items = [];
+        for (const a of g.alerts) {
+            const cap = g.nations[a.from].capitalCell;
+            if (a.kind === 'war') items.push(`<div class="alert"><p><b>${g.nm(a.from)}</b> te ha declarado la guerra.</p>
+                <div class="row" style="margin-top:6px"><button class="btn" data-action="alert-goto" data-cell="${cap}">Ver en el mapa</button></div></div>`);
+            else items.push(`<div class="alert"><p><b>${g.nm(a.from)}</b> entra en la guerra contra ti en defensa de ${g.nm(a.defending)}.</p></div>`);
+        }
+        g.proposals.forEach((pr, i) => {
+            if (pr.kind !== 'llamada') return;
+            items.push(`<div class="alert ally"><p>Tu aliado <b>${g.nm(pr.from)}</b> ha sido atacado por <b>${g.nm(pr.against)}</b>. ¿Entras en la guerra?</p>
+                <p class="note">Si no intervienes, sales de las alianzas que compartís con ${g.nm(pr.from)}.</p>
+                <div class="row" style="margin-top:6px"><button class="btn war" data-action="accept" data-index="${i}">Ir a la guerra</button>
+                <button class="btn" data-action="reject" data-index="${i}">No intervenir</button></div></div>`);
+        });
+        const pending = g.proposals.some(p => p.kind === 'llamada');
+        $('#alerts-body').innerHTML = `<h2>Partes de guerra</h2>
+            ${items.join('') || '<p class="note" style="margin-top:8px">Ya has respondido a todo.</p>'}
+            <div class="row" style="margin-top:14px;justify-content:flex-end">
+                <button class="btn ${pending ? '' : 'primary'}" data-action="alerts-close">${pending ? 'Decidir más tarde' : 'Entendido'}</button></div>`;
+    }
+
     onInput(e) {
         if (e.target.id === 'nation-search') { this.filter = e.target.value; this.renderNationList(); }
         if (e.target.id === 'bloc-name') this.blocName = e.target.value;
@@ -2876,7 +2985,8 @@ class GameUI {
     }
 
     onKey(e) {
-        if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || $('#game-dialog').open || $('#peace-dialog').open) return;
+        if (this.replaying) { if (e.key === 'Escape') this.skipReplay(); return; }
+        if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || $('#game-dialog').open || $('#peace-dialog').open || $('#alerts-dialog').open) return;
         const g = this.game;
         if (e.key === 'Escape') { this.cancel(); return; }
         if (g.player === null || g.over) return;
@@ -2988,6 +3098,7 @@ class GameUI {
                 <select id="nation-select"><option value="" ${c === null ? 'selected' : ''} disabled>Elige un país…</option>
                 ${sorted.map(n => `<option value="${n.id}" ${c === n.id ? 'selected' : ''}>${n.name}</option>`).join('')}</select>
                 ${pick}</div>
+            ${this.watchSettings()}
             <button class="btn ghost wide" style="margin-top:12px" data-action="open-game">Cargar una partida guardada</button>
             ${this.installPrompt ? '<button class="btn wide" style="margin-top:6px" data-action="install">Instalar NanWar en este dispositivo</button>' : ''}
             ${isIOS() && !isStandalone() ? '<p class="note" style="margin-top:10px">Para instalarlo en el iPhone o iPad: botón Compartir de Safari y «Añadir a pantalla de inicio». Después funciona sin conexión.</p>' : ''}`;
@@ -3378,6 +3489,14 @@ class GameUI {
             </div>`;
     }
 
+    watchSettings() {
+        const p = this.prefs, seg = (action, opts, cur) => `<div class="seg">${opts.map(([v, label]) => `<button data-action="${action}" data-value="${v}" class="${cur === v ? 'on' : ''}">${label}</button>`).join('')}</div>`;
+        return `<div class="field"><span>Turno de los demás países</span>
+                ${seg('watch', [['directo', 'Directo a mi turno'], ['ver', 'Ver sus jugadas']], p.watch)}</div>
+            ${p.watch === 'ver' ? `<div class="field"><span>Velocidad</span>${seg('speed', [['lenta', 'Lenta'], ['normal', 'Normal'], ['rapida', 'Rápida']], p.speed)}
+                <p class="note">Cada país juega por orden y se resalta su territorio; los que no hacen nada se saltan. «Saltar» o Esc lo termina al instante.</p></div>` : ''}`;
+    }
+
     renderGameDialog() {
         const g = this.game, saves = readSaves(), playing = g.player !== null;
         const when = s => new Date(s.date).toLocaleString('es-ES', { dateStyle: 'short', timeStyle: 'short' });
@@ -3390,6 +3509,7 @@ class GameUI {
                     ${slot === 'auto' ? '<span></span>' : `<button class="btn" data-action="save" data-slot="${slot}" ${playing && !g.over ? '' : 'disabled'}>Guardar aquí</button>`}
                     <button class="btn" data-action="load" data-slot="${slot}" ${s ? '' : 'disabled'}>Cargar</button></div>`;
             }).join('')}
+            ${this.watchSettings()}
             <div class="row" style="margin-top:14px">
                 <button class="btn" data-action="export" ${playing ? '' : 'disabled'}>Exportar a archivo</button>
                 <button class="btn" data-action="import">Importar archivo</button>
@@ -3413,7 +3533,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.16-153036';
+const APP_VERSION = '2026.10.16-164358';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
