@@ -223,6 +223,14 @@
         .log-turn:first-child { margin-top: 0; }
         .log-line { font-size: 13px; padding: 3px 0 3px 10px; border-left: 2px solid var(--line); }
 
+        .peace-opt {
+            display: grid; gap: 3px; width: 100%; text-align: left; padding: 10px 12px; border-radius: 8px; cursor: pointer;
+            background: var(--raised); color: var(--text); border: 1px solid var(--line); font: 14px var(--font);
+        }
+        .peace-opt span { color: var(--muted); font-size: 12.5px; }
+        .peace-opt.on { border-color: var(--signal); box-shadow: inset 5px 0 0 var(--signal); }
+        .peace-opt:disabled { opacity: 0.45; cursor: not-allowed; }
+        .warn-text { color: #ffb347; }
         dialog { border: 0; padding: 0; background: none; color: var(--text); }
         dialog::backdrop { background: rgba(10, 14, 10, 0.6); }
         dialog .float { padding: 18px; width: min(480px, calc(100vw - 32px)); }
@@ -301,6 +309,7 @@
     </main>
 </div>
 <dialog id="game-dialog"><div class="float" id="game-dialog-body"></div></dialog>
+<dialog id="peace-dialog"><div class="float" id="peace-body"></div></dialog>
 <div id="overlay" hidden><div class="float" id="overlay-card"></div></div>
 <input type="file" id="import-file" accept=".json,application/json" hidden>
 <script src="europa-data.js"></script>
@@ -326,6 +335,8 @@ const CONFIG = {
     FORT_DEFENSE: 1.75,             // defensa en casilla fortificada
     SUPPLY_ROAD_RANGE: 4,           // casillas abastecidas alrededor de la red de carreteras unida a la capital
     SUPPLY_CITY_RANGE: 2,           // casillas abastecidas alrededor de cada ciudad propia
+    DISPUTED_INCOME: 0.5,           // renta del territorio ocupado en guerra hasta que se anexiona en la paz
+    TRIBUTE: 0.25,                  // parte de sus ingresos que un satélite paga a su señor
     VISION_TERRITORY: 2,            // niebla de guerra: casillas que se ven más allá del territorio propio o aliado
     VISION_ARMY: 3,                 // ... y alrededor de cada ejército propio o aliado
     SPY_COST: 60,                   // oro por enviar un espía (uno por provincia)
@@ -509,10 +520,12 @@ class GameEngine {
 
         this.owner = new Int16Array(G.N).fill(-1);
         for (const i of G.land) this.owner[i] = PROVINCES[G.prov[i]].country;
+        // Dueño legal: el que controla una casilla en guerra (owner) no la posee hasta que se firma la paz.
+        this.legal = Int16Array.from(this.owner);
         this.nations = E.countries.map((c, id) => ({
             id, key: c.key, name: c.name, color: c.color,
             capitalCell: PROVINCES[c.capital].city, capitalName: PROVINCES[c.capital].cityName,
-            gold: 0, alive: true, recruited: new Map()
+            gold: 0, alive: true, recruited: new Map(), overlord: -1
         }));
         const n = this.nations.length;
         this.relations = Array.from({ length: n }, () => []);
@@ -552,11 +565,16 @@ class GameEngine {
 
     // --- Guardar / cargar ---
     serialize() {
-        const runs = [];   // propietarios de las casillas de tierra, comprimidos por tramos [dueño, cuántas]
-        for (const i of G.land) {
-            const o = this.owner[i], last = runs[runs.length - 1];
-            if (last && last[0] === o) last[1]++; else runs.push([o, 1]);
-        }
+        // propietarios de las casillas de tierra, comprimidos por tramos [dueño, cuántas]
+        const compress = arr => {
+            const out = [];
+            for (const i of G.land) {
+                const o = arr[i], last = out[out.length - 1];
+                if (last && last[0] === o) last[1]++; else out.push([o, 1]);
+            }
+            return out;
+        };
+        const runs = compress(this.owner);
         const relations = [];
         for (let a = 0; a < this.nations.length; a++) for (let b = a + 1; b < this.nations.length; b++) {
             const r = this.relations[a][b];
@@ -566,10 +584,10 @@ class GameEngine {
             format: 'eurowar-1', map: `${G.land.length}:${PROVINCES.length}`,
             seed: this.seed, rng: this.rng.state, turn: this.turn, player: this.player, over: this.over, won: this.won,
             settings: this.settings, logs: this.logs.slice(-150), proposals: this.proposals, proposed: [...this.proposedThisTurn],
-            owner: runs, roads: this.roadEdges(),
+            owner: runs, legal: compress(this.legal), roads: this.roadEdges(),
             forts: G.land.filter(i => this.fort[i]), fortWork: [...this.fortWork].map(([c, w]) => [c, w.owner, w.left]),
             spies: [...this.spies].map(([pid, s]) => [pid, s.since, s.revealedTurn]),
-            nations: this.nations.map(n => ({ gold: n.gold, alive: n.alive, recruited: [...n.recruited] })),
+            nations: this.nations.map(n => ({ gold: n.gold, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord })),
             relations,
             armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used]),
             nextArmyId: this.nextArmyId,
@@ -589,6 +607,9 @@ class GameEngine {
         g.ai = AGGRESSION[data.settings.aggression];
         let k = 0;
         for (const [o, count] of data.owner) for (let j = 0; j < count; j++) g.owner[G.land[k++]] = o;
+        g.legal = Int16Array.from(g.owner);   // partidas anteriores a las disputas: todo lo controlado es legal
+        k = 0;
+        if (data.legal) for (const [o, count] of data.legal) for (let j = 0; j < count; j++) g.legal[G.land[k++]] = o;
         const roads = data.roads ?? data.builtRoads ?? [];   // builtRoads: partidas guardadas antes de que se pudieran cortar
         for (let i = 0; i < roads.length; i += 3) {
             const a = roads[i], d = roads[i + 1], cls = roads[i + 2], b = G.nb[a * 6 + d];
@@ -598,7 +619,7 @@ class GameEngine {
         for (const c of data.forts ?? []) g.fort[c] = 1;
         g.fortWork = new Map((data.fortWork ?? []).map(([c, owner, left]) => [c, { owner, left }]));
         g.spies = new Map((data.spies ?? []).map(([pid, since, revealedTurn]) => [pid, { since, revealedTurn }]));
-        data.nations.forEach((n, i) => Object.assign(g.nations[i], { gold: n.gold, alive: n.alive, recruited: new Map(n.recruited) }));
+        data.nations.forEach((n, i) => Object.assign(g.nations[i], { gold: n.gold, alive: n.alive, recruited: new Map(n.recruited), overlord: n.overlord ?? -1 }));
         for (const row of g.relations) for (const r of row) if (r) Object.assign(r, { state: 'paz', since: 0, truceUntil: 0 });
         for (const [a, b, state, since, truceUntil] of data.relations) Object.assign(g.relations[a][b], { state, since, truceUntil });
         g.armies = new Map();
@@ -623,6 +644,8 @@ class GameEngine {
     rel(a, b) { return this.relations[a][b]; }
     atWar(a, b) { return a !== b && a >= 0 && b >= 0 && this.rel(a, b).state === 'guerra'; }
     allied(a, b) { return a !== b && a >= 0 && b >= 0 && this.alliedM[a * this.nations.length + b] === 1; }
+    satellitesOf(id) { return this.nations.filter(n => n.alive && n.overlord === id).map(n => n.id); }
+    isDisputed(cell) { return this.owner[cell] !== this.legal[cell]; }
     enemiesOf(id) { return this.nations.filter(n => n.alive && this.atWar(id, n.id)).map(n => n.id); }
     alliesOf(id) { return this.nations.filter(n => n.alive && this.allied(id, n.id)).map(n => n.id); }
 
@@ -630,6 +653,13 @@ class GameEngine {
         const n = this.nations.length;
         this.alliedM = new Uint8Array(n * n);
         for (const b of this.blocs) for (const x of b.members) for (const y of b.members) if (x !== y) this.alliedM[x * n + y] = 1;
+        for (const s of this.nations) {
+            if (!s.alive || s.overlord < 0) continue;
+            for (const t of this.nations) {
+                if (t.id === s.id || !t.alive) continue;
+                if (t.id === s.overlord || t.overlord === s.overlord) { this.alliedM[s.id * n + t.id] = 1; this.alliedM[t.id * n + s.id] = 1; }
+            }
+        }
         this.blocVersion++;
     }
     createBloc(founder, name, secret) {
@@ -708,17 +738,25 @@ class GameEngine {
         let base = 0, road = 0, res = 0;
         for (const i of G.land) {
             if (this.owner[i] !== id) continue;
-            base += CELL_VALUE[i];
-            if (connected.has(G.prov[i])) road += CELL_VALUE[i] * CONFIG.ROAD_BONUS;
+            const disputed = this.legal[i] !== id;
+            base += CELL_VALUE[i] * (disputed ? CONFIG.DISPUTED_INCOME : 1);
+            if (!disputed && connected.has(G.prov[i])) road += CELL_VALUE[i] * CONFIG.ROAD_BONUS;
         }
         const resources = RESOURCES.filter(r => this.owner[r.cell] === id);
-        for (const r of resources) res += r.value;
+        for (const r of resources) res += r.value * (this.legal[r.cell] === id ? 1 : CONFIG.DISPUTED_INCOME);
         const e = { key, seen, connected, base: Math.round(base), road: Math.round(road), res, resources,
             total: Math.round(base + road + res) };
         this.econCache[id] = e;
         return e;
     }
-    income(id) { return this.economy(id).total; }
+    // Tributo: el satélite entrega una parte de sus ingresos a su señor.
+    tribute(id) {
+        const n = this.nations[id];
+        const out = n.overlord >= 0 ? Math.round(this.economy(id).total * CONFIG.TRIBUTE) : 0;
+        const inn = this.satellitesOf(id).reduce((s, x) => s + Math.round(this.economy(x).total * CONFIG.TRIBUTE), 0);
+        return { in: inn, out };
+    }
+    income(id) { const t = this.tribute(id); return this.economy(id).total - t.out + t.in; }
     // Alcance del suministro: casillas propias o aliadas cerca de la red de carreteras unida a la capital o de una ciudad propia.
     // Devuelve, por casilla, el alcance que le queda (−1 = sin suministro).
     supplyMap(id) {
@@ -1083,7 +1121,9 @@ class GameEngine {
     capture(cell, a, byForce = false) {
         const prev = this.owner[cell];
         if (prev === a) return;
-        this.owner[cell] = a;
+        // Liberar tierra ocupada de un aliado se la devuelve a su dueño en lugar de quedársela.
+        const holder = c => (this.legal[c] !== a && this.allied(a, this.legal[c]) ? this.legal[c] : a);
+        this.owner[cell] = holder(cell);
         this.version++;
         if (byForce) this.wreck(cell, prev, a);
         const res = RESOURCE_AT.get(cell);
@@ -1094,7 +1134,7 @@ class GameEngine {
         for (const c of p.cells) {
             if (this.owner[c] !== prev) continue;
             const ar = this.armyOn(c);
-            if ((!ar || ar.owner !== prev) && this.fort[c] !== 1) this.owner[c] = a;
+            if ((!ar || ar.owner !== prev) && this.fort[c] !== 1) this.owner[c] = holder(c);
         }
         if (CAPITAL_OF[cell] >= 0 || this.involvesPlayer(a, prev)) {
             this.log(`${this.nm(a)} toma ${p.cityName} (${p.name})${CAPITAL_OF[cell] >= 0 ? `, capital de ${this.nm(CAPITAL_OF[cell])}` : ''}.`);
@@ -1108,6 +1148,10 @@ class GameEngine {
         if (!n.alive || PROVINCES.some(p => this.owner[p.city] === id)) return;
         n.alive = false;
         for (const i of G.land) if (this.owner[i] === id) this.owner[i] = captor;
+        for (const i of G.land) if (this.legal[i] === id) this.legal[i] = this.owner[i];   // lo que era suyo pasa a quien lo ocupa
+        for (const s of this.nations) if (s.overlord === id) s.overlord = -1;
+        n.overlord = -1;
+        this.blocsChanged();
         for (const a of [...this.armies.values()]) if (a.owner === id) this.removeArmy(a);
         for (const o of this.nations) if (o.id !== id) Object.assign(this.rel(id, o.id), { state: 'paz' });
         for (const b of this.blocsOf(id)) this.leaveBloc(b, id);
@@ -1124,8 +1168,9 @@ class GameEngine {
             this.log("DERROTA: tu nación ha caído.");
             return;
         }
-        const share = this.landCounts()[p] / G.land.length;
-        if (share >= this.settings.victory || this.nations.every(n => n.id === p || !n.alive)) {
+        const lands = this.landCounts();
+        const share = [p, ...this.satellitesOf(p)].reduce((s, x) => s + lands[x], 0) / G.land.length;
+        if (share >= this.settings.victory || this.nations.every(n => n.id === p || !n.alive || n.overlord === p)) {
             this.over = true; this.won = true;
             this.log("VICTORIA: Europa está bajo tu mando.");
         }
@@ -1229,7 +1274,7 @@ class GameEngine {
     recruitLeft(nation, p) { return p.recruitCap - (this.nations[nation].recruited.get(p.id) ?? 0); }
     canRecruitAt(nation, p) {
         const ar = this.armyOn(p.city);
-        return this.owner[p.city] === nation && (!ar || ar.owner === nation) && this.recruitLeft(nation, p) > 0;
+        return this.owner[p.city] === nation && this.legal[p.city] === nation && (!ar || ar.owner === nation) && this.recruitLeft(nation, p) > 0;
     }
     recruit(nation, p, type) {
         const n = this.nations[nation], cost = CONFIG.TYPES[type].cost;
@@ -1288,6 +1333,7 @@ class GameEngine {
     declareWar(a, b) {
         const r = this.rel(a, b);
         if (r.state === 'guerra' || this.turn < r.truceUntil || !this.nations[b].alive || a === b) return false;
+        if (this.nations[a].overlord === b || this.nations[b].overlord === a) return false;   // ni el satélite ni su señor se atacan
         for (const bl of this.sharedBlocs(a, b)) this.leaveBloc(bl, a, ` por atacar a ${this.nm(b)}`);
         Object.assign(r, { state: 'guerra', since: this.turn });
         this.log(`${this.nm(a)} DECLARA LA GUERRA a ${this.nm(b)}.`);
@@ -1304,11 +1350,119 @@ class GameEngine {
             }
         }
         if (joined.length) this.log(`En defensa de ${this.nm(b)} entran en guerra contra ${this.nm(a)}: ${joined.join(', ')}.`);
+        for (const s of this.nations) {
+            if (!s.alive || s.overlord < 0 || handled.has(s.id)) continue;
+            const side = s.overlord === a ? a : s.overlord === b ? b : -1;
+            if (side < 0) continue;
+            const foe = side === a ? b : a;
+            handled.add(s.id);
+            if (this.atWar(s.id, foe)) continue;
+            Object.assign(this.rel(s.id, foe), { state: 'guerra', since: this.turn });
+            this.log(`${s.name}, satélite de ${this.nm(side)}, entra en la guerra contra ${this.nm(foe)}.`);
+        }
+        const lord = this.nations[b].overlord;
+        if (lord >= 0 && !handled.has(lord) && lord !== a && !this.atWar(lord, a)) {
+            if (lord === this.player) this.proposals.push({ kind: 'llamada', from: b, against: a });
+            else Object.assign(this.rel(lord, a), { state: 'guerra', since: this.turn });
+        }
         return true;
     }
-    makePeace(a, b) {
+    makePeace(a, b, quiet = false) {
         Object.assign(this.rel(a, b), { state: 'paz', since: this.turn, truceUntil: this.turn + CONFIG.TRUCE_TURNS });
-        this.log(`PAZ entre ${this.nm(a)} y ${this.nm(b)} (tregua hasta el turno ${this.turn + CONFIG.TRUCE_TURNS}).`);
+        if (!quiet) this.log(`PAZ entre ${this.nm(a)} y ${this.nm(b)} (tregua hasta el turno ${this.turn + CONFIG.TRUCE_TURNS}).`);
+    }
+    // Firma la paz entre el bando de `a` y el de `b` (cada uno con sus satélites) y reparte lo ocupado.
+    // terms.mode: 'annex' (cada uno se anexiona lo que ocupa), 'satellite' (b pasa a ser satélite de a) o 'white' (todo vuelve).
+    // terms.keep: en 'satellite', si a se queda lo que ocupó. terms.mine: satélite al que a cede lo que ocupó él (−1: para a).
+    // terms.satGains: 'self' (lo ocupado por los satélites de a es para ellos) u 'overlord' (para a).
+    settlePeace(a, b, terms = { mode: 'annex' }) {
+        const sideA = new Set([a, ...this.satellitesOf(a)]), sideB = new Set([b, ...this.satellitesOf(b)]);
+        let gainedA = 0, gainedB = 0;
+        for (const i of G.land) {
+            const o = this.owner[i], l = this.legal[i];
+            if (o === l) continue;
+            const aGain = sideA.has(o) && sideB.has(l), bGain = sideB.has(o) && sideA.has(l);
+            if (!aGain && !bGain) continue;
+            if (terms.mode === 'white' || (terms.mode === 'satellite' && (bGain || !terms.keep))) { this.owner[i] = l; continue; }
+            if (aGain) {
+                let to = o;
+                if (o === a && terms.mine >= 0 && sideA.has(terms.mine)) to = terms.mine;
+                else if (o !== a && terms.satGains === 'overlord') to = a;
+                this.owner[i] = to;
+                this.legal[i] = to;
+                gainedA++;
+            } else {
+                this.legal[i] = o;
+                gainedB++;
+            }
+        }
+        for (const x of sideA) for (const y of sideB) if (this.atWar(x, y)) this.makePeace(x, y, true);
+        const what = terms.mode === 'white' ? 'paz blanca: cada uno recupera lo suyo'
+            : terms.mode === 'satellite' ? `${this.nm(b)} pasa a ser satélite de ${this.nm(a)}`
+            : `${this.nm(a)} se anexiona ${plural(gainedA, 'casilla', 'casillas')} y ${this.nm(b)} ${gainedB}`;
+        this.log(`PAZ entre ${this.nm(a)} y ${this.nm(b)}: ${what}. Tregua hasta el turno ${this.turn + CONFIG.TRUCE_TURNS}.`);
+        this.version++;
+        if (terms.mode === 'satellite') this.makeSatellite(b, a);
+        this.evictArmies();
+        this.checkGameOver();
+    }
+    makeSatellite(sat, lord) {
+        const s = this.nations[sat];
+        for (const bl of this.blocsOf(sat)) this.leaveBloc(bl, sat, ' al pasar a ser un estado satélite');
+        s.overlord = lord;
+        this.blocsChanged();
+        // Hace la paz con quien no esté en guerra con su señor y entra en las guerras de su señor.
+        for (const e of this.enemiesOf(sat)) if (!this.atWar(lord, e)) this.settlePeace(sat, e, { mode: 'annex' });
+        for (const e of this.enemiesOf(lord)) if (!this.atWar(sat, e)) Object.assign(this.rel(sat, e), { state: 'guerra', since: this.turn });
+        this.proposals = this.proposals.filter(p => p.from !== sat);
+        this.version++;
+    }
+    // Tras un tratado, los ejércitos que han quedado en territorio de un país en paz vuelven a la casilla propia más cercana.
+    evictArmies() {
+        for (const a of [...this.armies.values()]) {
+            const o = this.owner[a.cell];
+            if (o === a.owner || this.allied(a.owner, o) || this.atWar(a.owner, o)) continue;
+            const seen = new Set([a.cell]), queue = [a.cell];
+            let dest = -1;
+            for (let i = 0; i < queue.length && dest < 0 && i < 4000; i++) {
+                for (let d = 0; d < 6; d++) {
+                    const v = G.nb[queue[i] * 6 + d];
+                    if (v < 0 || seen.has(v)) continue;
+                    seen.add(v);
+                    if (isLand(v) && this.owner[v] === a.owner) { const other = this.armyOn(v); if (!other || other.owner === a.owner) { dest = v; break; } }
+                    queue.push(v);
+                }
+            }
+            this.removeArmy(a);
+            if (dest >= 0) { a.cell = dest; a.used = 999; this.armies.set(a.id, a); this.settle(a); }
+        }
+    }
+    // ¿Está `ai` claramente vencido por el jugador y sus satélites? (capital ocupada, el 40 % de su tierra o un tercio de su fuerza)
+    isCrushed(ai) {
+        const side = new Set([this.player, ...this.satellitesOf(this.player)]);
+        let legalCells = 0, occupied = 0;
+        for (const i of G.land) if (this.legal[i] === ai) { legalCells++; if (side.has(this.owner[i])) occupied++; }
+        const powers = this.powers(), mine = [...side].reduce((s, x) => s + powers[x], 0);
+        return side.has(this.owner[this.nations[ai].capitalCell]) || occupied >= legalCells * 0.4 || powers[ai] < mine * 0.35;
+    }
+    // Casillas ocupadas por cada bando en la guerra entre el jugador y `t`.
+    occupation(t) {
+        const sideA = new Set([this.player, ...this.satellitesOf(this.player)]), sideB = new Set([t, ...this.satellitesOf(t)]);
+        let mine = 0, sats = 0, theirs = 0;
+        const provs = new Set();
+        for (const i of G.land) {
+            const o = this.owner[i], l = this.legal[i];
+            if (o === l) continue;
+            if (sideA.has(o) && sideB.has(l)) { if (o === this.player) mine++; else sats++; provs.add(G.prov[i]); }
+            else if (sideB.has(o) && sideA.has(l)) theirs++;
+        }
+        return { mine, sats, theirs, provinces: provs.size };
+    }
+    acceptsPeace(ai, terms, offered) {
+        if (terms.mode === 'satellite') return this.isCrushed(ai);
+        if (offered || this.wantsPeace(ai, this.player) || this.isCrushed(ai)) return true;
+        const occ = this.occupation(ai);
+        return terms.mode === 'annex' && occ.theirs > occ.mine + occ.sats && this.rng() < 0.6;   // si gana, acepta quedarse lo ocupado
     }
     wantsPeace(ai, other, powers = this.powers()) {
         const r = this.rel(ai, other);
@@ -1376,12 +1530,62 @@ class GameEngine {
         if (this.over || target === p || !this.nations[target].alive) return;
         if (action === 'war') {
             if (!this.declareWar(p, target)) this.log(`No puedes declarar la guerra a ${this.nm(target)} ahora.`);
-        } else if (action === 'peace' && !this.proposedThisTurn.has(`paz${target}`)) {
-            this.proposedThisTurn.add(`paz${target}`);
-            if (!this.atWar(p, target)) return;
-            if (this.wantsPeace(target, p)) this.makePeace(p, target);
-            else this.log(`${this.nm(target)} rechaza la paz.`);
         }
+    }
+    playerPeace(target, terms) {
+        const p = this.player, key = `paz${target}`;
+        const offered = this.proposals.findIndex(x => x.kind === 'paz' && x.from === target);
+        if (this.over || !this.atWar(p, target) || (offered < 0 && this.proposedThisTurn.has(key))) return false;
+        this.proposedThisTurn.add(key);
+        if (!this.acceptsPeace(target, terms, offered >= 0)) {
+            this.log(`${this.nm(target)} rechaza tus condiciones de paz.`);
+            return false;
+        }
+        if (offered >= 0) this.proposals.splice(offered, 1);
+        this.settlePeace(p, target, terms);
+        return true;
+    }
+    playerAnnexProvince(pid) {
+        const p = PROVINCES[pid], sat = this.owner[p.city], me = this.player;
+        if (this.over || sat < 0 || this.nations[sat].overlord !== me) return;
+        for (const c of p.cells) {
+            if (this.owner[c] !== sat) continue;
+            this.owner[c] = me;
+            this.legal[c] = me;
+            const a = this.armyOn(c);
+            if (a && a.owner === sat) a.owner = me;
+        }
+        this.armyVersion++;
+        this.version++;
+        this.log(`Te anexionas ${p.name}, que era de tu satélite ${this.nm(sat)}.`);
+        if (!PROVINCES.some(q => this.owner[q.city] === sat)) this.playerAnnexSatellite(sat);
+        this.checkGameOver();
+    }
+    playerAnnexSatellite(sat) {
+        const s = this.nations[sat], me = this.player;
+        if (this.over || s.overlord !== me) return;
+        for (const i of G.land) {
+            if (this.owner[i] === sat) this.owner[i] = me;
+            if (this.legal[i] === sat) this.legal[i] = this.owner[i] === me ? me : this.owner[i];
+        }
+        for (const a of this.armies.values()) if (a.owner === sat) a.owner = me;
+        for (const a of [...this.armies.values()]) if (a.owner === me) this.settle(a);
+        this.nations[me].gold += s.gold;
+        s.alive = false;
+        s.overlord = -1;
+        for (const o of this.nations) if (o.id !== sat) Object.assign(this.rel(sat, o.id), { state: 'paz' });
+        this.blocsChanged();
+        this.armyVersion++;
+        this.version++;
+        this.log(`Te anexionas ${s.name} entera: su territorio, su ejército y su tesoro pasan a ser tuyos.`);
+        this.checkGameOver();
+    }
+    playerReleaseSatellite(sat) {
+        const s = this.nations[sat];
+        if (this.over || s.overlord !== this.player) return;
+        s.overlord = -1;
+        this.blocsChanged();
+        this.log(`Concedes la independencia a ${s.name}.`);
     }
     playerCreateBloc(name, secret) {
         if (this.over) return null;
@@ -1425,7 +1629,7 @@ class GameEngine {
             return;
         }
         if (!accept) { this.log(`${verb} la propuesta de ${pr.kind === 'paz' ? 'paz' : 'alianza'} de ${this.nm(pr.from)}.`); return; }
-        if (pr.kind === 'paz' && this.atWar(pr.from, p)) this.makePeace(p, pr.from);
+        if (pr.kind === 'paz' && this.atWar(pr.from, p)) this.settlePeace(p, pr.from, { mode: 'annex' });
         else if (pr.kind === 'bloque' && !this.atWar(pr.from, p)) {
             let bloc = pr.blocId ? this.bloc(pr.blocId) : null;
             if (!bloc) { bloc = this.createBloc(pr.from, `Pacto de ${this.nations[pr.from].capitalName}`, false); this.blocsChanged(); this.log(`Nace ${bloc.name}.`); }
@@ -1445,10 +1649,11 @@ class GameEngine {
 
     aiDiplomacy(id, powers) {
         const S = this.ai;
+        if (this.nations[id].overlord >= 0) return;   // un satélite sigue la política de su señor
         for (const e of this.enemiesOf(id)) {
-            if (!this.wantsPeace(id, e, powers)) continue;
+            if (this.nations[e].overlord >= 0 || !this.atWar(id, e) || !this.wantsPeace(id, e, powers)) continue;   // con un satélite se negocia a través de su señor
             if (e === this.player) { if (!this.proposals.some(p => p.kind === 'paz' && p.from === id)) this.proposals.push({ kind: 'paz', from: id }); }
-            else if (this.wantsPeace(e, id, powers) || this.rng() < 0.3) this.makePeace(id, e);
+            else if (this.wantsPeace(e, id, powers) || this.rng() < 0.3) this.settlePeace(id, e, { mode: 'annex' });
         }
         const enemies = this.enemiesOf(id);
         if (enemies.length <= S.maxWars && this.turn >= S.warFrom && this.rng() < S.warChance) {
@@ -1778,14 +1983,18 @@ class MapView {
     buildDynamic() {
         const g = this.game;
         this.fills = new Map();
-        this.occupied = new Path2D();
+        this.stripes = new Map();   // ocupante → casillas en disputa
         this.borders = new Path2D();
         const sums = g.nations.map(() => [0, 0, 0]);
         for (const i of G.land) {
             const o = g.owner[i];
-            if (!this.fills.has(o)) this.fills.set(o, new Path2D());
-            this.hexPath(this.fills.get(o), i);
-            if (o !== PROVINCES[G.prov[i]].country) this.hexPath(this.occupied, i);
+            const base = g.legal[i] !== o ? g.legal[i] : o;
+            if (!this.fills.has(base)) this.fills.set(base, new Path2D());
+            this.hexPath(this.fills.get(base), i);
+            if (base !== o) {
+                if (!this.stripes.has(o)) this.stripes.set(o, new Path2D());
+                this.hexPath(this.stripes.get(o), i);
+            }
             for (let d = 0; d < 3; d++) {
                 const j = G.nb[i * 6 + d];
                 if (j >= 0 && isLand(j) && g.owner[j] !== o) this.edge(this.borders, i, d);
@@ -1795,6 +2004,25 @@ class MapView {
         this.labels = sums.map(([x, y, n], id) => (n ? { id, x: x / n, y: y / n, n } : null)).filter(Boolean);
         this.nationPaths = new Map();
         this.builtVersion = g.version;
+    }
+
+    // Rayas diagonales del color del ocupante, con un filete oscuro para que se lean sobre cualquier color.
+    stripePattern(color) {
+        this.patterns ??= new Map();
+        if (!this.patterns.has(color)) {
+            const c = document.createElement('canvas');
+            c.width = c.height = 10;
+            const x = c.getContext('2d');
+            const line = (w, style) => {
+                x.strokeStyle = style; x.lineWidth = w; x.beginPath();
+                for (const o of [-10, 0, 10]) { x.moveTo(o - 1, 11); x.lineTo(o + 11, -1); }
+                x.stroke();
+            };
+            line(4.6, 'rgba(21,26,18,0.55)');
+            line(3, color);
+            this.patterns.set(color, this.ctx.createPattern(c, 'repeat'));
+        }
+        return this.patterns.get(color);
     }
 
     nationPath(id) {
@@ -1820,8 +2048,12 @@ class MapView {
         ctx.globalAlpha = 0.86;
         for (const [o, path] of this.fills) { ctx.fillStyle = g.nations[o].color; ctx.fill(path); }
         ctx.globalAlpha = 1;
-        ctx.fillStyle = 'rgba(0,0,0,0.32)';
-        ctx.fill(this.occupied);
+        for (const [o, path] of this.stripes) {
+            const pat = this.stripePattern(g.nations[o].color);
+            pat.setTransform(new DOMMatrix([1 / s, 0, 0, 1 / s, 0, 0]));   // franjas del mismo grosor a cualquier zoom
+            ctx.fillStyle = pat;
+            ctx.fill(path);
+        }
         if (g.settings.fog && g.player !== null) {
             const vis = g.visibleCells(g.player);
             if (this.fogKey !== g.visCache.key) {
@@ -2061,7 +2293,7 @@ class GameUI {
             <li><i class="line" style="border-top:3px solid ${SIGNAL}"></i>Autopista: ⅓ de punto por tramo</li>
             <li><i class="line" style="border-top:2px solid #efe9d6"></i>Carretera: ½ punto por tramo</li>
             <li><i class="line" style="border-top:3px solid #e3d9c0"></i>Fortificación</li>
-            <li>★ capital &nbsp; ● ciudad &nbsp; Más oscuro: territorio ocupado</li>
+            <li>★ capital &nbsp; ● ciudad &nbsp; A rayas: territorio en disputa (ocupado en guerra)</li>
             <li>Con niebla de guerra, en sombra: lo que no ves. Ojo junto a una ciudad: tu espía</li>
             <li>${Object.entries(E.resourceTypes).map(([k, name]) => `${CONFIG.RESOURCE_ICON[k]} ${name}`).join(' &nbsp;')}</li></ul>`;
         this.render();
@@ -2185,7 +2417,7 @@ class GameUI {
         }
         if (cell < 0 || !isLand(cell)) { tip.hidden = true; return; }
         const p = PROVINCES[G.prov[cell]], o = g.owner[cell], a = g.armyOn(cell), res = RESOURCE_AT.get(cell);
-        const lines = [`<b>${esc(p.name)}</b>${o !== p.country ? ` <span class="muted">(de ${g.nm(p.country)})</span>` : ''}`,
+        const lines = [`<b>${esc(p.name)}</b>${g.isDisputed(cell) ? ` <span class="muted">(en disputa: es de ${g.nm(g.legal[cell])})</span>` : ''}`,
             `<span style="color:${g.nations[o].color}">■</span> ${g.nm(o)}${g.player !== null && o !== g.player ? ` ${this.relationChip(o)}` : ''}`];
         if (CITY_OF[cell] >= 0) lines.push(`${CAPITAL_OF[cell] >= 0 ? '★ Capital' : '● Ciudad'}: ${esc(p.cityName)}`);
         if (res) lines.push(`${CONFIG.RESOURCE_ICON[res.type]} ${res.typeName} de ${esc(res.name)}: +${res.value} de oro`);
@@ -2329,6 +2561,22 @@ class GameUI {
         switch (d.action) {
             case 'setting': g.configure({ ...g.settings, [d.key]: d.key === 'victory' ? +d.value : d.key === 'fog' ? d.value === 'si' : d.value }); break;
             case 'spy-send': g.playerSendSpy(+d.pid); break;
+            case 'peace-open':
+                if (!g.atWar(g.player, +d.target)) return;
+                this.peace = { target: +d.target, mode: 'annex', keep: true, mine: -1, satGains: 'self' };
+                this.renderPeaceDialog();
+                $('#peace-dialog').showModal();
+                return;
+            case 'peace-mode': this.peace.mode = d.mode; this.renderPeaceDialog(); return;
+            case 'peace-sat': this.peace.satGains = d.value; this.renderPeaceDialog(); return;
+            case 'peace-close': $('#peace-dialog').close(); return;
+            case 'peace-send':
+                g.playerPeace(this.peace.target, { ...this.peace });
+                $('#peace-dialog').close();
+                break;
+            case 'sat-annex-prov': g.playerAnnexProvince(+d.pid); break;
+            case 'sat-annex': g.playerAnnexSatellite(+d.target); this.focusNation = null; break;
+            case 'sat-release': g.playerReleaseSatellite(+d.target); break;
             case 'spy-recall': g.playerRecallSpy(+d.pid); break;
             case 'start':
                 if (this.choice === null) return;
@@ -2424,10 +2672,12 @@ class GameUI {
     onChange(e) {
         if (e.target.id === 'nation-select') { this.choice = +e.target.value; this.render(); }
         if (e.target.id === 'bloc-secret') this.blocSecret = e.target.checked;
+        if (e.target.id === 'peace-mine') { this.peace.mine = +e.target.value; this.renderPeaceDialog(); }
+        if (e.target.id === 'peace-keep') { this.peace.keep = e.target.checked; this.renderPeaceDialog(); }
     }
 
     onKey(e) {
-        if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || $('#game-dialog').open) return;
+        if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || $('#game-dialog').open || $('#peace-dialog').open) return;
         const g = this.game;
         if (e.key === 'Escape') { this.cancel(); return; }
         if (g.player === null || g.over) return;
@@ -2460,6 +2710,8 @@ class GameUI {
         if (!g.nations[id].alive) return '<span class="chip">eliminado</span>';
         if (g.player === null) return '';
         if (id === g.player) return '<span class="chip tu">tú</span>';
+        if (g.nations[id].overlord === g.player) return '<span class="chip alianza">tu satélite</span>';
+        if (g.nations[id].overlord >= 0) return `<span class="chip">satélite de ${g.nm(g.nations[id].overlord)}</span>`;
         if (g.atWar(g.player, id)) return '<span class="chip guerra">en guerra</span>';
         if (g.allied(g.player, id)) return '<span class="chip alianza">aliado</span>';
         const r = g.rel(g.player, id);
@@ -2580,7 +2832,9 @@ class GameUI {
         }
 
         // Reclutar
-        if (this.tool === 'command' && g.owner[p.city] === p0) {
+        if (this.tool === 'command' && g.owner[p.city] === p0 && g.legal[p.city] !== p0) {
+            sections.push(`<section class="sec"><h3>Reclutar</h3><p class="note warn">${esc(p.cityName)} está en disputa: no puedes reclutar aquí hasta que se anexione al firmar la paz.</p></section>`);
+        } else if (this.tool === 'command' && g.owner[p.city] === p0) {
             const left = g.recruitLeft(p0, p), ok = g.canRecruitAt(p0, p), gold = g.nations[p0].gold;
             sections.push(`<section class="sec">
                 <h3>Reclutar en ${esc(p.cityName)}</h3>
@@ -2611,7 +2865,7 @@ class GameUI {
         }
 
         // Diplomacia rápida con el dueño de la casilla
-        if (o !== p0 && g.nations[o].alive) sections.push(`<section class="sec">${this.diplomacyActions(o)}</section>`);
+        if (o !== p0 && g.nations[o].alive) sections.push(`<section class="sec">${this.diplomacyActions(o, p.id)}</section>`);
 
         // Provincia
         const control = new Map();
@@ -2629,6 +2883,7 @@ class GameUI {
                 <dt>Población</dt><dd>${(p.population / 1e6).toLocaleString('es-ES', { maximumFractionDigits: 2 })} millones</dd>
                 <dt>Renta</dt><dd>${p.value} de oro${connected ? ` (+${CONFIG.ROAD_BONUS * 100} % por carretera)` : ', sin carretera a la capital'}</dd>
                 <dt>Terreno</dt><dd>${CONFIG.TERRAIN[p.terrain].name.toLowerCase()}${CONFIG.TERRAIN[p.terrain].def > 1 ? `, defensa ×${CONFIG.TERRAIN[p.terrain].def}` : ''}</dd>
+                ${g.isDisputed(cell) ? `<dt>Estado</dt><dd class="warn-text">en disputa: la ocupa ${g.nm(o)} pero es de ${g.nm(g.legal[cell])}. Rinde la mitad y se anexiona al firmar la paz.</dd>` : ''}
                 ${res.map(r => `<dt>${r.typeName}</dt><dd>${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}, +${r.value} de oro</dd>`).join('')}
                 ${g.fort[cell] ? `<dt>Casilla</dt><dd>fortificada</dd>` : g.fortWork.has(cell) ? `<dt>Casilla</dt><dd>fortificando, ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}</dd>` : ''}
             </dl></section>`);
@@ -2636,19 +2891,28 @@ class GameUI {
         el.innerHTML = `
             <header class="card-head">
                 <div><h2>${esc(p.name)}</h2>
-                    <p class="row">${this.nationChip(o)} ${this.relationChip(o)}${o !== p.country ? ` <span class="small muted">ocupada a ${g.nm(p.country)}</span>` : ''}</p></div>
+                    <p class="row">${this.nationChip(o)} ${this.relationChip(o)}${g.isDisputed(cell) ? ` <span class="small warn-text">en disputa con ${g.nm(g.legal[cell])}</span>` : o !== p.country ? ` <span class="small muted">antes de ${g.nm(p.country)}</span>` : ''}</p></div>
                 <button class="btn ghost" data-action="close-card" aria-label="Cerrar" title="Cerrar (Esc)">✕</button>
             </header>${sections.join('')}`;
     }
 
     // Botones de diplomacia con una nación (en la ficha y en el panel de países).
-    diplomacyActions(t) {
+    diplomacyActions(t, pid = -1) {
         const g = this.game, p0 = g.player, r = g.rel(p0, t);
         let html = `<h3>Diplomacia con ${g.nm(t)}</h3>`;
+        if (g.nations[t].overlord === p0) {
+            const p = pid >= 0 ? PROVINCES[pid] : null;
+            return html + `<p class="small muted">Es tu satélite: te paga ${Math.round(g.economy(t).total * CONFIG.TRIBUTE)} de oro por turno, entra en tus guerras y nunca te ataca.</p>
+                <div class="row" style="margin-top:8px">
+                    ${p && g.owner[p.city] === t ? `<button class="btn" data-action="sat-annex-prov" data-pid="${p.id}">Anexionar ${esc(p.name)}</button>` : ''}
+                    <button class="btn" data-action="sat-annex" data-target="${t}">Anexionar todo el país</button>
+                    <button class="btn ghost" data-action="sat-release" data-target="${t}">Conceder la independencia</button>
+                </div>`;
+        }
         if (g.atWar(p0, t)) {
             const asked = g.proposedThisTurn.has(`paz${t}`);
             html += `<p class="small muted">En guerra desde el turno ${r.since}.</p>
-                <div class="row" style="margin-top:8px"><button class="btn" data-action="diplo" data-kind="peace" data-target="${t}" ${asked ? 'disabled' : ''}>${asked ? 'Paz ya propuesta este turno' : 'Proponer la paz'}</button></div>`;
+                <div class="row" style="margin-top:8px"><button class="btn" data-action="peace-open" data-target="${t}" ${asked ? 'disabled' : ''}>${asked ? 'Paz ya propuesta este turno' : 'Negociar la paz'}</button></div>`;
             return html;
         }
         const allies = g.knownAllies(p0, t).filter(x => x !== p0);
@@ -2674,8 +2938,10 @@ class GameUI {
             if (pr.kind === 'paz') text = `${who} te propone la paz.`;
             else if (pr.kind === 'bloque') text = `${who} te invita a ${pr.blocId && g.bloc(pr.blocId) ? `unirte a ${esc(g.bloc(pr.blocId).name)}` : 'formar una alianza'}.`;
             else { text = `${who}, tu aliado, ha sido atacado por <b>${g.nm(pr.against)}</b>. Si no acudes, saldrás de vuestras alianzas.`; yes = 'Ir a la guerra'; no = 'No intervenir'; }
+            const yesAction = pr.kind === 'paz' ? `data-action="peace-open" data-target="${pr.from}"` : `data-action="accept" data-index="${i}"`;
+            if (pr.kind === 'paz') yes = 'Negociar';
             return `<div class="toast float" style="border-left-color:${g.nations[pr.from].color}"><p>${text}</p>
-                <div class="row"><button class="btn primary" data-action="accept" data-index="${i}">${yes}</button>
+                <div class="row"><button class="btn primary" ${yesAction}>${yes}</button>
                 <button class="btn" data-action="reject" data-index="${i}">${no}</button></div></div>`;
         }).join('');
     }
@@ -2743,6 +3009,9 @@ class GameUI {
                         <dt>Territorio</dt><dd>${(100 * lands[t] / G.land.length).toFixed(1)} % de Europa</dd>
                         <dt>Fuerza</dt><dd>${this.powerText(t, powers)}</dd>
                         <dt>Alianzas</dt><dd>${blocs.map(b => esc(b.name) + (b.secret ? ' (secreta)' : '')).join(', ') || 'ninguna conocida'}</dd>
+                        ${n.overlord >= 0 ? `<dt>Señor</dt><dd>${g.nm(n.overlord)}</dd>` : ''}
+                        ${n.overlord === g.player ? `<dt>Tributo</dt><dd>${Math.round(g.economy(t).total * CONFIG.TRIBUTE)} de oro por turno</dd>` : ''}
+                        ${g.satellitesOf(t).length ? `<dt>Satélites</dt><dd>${g.satellitesOf(t).map(x => g.nm(x)).join(', ')}</dd>` : ''}
                     </dl>
                     <button class="btn" style="margin-top:10px" data-action="goto" data-cell="${n.capitalCell}" ${n.alive ? '' : 'disabled'}>Ver en el mapa</button>
                 </div>
@@ -2770,8 +3039,9 @@ class GameUI {
         const q = this.filter.trim().toLowerCase();
         const groups = [
             ['Tu país', n => n.id === p0],
+            ['Tus satélites', n => n.alive && n.overlord === p0],
             ['En guerra contigo', n => n.alive && g.atWar(p0, n.id)],
-            ['Aliados', n => n.alive && g.allied(p0, n.id) && !g.atWar(p0, n.id)],
+            ['Aliados', n => n.alive && g.allied(p0, n.id) && !g.atWar(p0, n.id) && n.overlord !== p0],
             ['Resto de Europa', n => n.alive && n.id !== p0 && !g.atWar(p0, n.id) && !g.allied(p0, n.id)],
             ['Eliminados', n => !n.alive]
         ];
@@ -2826,6 +3096,50 @@ class GameUI {
             html += `<p class="log-line">${esc(msg)}</p>`;
         }
         body.innerHTML = html || '<p class="note">Todavía no ha pasado nada.</p>';
+    }
+
+    renderPeaceDialog() {
+        const g = this.game, s = this.peace, t = s.target, me = g.player;
+        const occ = g.occupation(t), sats = g.satellitesOf(me);
+        const offered = g.proposals.some(p => p.kind === 'paz' && p.from === t);
+        const crushed = g.isCrushed(t);
+        if (s.mode === 'satellite' && !crushed) s.mode = 'annex';
+        const opt = (mode, title, desc, enabled = true) => `<button class="peace-opt ${s.mode === mode ? 'on' : ''}" data-action="peace-mode" data-mode="${mode}" ${enabled ? '' : 'disabled'}><b>${title}</b><span>${desc}</span></button>`;
+        const keeps = s.mode === 'annex' || (s.mode === 'satellite' && s.keep);
+        let extra = '';
+        if (keeps && occ.mine && sats.length && s.mode === 'annex') {
+            extra += `<label class="field"><span>Lo que has ocupado tú es para</span>
+                <select id="peace-mine"><option value="-1" ${s.mine < 0 ? 'selected' : ''}>Ti</option>
+                ${sats.map(x => `<option value="${x}" ${s.mine === x ? 'selected' : ''}>Tu satélite ${g.nm(x)}</option>`).join('')}</select></label>`;
+        }
+        if (keeps && occ.sats) {
+            extra += `<div class="field"><span>Lo que han ocupado tus satélites es para</span><div class="seg">
+                <button data-action="peace-sat" data-value="self" class="${s.satGains === 'self' ? 'on' : ''}">Ellos</button>
+                <button data-action="peace-sat" data-value="overlord" class="${s.satGains === 'overlord' ? 'on' : ''}">Ti</button></div></div>`;
+        }
+        if (s.mode === 'satellite') {
+            extra += `<label class="check small" style="margin-top:10px"><input type="checkbox" id="peace-keep" ${s.keep ? 'checked' : ''}><span>Quedarte lo que has ocupado de ${g.nm(t)} (si no, se lo devuelves)</span></label>`;
+        }
+        const asked = !offered && g.proposedThisTurn.has(`paz${t}`);
+        $('#peace-body').innerHTML = `
+            <div class="row" style="justify-content:space-between"><h2>Paz con ${g.nm(t)}</h2><button class="btn ghost" data-action="peace-close" aria-label="Cerrar">✕</button></div>
+            <p class="note" style="margin-bottom:10px">${offered ? `${g.nm(t)} te ha propuesto la paz: aceptará anexionar lo ocupado o una paz blanca.` : `Elige las condiciones. ${g.nm(t)} puede rechazarlas, y solo puedes proponerle la paz una vez por turno.`}</p>
+            <dl class="facts" style="margin-bottom:12px">
+                <dt>Has ocupado</dt><dd>${plural(occ.mine, 'casilla', 'casillas')} en ${plural(occ.provinces, 'provincia', 'provincias')}${occ.sats ? `, y tus satélites ${occ.sats} más` : ''}</dd>
+                <dt>Te ha ocupado</dt><dd>${plural(occ.theirs, 'casilla', 'casillas')} tuyas o de tus satélites</dd>
+            </dl>
+            <div class="stack">
+                ${opt('annex', 'Anexionar lo ocupado', 'Cada bando se queda lo que ocupa: deja de estar en disputa y pasa a ser territorio propio, con toda su renta.')}
+                ${opt('satellite', `Convertir a ${g.nm(t)} en tu satélite`, crushed
+                    ? `Conserva su país, te paga el ${CONFIG.TRIBUTE * 100} % de sus ingresos, entra en tus guerras y nunca te ataca. Lo que te ocupó vuelve a ti.`
+                    : 'Solo si le has vencido claramente: ocupas su capital o el 40 % de su territorio, o tiene menos de un tercio de tu fuerza.', crushed)}
+                ${opt('white', 'Paz blanca', 'Cada uno recupera lo suyo; las casillas ocupadas vuelven a su dueño.')}
+            </div>
+            ${extra}
+            <div class="row" style="margin-top:16px;justify-content:flex-end">
+                <button class="btn" data-action="peace-close">Cancelar</button>
+                <button class="btn primary" data-action="peace-send" ${asked ? 'disabled' : ''}>${asked ? 'Ya has propuesto la paz este turno' : 'Proponer estas condiciones'}</button>
+            </div>`;
     }
 
     renderGameDialog() {
