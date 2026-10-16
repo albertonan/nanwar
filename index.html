@@ -1698,6 +1698,32 @@ class GameEngine {
         this.settlePeace(p, target, terms);
         return true;
     }
+    // Pedir a un aliado que entre en la guerra contra `target`: probabilidad de que acepte (sin azar).
+    callToWarOdds(ally, target) {
+        const p = this.player;
+        if (!this.nations[ally].alive || !this.allied(ally, p) || this.nations[ally].overlord >= 0 || this.atWar(ally, target)
+            || !this.atWar(p, target) || this.turn < this.rel(ally, target).truceUntil) return 0;
+        const powers = this.powers();
+        const side = id => powers[id] + this.knownAllies(ally, id).filter(x => x !== ally && x !== p).reduce((s, x) => s + powers[x], 0);
+        let odds = 0.3;
+        if (this.borderSets()[ally].has(target)) odds += 0.2;
+        if (powers[ally] + powers[p] > 1.5 * side(target)) odds += 0.2;
+        if (this.enemiesOf(ally).length > this.ai.maxWars) odds -= 0.25;
+        if (this.allied(ally, target)) odds -= 0.4;   // tendría que romper con un aliado suyo
+        const mood = { pacifica: 0.5, normal: 1, agresiva: 1.3, caos: 1.6 }[this.settings.aggression] ?? 1;
+        return Math.max(0, Math.min(0.95, odds * mood));
+    }
+    playerCallToWar(ally, target) {
+        const key = `call${ally}:${target}`;
+        if (this.over || this.proposedThisTurn.has(key)) return false;
+        this.proposedThisTurn.add(key);
+        if (this.rng() >= this.callToWarOdds(ally, target)) {
+            this.log(`${this.nm(ally)} no quiere entrar en tu guerra contra ${this.nm(target)}.`);
+            return false;
+        }
+        this.log(`${this.nm(ally)} acepta entrar en la guerra a tu lado contra ${this.nm(target)}.`);
+        return this.declareWar(ally, target);
+    }
     playerAnnexProvince(pid) {
         const p = PROVINCES[pid], sat = this.owner[p.city], me = this.player;
         if (this.over || sat < 0 || this.nations[sat].overlord !== me) return;
@@ -2727,6 +2753,11 @@ class GameUI {
         switch (d.action) {
             case 'setting': g.configure({ ...g.settings, [d.key]: d.key === 'victory' ? +d.value : d.key === 'fog' ? d.value === 'si' : d.value }); break;
             case 'spy-send': g.playerSendSpy(+d.pid); break;
+            case 'call-war': {
+                const sel = document.querySelector(`select[data-call-war="${d.target}"]`);
+                if (sel) { this.callAlly = +sel.value; g.playerCallToWar(+sel.value, +d.target); }
+                break;
+            }
             case 'peace-open':
                 if (!g.atWar(g.player, +d.target)) return;
                 this.peace = { target: +d.target, mode: 'annex', keep: true, mine: -1, satGains: 'self' };
@@ -2839,6 +2870,7 @@ class GameUI {
     onChange(e) {
         if (e.target.id === 'nation-select') { this.choice = +e.target.value; this.render(); }
         if (e.target.id === 'bloc-secret') this.blocSecret = e.target.checked;
+        if (e.target.dataset.callWar !== undefined) { this.callAlly = +e.target.value; this.render(); }
         if (e.target.id === 'peace-mine') { this.peace.mine = +e.target.value; this.renderPeaceDialog(); }
         if (e.target.id === 'peace-keep') { this.peace.keep = e.target.checked; this.renderPeaceDialog(); }
     }
@@ -3087,6 +3119,18 @@ class GameUI {
             const asked = g.proposedThisTurn.has(`paz${t}`);
             html += `<p class="small muted">En guerra desde el turno ${r.since}.</p>
                 <div class="row" style="margin-top:8px"><button class="btn" data-action="peace-open" data-target="${t}" ${asked ? 'disabled' : ''}>${asked ? 'Paz ya propuesta este turno' : 'Negociar la paz'}</button></div>`;
+            const helpers = g.nations.filter(n => n.alive && n.id !== p0 && g.allied(p0, n.id) && n.overlord < 0 && !g.atWar(n.id, t));
+            if (helpers.length) {
+                const label = x => { const o = g.callToWarOdds(x, t); return o >= 0.6 ? 'probable' : o >= 0.3 ? 'dudoso' : o > 0 ? 'improbable' : 'no puede'; };
+                const sel = this.callAlly && helpers.some(n => n.id === this.callAlly) ? this.callAlly : helpers.sort((a, b) => g.callToWarOdds(b.id, t) - g.callToWarOdds(a.id, t))[0].id;
+                const asked2 = g.proposedThisTurn.has(`call${sel}:${t}`);
+                html += `<p class="small" style="margin-top:12px">Pedir a un aliado que entre en la guerra contra ${g.nm(t)}:</p>
+                    <div class="row" style="margin-top:6px">
+                        <select data-call-war="${t}" style="flex:1">${helpers.map(n => `<option value="${n.id}" ${n.id === sel ? 'selected' : ''}>${n.name} (${label(n.id)})</option>`).join('')}</select>
+                        <button class="btn" data-action="call-war" data-target="${t}" ${asked2 || !g.callToWarOdds(sel, t) ? 'disabled' : ''}>${asked2 ? 'Ya se lo has pedido' : 'Pedir ayuda'}</button>
+                    </div>
+                    <p class="note">Acepta más si tiene frontera con ${g.nm(t)} y si juntos sois más fuertes. Si entra, los aliados de ${g.nm(t)} irán contra él.</p>`;
+            }
             return html;
         }
         const allies = g.knownAllies(p0, t).filter(x => x !== p0);
@@ -3369,7 +3413,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.16-152636';
+const APP_VERSION = '2026.10.16-153036';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
