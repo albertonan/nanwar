@@ -1395,7 +1395,22 @@ class GameEngine {
         for (const [k, v] of Object.entries(CONFIG.RESOURCE_DISCOUNT[type])) disc += v * (byType[k] ?? 0);
         return Math.round(CONFIG.TYPES[type].cost * (1 - Math.min(CONFIG.MAX_DISCOUNT, disc)));
     }
-    recruitLeft(nation, p) { return p.recruitCap - (this.nations[nation].recruited.get(p.id) ?? 0); }
+    // Cupo de reclutamiento por turno de una provincia: crece con su población, su desarrollo, sus conexiones y los
+    // yacimientos que la abastecen, y es mayor en la capital.
+    recruitBreakdown(nation, p) {
+        const e = this.economy(nation);
+        const parts = [['población', p.recruitCap]];
+        const dev = Math.floor(this.dev[p.id] / 250);
+        if (dev) parts.push(['desarrollo', dev]);
+        if (e.connected.has(p.id)) parts.push(['carretera a la capital', 1]);
+        if ([0, 1, 2, 3, 4, 5].some(d => this.road[p.city * 6 + d] === 2)) parts.push(['autopista', 1]);
+        const mines = Math.floor((e.access.get(p.id)?.length ?? 0) / 2);
+        if (mines) parts.push(['yacimientos', mines]);
+        if (CAPITAL_OF[p.city] === nation) parts.push(['capital', 2]);
+        return parts;
+    }
+    recruitCap(nation, p) { return this.recruitBreakdown(nation, p).reduce((s, [, n]) => s + n, 0); }
+    recruitLeft(nation, p) { return this.recruitCap(nation, p) - (this.nations[nation].recruited.get(p.id) ?? 0); }
     canRecruitAt(nation, p) {
         const ar = this.armyOn(p.city);
         return this.owner[p.city] === nation && this.legal[p.city] === nation && (!ar || ar.owner === nation) && this.recruitLeft(nation, p) > 0;
@@ -1639,9 +1654,12 @@ class GameEngine {
         if (isAttack) { this.attack(mover, r.attacks.get(dest), dest, r); return this.armyOn(dest) ?? this.armyOn(r.attacks.get(dest)); }
         return this.moveArmy(mover, dest, r);
     }
-    playerRecruit(p, type) {
+    // Recluta hasta `qty` unidades (Infinity: todas las que permitan el oro y el cupo).
+    playerRecruit(p, type, qty = 1) {
         if (this.over) return;
-        if (this.recruit(this.player, p, type)) this.log(`Reclutas ${CONFIG.TYPES[type].name} en ${p.cityName}.`);
+        let n = 0;
+        while (n < qty && this.recruit(this.player, p, type)) n++;
+        if (n) this.log(`Reclutas ${n} ${n === 1 ? CONFIG.TYPES[type].name.toLowerCase() : `unidades de ${CONFIG.TYPES[type].name.toLowerCase()}`} en ${p.cityName}.`);
         else this.log("No se puede reclutar ahí (fondos o cupo de la provincia agotados).");
     }
     playerBuild(plan) {
@@ -2759,7 +2777,8 @@ class GameUI {
                 break;
             }
             case 'send-all': { const a = this.selectedArmy(); if (a) this.send = copyUnits(a.units); break; }
-            case 'recruit': g.playerRecruit(p, d.unit); break;
+            case 'recruit': g.playerRecruit(p, d.unit, this.recruitQty ?? 1); break;
+            case 'recruit-qty': this.recruitQty = d.qty === 'max' ? Infinity : +d.qty; break;
             case 'diplo': g.playerDiplomacy(d.kind, +d.target); break;
             case 'invite': g.playerInvite(+d.bloc, +d.target); break;
             case 'accept': case 'reject': g.answerProposal(+d.index, d.action === 'accept'); break;
@@ -2986,7 +3005,11 @@ class GameUI {
             const left = g.recruitLeft(p0, p), ok = g.canRecruitAt(p0, p), gold = g.nations[p0].gold;
             sections.push(`<section class="sec">
                 <h3>Reclutar en ${esc(p.cityName)}</h3>
-                <p class="small muted" style="margin:-3px 0 8px">${left > 0 ? `Puedes reclutar ${plural(left, 'unidad', 'unidades')} más este turno.` : 'Ya no puedes reclutar más aquí este turno.'}</p>
+                <p class="small muted" style="margin:-3px 0 4px">${left > 0 ? `Puedes reclutar ${plural(left, 'unidad', 'unidades')} más este turno, de cualquier tipo.` : 'Ya no puedes reclutar más aquí este turno.'}</p>
+                <p class="small muted" style="margin:0 0 8px">Cupo ${g.recruitCap(p0, p)}: ${g.recruitBreakdown(p0, p).map(([what, n]) => `${what} ${n}`).join(', ')}. Sube con el desarrollo, las carreteras y autopistas y los yacimientos que la abastecen.</p>
+                <div class="row" style="margin-bottom:8px"><span class="small">Cantidad</span><div class="seg" style="flex:1">
+                    ${[['1', '×1'], ['5', '×5'], ['max', 'Máximo']].map(([v, label]) => `<button data-action="recruit-qty" data-qty="${v}" class="${String(this.recruitQty ?? 1) === v || (v === 'max' && this.recruitQty === Infinity) ? 'on' : ''}">${label}</button>`).join('')}
+                </div></div>
                 <div class="recruit">${UNIT_KEYS.map(k => {
                     const t = CONFIG.TYPES[k];
                     const cost = g.unitCost(p0, k, p.id);
@@ -3346,7 +3369,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.16-150321';
+const APP_VERSION = '2026.10.16-152636';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
