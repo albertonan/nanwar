@@ -574,14 +574,14 @@ class GameEngine {
             if (p.forces) for (const k of UNIT_KEYS) units[k] += p.forces[k] ?? 0;
             this.settle(this.newArmy(p.country, p.city, units, 0));
         }
-        this.configure({ aggression: 'normal', alliances: 'reales', victory: 0.5 });
+        this.configure({ aggression: 'normal', alliances: 'reales', victory: 0.5, fog: false });
         for (const nat of this.nations) nat.gold = this.income(nat.id) * CONFIG.START_GOLD_TURNS;
         this.log("SISTEMA DE COMANDO ONLINE. Configura la partida y elige tu nación.");
     }
 
     // Ajustes elegidos antes de empezar: agresividad de la IA, alianzas iniciales, victoria.
     configure(settings) {
-        this.settings = settings;
+        this.settings = { ...settings, fog: !!settings.fog };
         this.ai = AGGRESSION[settings.aggression];
         this.blocs = [];
         this.nextBlocId = 1;
@@ -632,40 +632,87 @@ class GameEngine {
     static load(data) {
         if (data?.format !== 'eurowar-1') throw new Error('El archivo no es una partida de NanWar.');
         if (data.map !== `${G.land.length}:${PROVINCES.length}`) throw new Error('La partida se guardó con otro mapa (europa-data.js distinto).');
-        const g = new GameEngine(data.seed);
-        g.rng.state = data.rng;
-        Object.assign(g, { turn: data.turn, player: data.player, over: data.over, won: data.won, logs: data.logs, proposals: data.proposals });
-        g.proposedThisTurn = new Set(data.proposed);
-        g.settings = data.settings;
-        g.ai = AGGRESSION[data.settings.aggression];
-        let k = 0;
-        for (const [o, count] of data.owner) for (let j = 0; j < count; j++) g.owner[G.land[k++]] = o;
+        // Todo lo que llega del archivo se valida antes de usarlo: enteros dentro de rango, índices de países,
+        // casillas y provincias válidos, textos acotados y claves conocidas. Un archivo manipulado no puede
+        // colar datos raros (ni HTML) en la partida.
+        const NN = E.countries.length;
+        const int = (v, min, max, def = min) => { const n = Math.trunc(Number(v)); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : def; };
+        const nat = v => int(v, 0, NN - 1, 0);
+        const natOrNone = v => int(v, -1, NN - 1, -1);
+        const cellIdx = v => int(v, 0, G.N - 1, 0);
+        const provIdx = v => int(v, 0, PROVINCES.length - 1, 0);
+        const list = v => (Array.isArray(v) ? v : []);
+        const str = (v, max = 300) => String(v ?? '').slice(0, max);
+
+        const g = new GameEngine(int(data.seed, 1, 2147483646, 1));
+        g.rng.state = int(data.rng, -2147483648, 2147483647, 0);
+        g.turn = int(data.turn, 1, 1e6, 1);
+        const player = natOrNone(data.player);
+        g.player = data.player === null || player < 0 ? null : player;
+        g.over = !!data.over;
+        g.won = !!data.won;
+        g.logs = list(data.logs).slice(-400).map(l => ({ turn: int(l?.turn, 0, 1e6, 0), msg: str(l?.msg) }));
+        g.proposals = list(data.proposals).filter(p => ['paz', 'bloque', 'llamada'].includes(p?.kind)).map(p => (
+            p.kind === 'llamada' ? { kind: 'llamada', from: nat(p.from), against: nat(p.against) }
+            : p.kind === 'bloque' ? { kind: 'bloque', from: nat(p.from), blocId: p.blocId === null || p.blocId === undefined ? null : int(p.blocId, 0, 1e6, 0) }
+            : { kind: 'paz', from: nat(p.from) }));
+        g.proposedThisTurn = new Set(list(data.proposed).map(x => str(x, 40)));
+        const s = data.settings ?? {};
+        g.settings = {
+            aggression: Object.prototype.hasOwnProperty.call(AGGRESSION, s.aggression) ? s.aggression : 'normal',
+            alliances: ['reales', 'ninguna'].includes(s.alliances) ? s.alliances : 'reales',
+            victory: [0.5, 0.75, 1].includes(Number(s.victory)) ? Number(s.victory) : 0.5,
+            fog: !!s.fog
+        };
+        g.ai = AGGRESSION[g.settings.aggression];
+
+        const runs = (src, arr) => {
+            let k = 0;
+            for (const r of list(src)) {
+                const o = nat(r?.[0]), count = int(r?.[1], 0, G.land.length, 0);
+                for (let j = 0; j < count && k < G.land.length; j++) arr[G.land[k++]] = o;
+            }
+        };
+        runs(data.owner, g.owner);
         g.legal = Int16Array.from(g.owner);   // partidas anteriores a las disputas: todo lo controlado es legal
-        k = 0;
-        if (data.legal) for (const [o, count] of data.legal) for (let j = 0; j < count; j++) g.legal[G.land[k++]] = o;
-        if (data.dev) g.dev = Uint16Array.from(data.dev);
-        const roads = data.roads ?? data.builtRoads ?? [];   // builtRoads: partidas guardadas antes de que se pudieran cortar
-        for (let i = 0; i < roads.length; i += 3) {
-            const a = roads[i], d = roads[i + 1], cls = roads[i + 2], b = G.nb[a * 6 + d];
+        if (data.legal) runs(data.legal, g.legal);
+        if (Array.isArray(data.dev)) g.dev = Uint16Array.from(PROVINCES.map((_, i) => int(data.dev[i], 0, 1000, 0)));
+        const roads = list(data.roads ?? data.builtRoads);   // builtRoads: partidas guardadas antes de que se pudieran cortar
+        for (let i = 0; i + 2 < roads.length; i += 3) {
+            const a = cellIdx(roads[i]), d = int(roads[i + 1], 0, 5, 0), cls = int(roads[i + 2], 0, 2, 0), b = G.nb[a * 6 + d];
+            if (b < 0) continue;
             g.road[a * 6 + d] = cls;
             g.road[b * 6 + (d + 3) % 6] = cls;
         }
-        for (const c of data.forts ?? []) g.fort[c] = 1;
-        g.fortWork = new Map((data.fortWork ?? []).map(([c, owner, left]) => [c, { owner, left }]));
-        g.spies = new Map((data.spies ?? []).map(([pid, since, revealedTurn]) => [pid, { since, revealedTurn }]));
-        g.sieges = new Map((data.sieges ?? []).map(([c, by, prev, held]) => [c, { by, prev, held }]));
-        data.nations.forEach((n, i) => Object.assign(g.nations[i], { gold: n.gold, alive: n.alive, recruited: new Map(n.recruited), overlord: n.overlord ?? -1 }));
+        for (const c of list(data.forts)) g.fort[cellIdx(c)] = 1;
+        g.fortWork = new Map(list(data.fortWork).map(w => [cellIdx(w?.[0]), { owner: nat(w?.[1]), left: int(w?.[2], 0, 100, 0) }]));
+        g.spies = new Map(list(data.spies).map(x => [provIdx(x?.[0]), { since: int(x?.[1], 0, 1e6, 0), revealedTurn: int(x?.[2], -1, 1e6, -1) }]));
+        g.sieges = new Map(list(data.sieges).map(x => [cellIdx(x?.[0]), { by: nat(x?.[1]), prev: nat(x?.[2]), held: int(x?.[3], 0, CONFIG.SIEGE_TURNS, 0) }])
+            .filter(([c]) => CITY_OF[c] >= 0));
+        list(data.nations).slice(0, NN).forEach((n, i) => Object.assign(g.nations[i], {
+            gold: int(n?.gold, -1e9, 1e12, 0),
+            alive: !!n?.alive,
+            recruited: new Map(list(n?.recruited).map(x => [provIdx(x?.[0]), int(x?.[1], 0, 1e6, 0)])),
+            overlord: natOrNone(n?.overlord ?? -1)
+        }));
         for (const row of g.relations) for (const r of row) if (r) Object.assign(r, { state: 'paz', since: 0, truceUntil: 0 });
-        for (const [a, b, state, since, truceUntil] of data.relations) Object.assign(g.relations[a][b], { state, since, truceUntil });
+        for (const x of list(data.relations)) {
+            const a = nat(x?.[0]), b = nat(x?.[1]);
+            if (a === b) continue;
+            Object.assign(g.relations[a][b], { state: x?.[2] === 'guerra' ? 'guerra' : 'paz', since: int(x?.[3], 0, 1e6, 0), truceUntil: int(x?.[4], 0, 1e6, 0) });
+        }
         g.armies = new Map();
         g.armyAt = new Int32Array(G.N);
-        for (const [id, owner, cell, infantry, tank, artillery, used] of data.armies) {
-            g.armies.set(id, { id, owner, cell, units: { infantry, tank, artillery }, used });
+        for (const x of list(data.armies)) {
+            const id = int(x?.[0], 1, 1e9, 1), cell = cellIdx(x?.[2]);
+            if (!isLand(cell) || g.armyAt[cell] || g.armies.has(id)) continue;
+            g.armies.set(id, { id, owner: nat(x?.[1]), cell, units: { infantry: int(x?.[3], 0, 1e6, 0), tank: int(x?.[4], 0, 1e6, 0), artillery: int(x?.[5], 0, 1e6, 0) }, used: int(x?.[6], 0, 999, 0) });
             g.armyAt[cell] = id;
         }
-        g.nextArmyId = data.nextArmyId;
-        g.blocs = data.blocs.map(b => ({ ...b, members: new Set(b.members) }));
-        g.nextBlocId = data.nextBlocId;
+        g.nextArmyId = Math.max(int(data.nextArmyId, 1, 1e9, 1), ...[...g.armies.keys()].map(x => x + 1), 1);
+        g.blocs = list(data.blocs).map(b => ({ id: int(b?.id, 1, 1e6, 1), name: str(b?.name, 40), founder: nat(b?.founder), secret: !!b?.secret,
+            since: int(b?.since, 0, 1e6, 0), members: new Set(list(b?.members).map(nat)) }));
+        g.nextBlocId = Math.max(int(data.nextBlocId, 1, 1e6, 1), ...g.blocs.map(b => b.id + 1), 1);
         g.blocsChanged();
         g.version++; g.roadVersion++; g.fortVersion++;
         return g;
@@ -3674,7 +3721,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.16-232615';
+const APP_VERSION = '2026.10.16-233000';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
