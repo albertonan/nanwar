@@ -343,8 +343,8 @@ const CONFIG = {
     DEV_WAR_DAMAGE: 0.5,            // tomar la ciudad por la fuerza deja la mitad del desarrollo
     EMPIRE_PER_PROVINCE: 0.03,      // +3 % de renta por cada provincia anexionada por encima de las iniciales
     EMPIRE_MAX: 1.5,
-    RESOURCE_CLUSTER: 0.15,         // cada yacimiento del mismo tipo sube un 15 % el valor de todos ellos...
-    RESOURCE_CLUSTER_MAX: 0.6,      // ... hasta +60 %
+    RESOURCE_INDUSTRY: 0.06,        // cada yacimiento que abastece a una provincia le da +6 % de renta...
+    RESOURCE_INDUSTRY_MAX: 0.6,     // ... hasta +60 %
     RESOURCE_DISCOUNT: {            // abaratamiento de las tropas por yacimiento controlado
         infantry: { minerales: 0.04 },
         tank: { hierro: 0.06, petroleo: 0.08, minerales: 0.04 },
@@ -768,27 +768,77 @@ class GameEngine {
             dev += v * this.dev[G.prov[i]] / 1000;
             if (!disputed && connected.has(G.prov[i])) road += CELL_VALUE[i] * CONFIG.ROAD_BONUS;
         }
-        // Un yacimiento solo produce (renta, refuerzo entre yacimientos y abaratamiento de tropas) si la red de
-        // carreteras unida a la capital llega hasta él.
+        // Un yacimiento siempre rinde su oro y abastece a su provincia. Si una carretera pasa por su casilla, abastece
+        // también a las provincias cuya ciudad está en ese mismo tramo de red (territorio propio o aliado).
         const owned = RESOURCES.filter(r => this.owner[r.cell] === id);
-        const resources = owned.filter(r => this.nearSeen(seen, r.cell));
-        const looseResources = owned.filter(r => !resources.includes(r));
+        for (const r of owned) res += r.value * (this.legal[r.cell] === id ? 1 : CONFIG.DISPUTED_INCOME);
+        const comp = this.roadComponents(id);
+        const access = new Map();   // provincia → yacimientos que la abastecen
+        for (const p of PROVINCES) {
+            if (this.owner[p.city] !== id) continue;
+            const near = new Set();
+            if (comp[p.city] >= 0) near.add(comp[p.city]);
+            for (let d = 0; d < 6; d++) { const j = G.nb[p.city * 6 + d]; if (j >= 0 && comp[j] >= 0) near.add(comp[j]); }
+            const list = owned.filter(r => r.province === p.id || (comp[r.cell] >= 0 && near.has(comp[r.cell])));
+            if (list.length) access.set(p.id, list);
+        }
+        let industry = 0;
+        for (const i of G.land) {
+            if (this.owner[i] !== id) continue;
+            const list = access.get(G.prov[i]);
+            if (!list) continue;
+            const v = CELL_VALUE[i] * (this.legal[i] === id ? 1 : CONFIG.DISPUTED_INCOME) * (1 + this.dev[G.prov[i]] / 1000);
+            industry += v * Math.min(CONFIG.RESOURCE_INDUSTRY_MAX, CONFIG.RESOURCE_INDUSTRY * list.length);
+        }
+        const resources = owned;
+        const looseResources = owned.filter(r => comp[r.cell] < 0);   // sin carretera: solo abastecen a su provincia
         const byType = {};
-        for (const r of resources) byType[r.type] = (byType[r.type] ?? 0) + 1;
-        const cluster = t => 1 + Math.min(CONFIG.RESOURCE_CLUSTER_MAX, CONFIG.RESOURCE_CLUSTER * (byType[t] - 1));
-        for (const r of resources) res += r.value * cluster(r.type) * (this.legal[r.cell] === id ? 1 : CONFIG.DISPUTED_INCOME);
+        for (const r of owned) byType[r.type] = (byType[r.type] ?? 0) + 1;
         const legalProvinces = PROVINCES.filter(p => this.owner[p.city] === id && this.legal[p.city] === id).length;
         const empireRate = Math.max(0, Math.min(CONFIG.EMPIRE_MAX, (legalProvinces - START_PROVINCES[id]) * CONFIG.EMPIRE_PER_PROVINCE));
-        const empire = (base + dev + road) * empireRate;
-        const e = { key, seen, connected, base: Math.round(base), dev: Math.round(dev), road: Math.round(road), res: Math.round(res),
-            empire: Math.round(empire), empireRate, legalProvinces, byType, resources, looseResources,
-            total: Math.round(base + dev + road + empire + res) };
+        const empire = (base + dev + road + industry) * empireRate;
+        const e = { key, seen, connected, comp, access, base: Math.round(base), dev: Math.round(dev), road: Math.round(road), res: Math.round(res),
+            industry: Math.round(industry), empire: Math.round(empire), empireRate, legalProvinces, byType, resources, looseResources,
+            total: Math.round(base + dev + road + industry + empire + res) };
         this.econCache[id] = e;
         return e;
     }
     // Tributo: el satélite entrega una parte de sus ingresos a su señor.
-    // ¿Produce el yacimiento para quien lo controla? (la carretera de su dueño llega hasta él)
-    resourceLinked(r) { const o = this.owner[r.cell]; return o >= 0 && this.economy(o).resources.includes(r); }
+    // Tramos de la red de carreteras de una nación: casillas propias o aliadas unidas por carretera, etiquetadas por componente.
+    roadComponents(id) {
+        const comp = new Int32Array(G.N).fill(-1);
+        const friend = o => o === id || this.allied(id, o);
+        let n = 0;
+        for (const s of G.land) {
+            if (comp[s] >= 0 || !friend(this.owner[s])) continue;
+            let hasRoad = false;
+            for (let d = 0; d < 6 && !hasRoad; d++) hasRoad = this.road[s * 6 + d] > 0;
+            if (!hasRoad) continue;
+            comp[s] = n;
+            const stack = [s];
+            while (stack.length) {
+                const u = stack.pop();
+                for (let d = 0; d < 6; d++) {
+                    if (!this.road[u * 6 + d]) continue;
+                    const v = G.nb[u * 6 + d];
+                    if (comp[v] >= 0 || !friend(this.owner[v])) continue;
+                    comp[v] = n;
+                    stack.push(v);
+                }
+            }
+            n++;
+        }
+        return comp;
+    }
+    // Provincias, además de la suya, a las que llega un yacimiento por carretera.
+    resourceReach(r) {
+        const o = this.owner[r.cell];
+        if (o < 0) return [];
+        return [...this.economy(o).access].filter(([pid, list]) => pid !== r.province && list.includes(r)).map(([pid]) => pid);
+    }
+    resourceLinked(r) { return this.resourceReach(r).length > 0; }
+    // Yacimientos que abastecen a una provincia (para su dueño).
+    provinceSupply(pid) { const o = this.owner[PROVINCES[pid].city]; return o >= 0 ? this.economy(o).access.get(pid) ?? [] : []; }
     tribute(id) {
         const n = this.nations[id];
         const out = n.overlord >= 0 ? Math.round(this.economy(id).total * CONFIG.TRIBUTE) : 0;
@@ -1160,8 +1210,9 @@ class GameEngine {
     capture(cell, a, byForce = false) {
         const prev = this.owner[cell];
         if (prev === a) return;
-        // Liberar tierra ocupada de un aliado se la devuelve a su dueño en lugar de quedársela.
-        const holder = c => (this.legal[c] !== a && this.allied(a, this.legal[c]) ? this.legal[c] : a);
+        // Liberar tierra ocupada de un país con el que no se está en guerra se la devuelve a su dueño:
+        // solo se queda (en disputa) lo que es de un enemigo.
+        const holder = c => (this.legal[c] !== a && !this.atWar(a, this.legal[c]) ? this.legal[c] : a);
         this.owner[cell] = holder(cell);
         this.version++;
         if (byForce) this.wreck(cell, prev, a);
@@ -1205,7 +1256,12 @@ class GameEngine {
         const n = this.nations[id];
         if (!n.alive || PROVINCES.some(p => this.owner[p.city] === id)) return;
         n.alive = false;
-        for (const i of G.land) if (this.owner[i] === id) this.owner[i] = captor;
+        // Lo que tenía pasa al conquistador; lo que ocupaba de un tercero vuelve a su dueño si el conquistador no está en guerra con él.
+        for (const i of G.land) {
+            if (this.owner[i] !== id) continue;
+            const l = this.legal[i];
+            this.owner[i] = l !== id && this.nations[l].alive && !this.atWar(captor, l) ? l : captor;
+        }
         for (const i of G.land) if (this.legal[i] === id) this.legal[i] = this.owner[i];   // lo que era suyo pasa a quien lo ocupa
         for (const s of this.nations) if (s.overlord === id) s.overlord = -1;
         n.overlord = -1;
@@ -1330,8 +1386,11 @@ class GameEngine {
 
     // --- Reclutamiento ---
     // Coste de una unidad para una nación: sus yacimientos abaratan el material.
-    unitCost(id, type) {
-        const byType = this.economy(id).byType;
+    // Coste de una unidad reclutada en la provincia `pid`: la abaratan los yacimientos que abastecen a esa provincia.
+    unitCost(id, type, pid = -1) {
+        const list = pid >= 0 ? this.economy(id).access.get(pid) ?? [] : [];
+        const byType = {};
+        for (const r of list) byType[r.type] = (byType[r.type] ?? 0) + 1;
         let disc = 0;
         for (const [k, v] of Object.entries(CONFIG.RESOURCE_DISCOUNT[type])) disc += v * (byType[k] ?? 0);
         return Math.round(CONFIG.TYPES[type].cost * (1 - Math.min(CONFIG.MAX_DISCOUNT, disc)));
@@ -1342,7 +1401,7 @@ class GameEngine {
         return this.owner[p.city] === nation && this.legal[p.city] === nation && (!ar || ar.owner === nation) && this.recruitLeft(nation, p) > 0;
     }
     recruit(nation, p, type) {
-        const n = this.nations[nation], cost = this.unitCost(nation, type);
+        const n = this.nations[nation], cost = this.unitCost(nation, type, p.id);
         if (n.gold < cost || !this.canRecruitAt(nation, p)) return false;
         n.gold -= cost;
         n.recruited.set(p.id, (n.recruited.get(p.id) ?? 0) + 1);
@@ -1799,8 +1858,8 @@ class GameEngine {
             if (!p) break;
             const r = this.rng(), budget = n.gold - reserve;
             let type = 'infantry';
-            if (budget >= this.unitCost(id, 'artillery') && r < 0.2) type = 'artillery';
-            else if (budget >= this.unitCost(id, 'tank') && r < 0.55) type = 'tank';
+            if (budget >= this.unitCost(id, 'artillery', p.id) && r < 0.2) type = 'artillery';
+            else if (budget >= this.unitCost(id, 'tank', p.id) && r < 0.55) type = 'tank';
             if (!this.recruit(id, p, type)) break;
         }
     }
@@ -1887,7 +1946,7 @@ class GameEngine {
         if (this.owner[cap] !== id) return;
         const targets = [
             ...this.citiesOf(id).filter(p => !e.connected.has(p.id)).map(p => ({ cell: p.city, value: p.value })),
-            ...e.looseResources.map(r => ({ cell: r.cell, value: r.value * 2 }))   // un yacimiento conectado rinde y abarata tropas
+            ...e.looseResources.map(r => ({ cell: r.cell, value: r.value * 2 }))   // con carretera abastece a más provincias
         ].sort((x, y) => y.value - x.value);
         const loose = targets[0];
         if (!loose) return;
@@ -2225,7 +2284,7 @@ class MapView {
             const [x, y] = this.toScreen(G.cx[r.cell], G.cy[r.cell]);
             if (!visible(x, y)) continue;
             const rad = Math.max(4, Math.min(11, hexPx * 0.9));
-            ctx.globalAlpha = g.resourceLinked(r) ? 1 : 0.45;
+            ctx.globalAlpha = g.resourceLinked(r) ? 1 : 0.7;
             ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2);
             ctx.fillStyle = CONFIG.RESOURCE_COLOR[r.type]; ctx.fill();
             ctx.lineWidth = 1.5; ctx.strokeStyle = g.nations[g.owner[r.cell]].color; ctx.stroke();
@@ -2379,7 +2438,7 @@ class GameUI {
             <li>★ capital &nbsp; ● ciudad &nbsp; A rayas: territorio en disputa (ocupado en guerra)</li>
             <li>Con niebla de guerra, en sombra: lo que no ves. Ojo junto a una ciudad: tu espía</li>
             <li>${Object.entries(E.resourceTypes).map(([k, name]) => `${CONFIG.RESOURCE_ICON[k]} ${name}`).join(' &nbsp;')}</li>
-            <li>Yacimiento apagado: no produce hasta que una carretera lo une a la capital</li></ul>`;
+            <li>Un yacimiento abastece a su provincia; si una carretera pasa por él, también a las ciudades que una (más renta y tropas más baratas). Más tenue: aún sin carretera</li></ul>`;
         this.render();
     }
 
@@ -2504,7 +2563,12 @@ class GameUI {
         const lines = [`<b>${esc(p.name)}</b>${g.isDisputed(cell) ? ` <span class="muted">(en disputa: es de ${g.nm(g.legal[cell])})</span>` : ''}`,
             `<span style="color:${g.nations[o].color}">■</span> ${g.nm(o)}${g.player !== null && o !== g.player ? ` ${this.relationChip(o)}` : ''}`];
         if (CITY_OF[cell] >= 0) lines.push(`${CAPITAL_OF[cell] >= 0 ? '★ Capital' : '● Ciudad'}: ${esc(p.cityName)}`);
-        if (res) lines.push(`${CONFIG.RESOURCE_ICON[res.type]} ${res.typeName} de ${esc(res.name)}: ${g.resourceLinked(res) ? `+${res.value} de oro` : '<span class="warn-text">sin carretera a la capital, no produce</span>'}`);
+        if (res) {
+            const reach = g.resourceReach(res).length;
+            lines.push(`${CONFIG.RESOURCE_ICON[res.type]} ${res.typeName} de ${esc(res.name)}: +${res.value} de oro, ${reach ? `abastece a su provincia y a ${plural(reach, 'otra', 'otras')}` : 'abastece solo a su provincia'}`);
+        }
+        const supply = g.provinceSupply(G.prov[cell]);
+        if (supply.length) lines.push(`Abastecida por ${supply.map(r => CONFIG.RESOURCE_ICON[r.type]).join('')}: +${Math.round(100 * Math.min(CONFIG.RESOURCE_INDUSTRY_MAX, CONFIG.RESOURCE_INDUSTRY * supply.length))} % de renta`);
         if (g.fort[cell]) lines.push(`Fortificada: defensa ×${CONFIG.FORT_DEFENSE}`);
         else if (g.fortWork.has(cell)) lines.push(`Fortificando: ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}`);
         if (!g.sees(g.player, cell)) lines.push('<span class="muted">Niebla de guerra: no sabes qué tropas hay</span>');
@@ -2852,7 +2916,7 @@ class GameUI {
                     <dt>Territorio</dt><dd>${plural(g.citiesOf(c).length, 'provincia', 'provincias')}, ${(100 * lands[c] / G.land.length).toFixed(1)} % de Europa</dd>
                     <dt>Ejército</dt><dd>fuerza ${powers[c]}</dd>
                     <dt>Economía</dt><dd>${e.total} de oro por turno, ${g.nations[c].gold} en el tesoro</dd>
-                    <dt>Recursos</dt><dd>${[...e.resources, ...e.looseResources].map(r => `${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}`).join(', ') || 'ninguno'}${e.looseResources.length ? '<br><span class="small muted">Producen cuando una carretera los une a tu capital.</span>' : ''}</dd>
+                    <dt>Recursos</dt><dd>${[...e.resources, ...e.looseResources].map(r => `${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}`).join(', ') || 'ninguno'}${e.resources.length ? '<br><span class="small muted">Cada uno abastece a su provincia; con carretera, también a las ciudades que una.</span>' : ''}</dd>
                     <dt>Alianzas</dt><dd>${g.blocsOf(c).map(b => esc(b.name)).join(', ') || 'ninguna'}</dd>
                 </dl></div>
                 <button class="btn primary wide" style="margin-top:12px;padding:11px" data-action="start">Empezar con ${g.nm(c)}</button>`;
@@ -2925,9 +2989,9 @@ class GameUI {
                 <p class="small muted" style="margin:-3px 0 8px">${left > 0 ? `Puedes reclutar ${plural(left, 'unidad', 'unidades')} más este turno.` : 'Ya no puedes reclutar más aquí este turno.'}</p>
                 <div class="recruit">${UNIT_KEYS.map(k => {
                     const t = CONFIG.TYPES[k];
-                    const cost = g.unitCost(p0, k);
+                    const cost = g.unitCost(p0, k, p.id);
                     return `<button class="btn" data-action="recruit" data-unit="${k}" ${!ok || gold < cost ? 'disabled' : ''} title="${cost < t.cost ? `Tus yacimientos lo abaratan: ${t.cost} → ${cost}` : ''}">
-                        ${unitIcon(k, g.nations[p0].color)}${t.name}<b>${g.unitCost(p0, k)} oro</b></button>`;
+                        ${unitIcon(k, g.nations[p0].color)}${t.name}<b>${cost} oro</b></button>`;
                 }).join('')}</div>
                 <p class="note">Las tropas nuevas aparecen en la ciudad y se mueven a partir del turno siguiente.</p></section>`);
         }
@@ -2970,7 +3034,8 @@ class GameUI {
                 <dt>Desarrollo</dt><dd>+${Math.round(g.dev[p.id] / 10)} % de renta${g.dev[p.id] < (connected ? CONFIG.DEV_MAX_CONNECTED : CONFIG.DEV_MAX) && g.legal[p.city] === cityOwner ? `, crece un ${(connected ? CONFIG.DEV_GROWTH_CONNECTED : CONFIG.DEV_GROWTH) / 10} % por turno${connected ? '' : ' (con carretera a la capital crecería más)'}` : ''}</dd>
                 <dt>Terreno</dt><dd>${CONFIG.TERRAIN[p.terrain].name.toLowerCase()}${CONFIG.TERRAIN[p.terrain].def > 1 ? `, defensa ×${CONFIG.TERRAIN[p.terrain].def}` : ''}</dd>
                 ${g.isDisputed(cell) ? `<dt>Estado</dt><dd class="warn-text">en disputa: la ocupa ${g.nm(o)} pero es de ${g.nm(g.legal[cell])}. Rinde la mitad y se anexiona al firmar la paz.</dd>` : ''}
-                ${res.map(r => `<dt>${r.typeName}</dt><dd>${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}, ${g.resourceLinked(r) ? `+${r.value} de oro` : '<span class="warn-text">sin carretera a la capital de su dueño: no produce ni abarata tropas</span>'}</dd>`).join('')}
+                ${res.map(r => { const reach = g.resourceReach(r); return `<dt>${r.typeName}</dt><dd>${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}, +${r.value} de oro. ${reach.length ? `Abastece también a ${reach.map(x => esc(PROVINCES[x].name)).join(', ')}.` : 'Solo abastece a esta provincia: pasa una carretera por su casilla y llévala hasta otras ciudades.'}</dd>`; }).join('')}
+                ${(() => { const s = g.provinceSupply(p.id); return s.length ? `<dt>Industria</dt><dd>+${Math.round(100 * Math.min(CONFIG.RESOURCE_INDUSTRY_MAX, CONFIG.RESOURCE_INDUSTRY * s.length))} % de renta y tropas más baratas: la abastecen ${s.map(r => `${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}`).join(', ')}</dd>` : ''; })()}
                 ${g.fort[cell] ? `<dt>Casilla</dt><dd>fortificada</dd>` : g.fortWork.has(cell) ? `<dt>Casilla</dt><dd>fortificando, ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}</dd>` : ''}
             </dl></section>`);
 
@@ -3123,12 +3188,13 @@ class GameUI {
         return `<h3 style="margin-top:12px">Economía</h3><dl class="facts">
             <dt>Provincias</dt><dd>${e.base} de oro</dd>
             <dt>Desarrollo</dt><dd>+${e.dev}</dd>
+            <dt>Industria</dt><dd>+${e.industry}${e.access.size ? ` (${plural(e.access.size, 'provincia abastecida', 'provincias abastecidas')} por yacimientos)` : ''}</dd>
             <dt>Carreteras</dt><dd>+${e.road}</dd>
             <dt>Imperio</dt><dd>+${e.empire}${e.empireRate > 0 ? ` (+${Math.round(e.empireRate * 100)} % por ${e.legalProvinces - START_PROVINCES[id]} provincias ganadas)` : ' (crece al anexionar provincias)'}</dd>
-            <dt>Recursos</dt><dd>+${e.res}${counts ? ` (${counts})` : ''}${e.looseResources.length ? `<br><span class="warn-text">${plural(e.looseResources.length, 'yacimiento', 'yacimientos')} sin carretera a la capital: no producen</span>` : ''}</dd>
+            <dt>Recursos</dt><dd>+${e.res}${counts ? ` (${counts})` : ''}${e.looseResources.length ? `<br><span class="small muted">${plural(e.looseResources.length, 'yacimiento', 'yacimientos')} sin carretera: solo abastecen a su provincia</span>` : ''}</dd>
             ${tr.in || tr.out ? `<dt>Tributo</dt><dd>${tr.in ? `+${tr.in}` : ''}${tr.out ? ` −${tr.out}` : ''}</dd>` : ''}
             <dt>Total</dt><dd><b>${g.income(id)} de oro por turno</b></dd>
-            <dt>Precios</dt><dd>${UNIT_KEYS.map(k => `${CONFIG.TYPES[k].name.toLowerCase()} ${g.unitCost(id, k)}`).join(', ')}</dd>
+            <dt>Precios en la capital</dt><dd>${UNIT_KEYS.map(k => `${CONFIG.TYPES[k].name.toLowerCase()} ${g.unitCost(id, k, G.prov[g.nations[id].capitalCell])}`).join(', ')}</dd>
         </dl>`;
     }
 
@@ -3280,7 +3346,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.16-135906';
+const APP_VERSION = '2026.10.16-150321';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
