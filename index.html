@@ -356,6 +356,10 @@ const CONFIG = {
         artillery: { hierro: 0.06, carbon: 0.05, minerales: 0.04 }
     },
     MAX_DISCOUNT: 0.5,
+    FLANKED_SIDES: 3,               // ejército con ejércitos enemigos en 3 o más de sus 6 lados: rodeado...
+    FLANKED_FACTOR: 0.75,           // ... ataque y defensa ×0,75 y mueve la mitad
+    SURROUNDED_SIDES: 5,            // con 5 o más lados: cercado...
+    SURROUNDED_FACTOR: 0.5,         // ... ataque y defensa a la mitad y solo avanza una casilla
     SIEGE_TURNS: 3,                 // turnos con tropas en una ciudad ajena para tomarla
     CAPITAL_LOST_RESOURCES: 0.5,    // sin su capital, un país saca la mitad de sus yacimientos e industria
     LOOT_FACTOR: 2,                 // saqueo al tomar una ciudad: 2 × el peso de la provincia en la renta del defensor...
@@ -1076,9 +1080,26 @@ class GameEngine {
     }
     // Subpuntos de movimiento que quedan. Sin suministro solo queda 1 subpunto: no basta para ningún tramo, así que
     // el ejército únicamente puede dar el paso mínimo garantizado de reach() (una casilla por turno) o atacar a un vecino.
+    // Lados de la casilla con ejércitos de países en guerra con `owner`.
+    hostileSides(owner, cell) {
+        let n = 0;
+        for (let d = 0; d < 6; d++) {
+            const j = G.nb[cell * 6 + d];
+            if (j >= 0 && this.armyAt[j] && this.atWar(owner, this.armies.get(this.armyAt[j]).owner)) n++;
+        }
+        return n;
+    }
+    // Penalización por estar rodeado: multiplicador de ataque y defensa (1 si no lo está).
+    flankFactor(owner, cell) {
+        const n = this.hostileSides(owner, cell);
+        return n >= CONFIG.SURROUNDED_SIDES ? CONFIG.SURROUNDED_FACTOR : n >= CONFIG.FLANKED_SIDES ? CONFIG.FLANKED_FACTOR : 1;
+    }
     moveBudget(owner, cell, units, used) {
         if (!this.inSupply(owner, cell)) return Math.max(0, 1 - used);
-        return Math.max(0, speedOf(units) * MOVE - used);
+        const sides = this.hostileSides(owner, cell);
+        if (sides >= CONFIG.SURROUNDED_SIDES) return Math.max(0, 1 - used);   // cercado: solo el paso mínimo
+        const full = speedOf(units) * MOVE * (sides >= CONFIG.FLANKED_SIDES ? 0.5 : 1);
+        return Math.max(0, Math.floor(full) - used);
     }
     mp(a) { return this.moveBudget(a.owner, a.cell, a.units, a.used); }
     armyOn(cell) { const id = this.armyAt[cell]; return id ? this.armies.get(id) : null; }
@@ -1215,8 +1236,8 @@ class GameEngine {
         const terrain = CONFIG.TERRAIN[p.terrain];
         const fort = (CITY_OF[cell] >= 0 ? CONFIG.CITY_DEFENSE : 1) * (CAPITAL_OF[cell] >= 0 ? CONFIG.CAPITAL_DEFENSE : 1)
             * (this.fort[cell] === 1 ? CONFIG.FORT_DEFENSE : 1);
-        const atk = unitPower(att.units, 'atk') * roll();
-        const dfn = Math.max(0.5, unitPower(def.units, 'def') * roll() * terrain.def * fort);
+        const atk = unitPower(att.units, 'atk') * roll() * this.flankFactor(att.owner, att.cell);
+        const dfn = Math.max(0.5, unitPower(def.units, 'def') * roll() * terrain.def * fort * this.flankFactor(def.owner, cell));
         const attWins = atk > dfn;
         const [w, l] = attWins ? [atk, dfn] : [dfn, atk];
         const winnerLoss = 0.3 * l / w;
@@ -2045,13 +2066,14 @@ class GameEngine {
                 army = this.split(army, send);
             }
             const r = this.reach(id, army.cell, this.mp(army), army.used === 0);
-            const atk = unitPower(army.units, 'atk');
+            const atk = unitPower(army.units, 'atk') * this.flankFactor(id, army.cell);
+            const trapped = this.hostileSides(id, army.cell);
             let best = null, bestScore = 0;
             for (const [target, from] of r.attacks) {
                 const def = this.armyOn(target);
                 const fort = (CITY_OF[target] >= 0 ? CONFIG.CITY_DEFENSE : 1) * (CAPITAL_OF[target] >= 0 ? CONFIG.CAPITAL_DEFENSE : 1)
                     * (this.fort[target] === 1 ? CONFIG.FORT_DEFENSE : 1);
-                const ratio = atk / Math.max(0.5, unitPower(def.units, 'def') * CONFIG.TERRAIN[PROVINCES[G.prov[target]].terrain].def * fort);
+                const ratio = atk / Math.max(0.5, unitPower(def.units, 'def') * CONFIG.TERRAIN[PROVINCES[G.prov[target]].terrain].def * fort * this.flankFactor(def.owner, target));
                 if (ratio < 1.3) continue;
                 const score = 1000 + Math.min(ratio, 5) * 20 + (CITY_OF[target] >= 0 ? 300 : 0);
                 if (score > bestScore) { bestScore = score; best = { kind: 'attack', target, from }; }
@@ -2059,8 +2081,9 @@ class GameEngine {
             for (const v of this.destinations(r)) {
                 const hostile = this.atWar(id, this.owner[v]);
                 const gain = dist[army.cell] - dist[v];
-                if (gain <= 0 && !(CITY_OF[v] >= 0 && hostile)) continue;
-                const score = gain * 10 + (CITY_OF[v] >= 0 && hostile ? 600 : 0) + (RESOURCE_AT.has(v) && hostile ? 150 : 0) + (hostile ? 2 : 0);
+                if (gain <= 0 && !(CITY_OF[v] >= 0 && hostile) && !(trapped >= CONFIG.FLANKED_SIDES && this.hostileSides(id, v) < trapped)) continue;
+                const escape = trapped >= CONFIG.FLANKED_SIDES ? (trapped - this.hostileSides(id, v)) * 120 : 0;   // rodeada: retirarse vale más
+                const score = gain * 10 + escape + (CITY_OF[v] >= 0 && hostile ? 600 : 0) + (RESOURCE_AT.has(v) && hostile ? 150 : 0) + (hostile ? 2 : 0);
                 if (score > bestScore) { bestScore = score; best = { kind: 'move', target: v }; }
             }
             if (!best) { this.settle(army); continue; }
@@ -2523,6 +2546,7 @@ class MapView {
             const mine = a.owner === g.player;
             const spent = mine && g.mp(a) === 0;
             const noSupply = mine && !g.inSupply(a.owner, a.cell);
+            const flanked = g.hostileSides(a.owner, a.cell) >= CONFIG.FLANKED_SIDES;
             const selected = a.cell === this.selectedCell;
             if (!big) {
                 ctx.fillStyle = g.nations[a.owner].color;
@@ -2541,8 +2565,8 @@ class MapView {
             if (type === 'infantry') { ctx.moveTo(x0, y0); ctx.lineTo(x0 + w, y0 + hh); ctx.moveTo(x0 + w, y0); ctx.lineTo(x0, y0 + hh); ctx.stroke(); }
             else if (type === 'tank') { ctx.ellipse(x, y0 + hh / 2, w * 0.28, hh * 0.24, 0, 0, Math.PI * 2); ctx.stroke(); }
             else { ctx.arc(x, y0 + hh / 2, hh * 0.17, 0, Math.PI * 2); ctx.fillStyle = INK; ctx.fill(); }
-            ctx.lineWidth = selected ? 3 : noSupply ? 2.4 : 1.6;
-            ctx.strokeStyle = selected ? '#fff' : noSupply ? '#ff9f1c' : INK;
+            ctx.lineWidth = selected ? 3 : flanked || noSupply ? 2.6 : 1.6;
+            ctx.strokeStyle = selected ? '#fff' : flanked ? '#e05a47' : noSupply ? '#ff9f1c' : INK;
             ctx.strokeRect(x0, y0, w, hh);
             // número de unidades
             const n = String(countUnits(a.units)), r = Math.max(7, hh * 0.42);
@@ -2632,6 +2656,7 @@ class GameUI {
             <li><i class="line" style="border-top:2px solid #efe9d6"></i>Carretera: ½ punto por tramo</li>
             <li><i class="line" style="border-top:3px solid #e3d9c0"></i>Fortificación</li>
             <li>★ capital &nbsp; ● ciudad &nbsp; A rayas: territorio en disputa (ocupado en guerra)</li>
+            <li>Ficha con borde rojo: ejército rodeado por 3 o más lados (más débil y más lento)</li>
             <li>Anillo rojo: ciudad asediada (hay que mantener tropas ${CONFIG.SIEGE_TURNS} turnos para tomarla)</li>
             <li>Con niebla de guerra, en sombra: lo que no ves. Ojo junto a una ciudad: tu espía</li>
             <li>${Object.entries(E.resourceTypes).map(([k, name]) => `${CONFIG.RESOURCE_ICON[k]} ${name}`).join(' &nbsp;')}</li>
@@ -2771,7 +2796,11 @@ class GameUI {
         if (g.fort[cell]) lines.push(`Fortificada: defensa ×${CONFIG.FORT_DEFENSE}`);
         else if (g.fortWork.has(cell)) lines.push(`Fortificando: ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}`);
         if (!g.sees(g.player, cell)) lines.push('<span class="muted">Niebla de guerra: no sabes qué tropas hay</span>');
-        else if (a) lines.push(`Ejército de ${g.nm(a.owner)}: ${this.unitsLong(a.units)}`);
+        else if (a) {
+            lines.push(`Ejército de ${g.nm(a.owner)}: ${this.unitsLong(a.units)}`);
+            const sides = g.hostileSides(a.owner, cell);
+            if (sides >= CONFIG.FLANKED_SIDES) lines.push(`<span class="warn-text">${sides >= CONFIG.SURROUNDED_SIDES ? 'Cercado' : 'Rodeado'} por ${sides} lados: ataque y defensa ×${g.flankFactor(a.owner, cell)}</span>`);
+        }
         if (g.spies.has(G.prov[cell])) lines.push('Tienes un espía en esta provincia');
         if (g.player !== null && o === g.player && !g.inSupply(g.player, cell)) lines.push('<span style="color:#ffb347">Sin suministro</span>');
         if (this.reachInfo?.attacks.has(cell)) lines.push('<b style="color:#ff8a78">Clic para atacar</b>');
@@ -3317,6 +3346,9 @@ class GameUI {
                 <p class="small">${left <= 0 ? 'Ya no puede moverse este turno.'
                     : supplied ? `Le quedan ${fmtMp(left)} de ${fmtMp(speedOf(this.send) * MOVE)} puntos de movimiento.`
                     : 'Puede avanzar una casilla este turno.'}</p>
+                ${(() => { const sides = g.hostileSides(p0, a.cell); if (sides < CONFIG.FLANKED_SIDES) return '';
+                    const cercado = sides >= CONFIG.SURROUNDED_SIDES;
+                    return `<p class="note warn">${cercado ? 'Cercado' : 'Rodeado'} por ${sides} lados: ataque y defensa ×${g.flankFactor(p0, a.cell)} y ${cercado ? 'solo puede avanzar una casilla' : 'mueve la mitad'}. Mejor retirarse o romper el cerco.</p>`; })()}
                 ${supplied ? '' : `<p class="note warn">Sin suministro: lejos de tus ciudades y de tu red de carreteras solo avanza una casilla por turno. Construye carreteras hasta el frente para abastecerlo (llegan a ${CONFIG.SUPPLY_ROAD_RANGE} casillas de la red).</p>`}
                 ${left > 0 ? '<p class="note">Haz clic en una casilla verde para mover o en una roja para atacar. Por carretera llegas más lejos; si no se ha movido este turno, siempre puede avanzar al menos una casilla.</p>' : ''}
             </section>`);
@@ -3721,7 +3753,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.16-233000';
+const APP_VERSION = '2026.10.16-233149';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
