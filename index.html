@@ -2074,8 +2074,9 @@ class GameEngine {
                 const fort = (CITY_OF[target] >= 0 ? CONFIG.CITY_DEFENSE : 1) * (CAPITAL_OF[target] >= 0 ? CONFIG.CAPITAL_DEFENSE : 1)
                     * (this.fort[target] === 1 ? CONFIG.FORT_DEFENSE : 1);
                 const ratio = atk / Math.max(0.5, unitPower(def.units, 'def') * CONFIG.TERRAIN[PROVINCES[G.prov[target]].terrain].def * fort * this.flankFactor(def.owner, target));
-                if (ratio < 1.3) continue;
-                const score = 1000 + Math.min(ratio, 5) * 20 + (CITY_OF[target] >= 0 ? 300 : 0);
+                // Rodeada, le basta una ventaja menor para atacar y prefiere romper el cerco antes que huir.
+                if (ratio < (trapped >= CONFIG.FLANKED_SIDES ? 1.1 : 1.3)) continue;
+                const score = 1000 + Math.min(ratio, 5) * 20 + (CITY_OF[target] >= 0 ? 300 : 0) + (trapped >= CONFIG.FLANKED_SIDES ? 200 : 0);
                 if (score > bestScore) { bestScore = score; best = { kind: 'attack', target, from }; }
             }
             for (const v of this.destinations(r)) {
@@ -3753,7 +3754,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.16-233149';
+const APP_VERSION = '2026.10.16-233348';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
