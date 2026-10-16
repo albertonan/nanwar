@@ -356,6 +356,8 @@ const CONFIG = {
         artillery: { hierro: 0.06, carbon: 0.05, minerales: 0.04 }
     },
     MAX_DISCOUNT: 0.5,
+    SIEGE_TURNS: 3,                 // turnos con tropas en una ciudad ajena para tomarla
+    CAPITAL_LOST_RESOURCES: 0.5,    // sin su capital, un país saca la mitad de sus yacimientos e industria
     LOOT_FACTOR: 2,                 // saqueo al tomar una ciudad: 2 × el peso de la provincia en la renta del defensor...
     LOOT_MAX: 0.5,                  // ... hasta la mitad de su tesoro
     LOOT_CAPITAL: 0.3,              // tomar la capital se lleva como mínimo el 30 %
@@ -536,6 +538,7 @@ class GameEngine {
         this.devVersion = 0;
         this.supplyCache = [];
         this.cutLogged = new Set();
+        this.sieges = new Map();    // ciudad → { by, prev, held }: asedios en curso
         this.spies = new Map();     // provincia → { since, revealedTurn }: espías del jugador
         this.spyVersion = 0;
         this.armyVersion = 0;       // cambia cada vez que un ejército se mueve, aparece o desaparece
@@ -616,6 +619,7 @@ class GameEngine {
             owner: runs, legal: compress(this.legal), dev: Array.from(this.dev), roads: this.roadEdges(),
             forts: G.land.filter(i => this.fort[i]), fortWork: [...this.fortWork].map(([c, w]) => [c, w.owner, w.left]),
             spies: [...this.spies].map(([pid, s]) => [pid, s.since, s.revealedTurn]),
+            sieges: [...this.sieges].map(([c, s]) => [c, s.by, s.prev, s.held]),
             nations: this.nations.map(n => ({ gold: n.gold, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord })),
             relations,
             armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used]),
@@ -649,6 +653,7 @@ class GameEngine {
         for (const c of data.forts ?? []) g.fort[c] = 1;
         g.fortWork = new Map((data.fortWork ?? []).map(([c, owner, left]) => [c, { owner, left }]));
         g.spies = new Map((data.spies ?? []).map(([pid, since, revealedTurn]) => [pid, { since, revealedTurn }]));
+        g.sieges = new Map((data.sieges ?? []).map(([c, by, prev, held]) => [c, { by, prev, held }]));
         data.nations.forEach((n, i) => Object.assign(g.nations[i], { gold: n.gold, alive: n.alive, recruited: new Map(n.recruited), overlord: n.overlord ?? -1 }));
         for (const row of g.relations) for (const r of row) if (r) Object.assign(r, { state: 'paz', since: 0, truceUntil: 0 });
         for (const [a, b, state, since, truceUntil] of data.relations) Object.assign(g.relations[a][b], { state, since, truceUntil });
@@ -800,11 +805,13 @@ class GameEngine {
         const looseResources = owned.filter(r => comp[r.cell] < 0);   // sin carretera: solo abastecen a su provincia
         const byType = {};
         for (const r of owned) byType[r.type] = (byType[r.type] ?? 0) + 1;
+        const capitalLost = this.owner[this.nations[id].capitalCell] !== id;
+        if (capitalLost) { res *= CONFIG.CAPITAL_LOST_RESOURCES; industry *= CONFIG.CAPITAL_LOST_RESOURCES; }
         const legalProvinces = PROVINCES.filter(p => this.owner[p.city] === id && this.legal[p.city] === id).length;
         const empireRate = Math.max(0, Math.min(CONFIG.EMPIRE_MAX, (legalProvinces - START_PROVINCES[id]) * CONFIG.EMPIRE_PER_PROVINCE));
         const empire = (base + dev + road + industry) * empireRate;
         const e = { key, seen, connected, comp, access, base: Math.round(base), dev: Math.round(dev), road: Math.round(road), res: Math.round(res),
-            industry: Math.round(industry), empire: Math.round(empire), empireRate, legalProvinces, byType, resources, looseResources,
+            capitalLost, industry: Math.round(industry), empire: Math.round(empire), empireRate, legalProvinces, byType, resources, looseResources,
             total: Math.round(base + dev + road + industry + empire + res) };
         this.econCache[id] = e;
         return e;
@@ -1221,12 +1228,28 @@ class GameEngine {
         const holder = c => (this.legal[c] !== a && !this.atWar(a, this.legal[c]) ? this.legal[c] : a);
         this.owner[cell] = holder(cell);
         this.version++;
+        this.sieges.delete(cell);
         if (byForce) this.wreck(cell, prev, a);
         const res = RESOURCE_AT.get(cell);
         if (res && this.involvesPlayer(a, prev)) this.log(`${this.nm(a)} se hace con ${res.typeName.toLowerCase()} de ${res.name}.`);
         const pid = CITY_OF[cell];
         if (pid < 0) return;
         const p = PROVINCES[pid];
+        // Una ciudad ajena no cae al entrar: hay que mantener tropas en ella SIEGE_TURNS turnos (recuperar la propia es inmediato).
+        if (byForce && prev >= 0 && this.owner[cell] === a && this.legal[cell] !== a) {
+            this.sieges.set(cell, { by: a, prev, held: 0 });
+            if (this.involvesPlayer(a, prev, this.legal[cell])) {
+                this.log(`${this.nm(a)} asedia ${p.cityName} (${p.name}): debe mantener sus tropas allí ${CONFIG.SIEGE_TURNS} turnos para tomarla.`);
+            }
+            return;
+        }
+        this.completeCity(cell, a, prev, byForce);
+    }
+
+    // La ciudad cae: su provincia pasa al vencedor (salvo donde resisten tropas o muros), se saquea y pierde desarrollo.
+    completeCity(cell, a, prev, byForce) {
+        const p = PROVINCES[CITY_OF[cell]], pid = p.id;
+        const holder = c => (this.legal[c] !== a && !this.atWar(a, this.legal[c]) ? this.legal[c] : a);
         if (byForce && this.dev[pid]) { this.dev[pid] = Math.floor(this.dev[pid] * CONFIG.DEV_WAR_DAMAGE); this.devVersion++; }
         for (const c of p.cells) {
             if (this.owner[c] !== prev) continue;
@@ -1260,8 +1283,9 @@ class GameEngine {
 
     checkElimination(id, captor) {
         const n = this.nations[id];
-        if (!n.alive || PROVINCES.some(p => this.owner[p.city] === id)) return;
+        if (!n.alive || PROVINCES.some(p => this.owner[p.city] === id || this.sieges.get(p.city)?.prev === id)) return;   // una ciudad asediada aún es suya
         n.alive = false;
+        for (const [c, s] of [...this.sieges]) if (s.by === id || s.prev === id) this.sieges.delete(c);
         // Lo que tenía pasa al conquistador; lo que ocupaba de un tercero vuelve a su dueño si el conquistador no está en guerra con él.
         for (const i of G.land) {
             if (this.owner[i] !== id) continue;
@@ -1452,6 +1476,14 @@ class GameEngine {
         }
         this.nations[id].recruited.clear();
         if (id === this.player) this.spyTurn();
+        for (const [cell, s] of [...this.sieges]) {
+            if (s.by !== id) continue;
+            if (this.owner[cell] !== id) { this.sieges.delete(cell); continue; }
+            const ar = this.armyOn(cell);
+            if (!ar || ar.owner !== id) { s.held = 0; continue; }   // sin tropas encima, el asedio no avanza
+            if (++s.held >= CONFIG.SIEGE_TURNS) { this.sieges.delete(cell); this.completeCity(cell, id, s.prev, true); }
+            if (this.over) return 0;
+        }
         const econ = this.economy(id);
         let grew = false;
         for (const p of PROVINCES) {
@@ -1551,6 +1583,7 @@ class GameEngine {
     // terms.satGains: 'self' (lo ocupado por los satélites de a es para ellos) u 'overlord' (para a).
     settlePeace(a, b, terms = { mode: 'annex' }) {
         const sideA = new Set([a, ...this.satellitesOf(a)]), sideB = new Set([b, ...this.satellitesOf(b)]);
+        for (const [c, s] of [...this.sieges]) if ((sideA.has(s.by) && sideB.has(s.prev)) || (sideB.has(s.by) && sideA.has(s.prev))) this.sieges.delete(c);
         let gainedA = 0, gainedB = 0;
         for (const i of G.land) {
             const o = this.owner[i], l = this.legal[i];
@@ -1685,6 +1718,19 @@ class GameEngine {
         while (n < qty && this.recruit(this.player, p, type)) n++;
         if (n) this.log(`Reclutas ${n} ${n === 1 ? CONFIG.TYPES[type].name.toLowerCase() : `unidades de ${CONFIG.TYPES[type].name.toLowerCase()}`} en ${p.cityName}.`);
         else this.log("No se puede reclutar ahí (fondos o cupo de la provincia agotados).");
+    }
+    playerRecruitMany(pids, type, qty) {
+        if (this.over) return 0;
+        let units = 0, cities = 0;
+        for (const pid of pids) {
+            const p = PROVINCES[pid];
+            let n = 0;
+            while (n < qty && this.recruit(this.player, p, type)) n++;
+            if (n) { units += n; cities++; }
+        }
+        if (units) this.log(`Reclutas ${units} ${units === 1 ? CONFIG.TYPES[type].name.toLowerCase() : `unidades de ${CONFIG.TYPES[type].name.toLowerCase()}`} en ${plural(cities, 'ciudad', 'ciudades')}.`);
+        else this.log('No se pudo reclutar: sin oro o sin cupo en esas ciudades.');
+        return units;
     }
     playerBuild(plan) {
         if (this.over || !plan) return false;
@@ -1943,6 +1989,7 @@ class GameEngine {
         for (const army0 of mine) {
             if (this.over) return;
             if (!this.armies.has(army0.id) || army0.owner !== id || this.mp(army0) <= 0) continue;
+            if (this.sieges.get(army0.cell)?.by === id) continue;   // mantiene el asedio
             let army = army0;
             const onCity = CITY_OF[army.cell] >= 0;
             if (onCity && unitPower(army.units, 'atk') <= 10) continue;               // guarnición
@@ -2048,6 +2095,7 @@ const ICONS = {
     road: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3 5 21M16 3l3 18M12 4v3M12 10.5v3M12 17v3"/></svg>',
     highway: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 3 3 21M17 3l4 18M10.5 3 9.5 21M13.5 3l1 18"/></svg>',
     fort: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 21V9h3V5h3v4h2V5h2v4h2V5h3v4h3v12zM10 21v-5h4v5"/></svg>',
+    cities: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><path d="M14 17.5h7M17.5 14v7"/></svg>',
     globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"/></svg>',
     supply: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M2 6h11v10H2zM13 9h4.5l3.5 3.5V16h-8"/><circle cx="6" cy="18" r="2"/><circle cx="17" cy="18" r="2"/></svg>'
 };
@@ -2055,7 +2103,8 @@ const TOOLS = [
     { id: 'command', label: 'Mando', key: '1', icon: ICONS.command, title: 'Seleccionar y dar órdenes' },
     { id: 'road', label: 'Carretera', key: '2', icon: ICONS.road, cls: 1, title: `Construir carretera (${CONFIG.ROAD_COST} de oro por tramo)` },
     { id: 'highway', label: 'Autopista', key: '3', icon: ICONS.highway, cls: 2, title: `Convertir en autopista (+${CONFIG.HIGHWAY_COST} de oro por tramo)` },
-    { id: 'fort', label: 'Fortificar', key: '4', icon: ICONS.fort, title: `Fortificar casillas (${CONFIG.FORT_COST} de oro cada una, ${CONFIG.FORT_TURNS} turnos)` }
+    { id: 'fort', label: 'Fortificar', key: '4', icon: ICONS.fort, title: `Fortificar casillas (${CONFIG.FORT_COST} de oro cada una, ${CONFIG.FORT_TURNS} turnos)` },
+    { id: 'cities', label: 'Ciudades', key: '5', icon: ICONS.cities, title: 'Seleccionar varias ciudades para reclutar o fortificar en todas a la vez' }
 ];
 
 // Símbolo OTAN de cada tipo de unidad (SVG para el panel; el mapa lo dibuja en canvas).
@@ -2345,6 +2394,12 @@ class MapView {
             const p = new Path2D(); this.hexPath(p, this.hoverCell);
             ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1.4 / s; ctx.stroke(p);
         }
+        if (this.multi?.size) {
+            const p = new Path2D();
+            for (const c of this.multi) this.hexPath(p, c);
+            ctx.strokeStyle = INK; ctx.lineWidth = 5 / s; ctx.stroke(p);
+            ctx.strokeStyle = SIGNAL; ctx.lineWidth = 2.6 / s; ctx.stroke(p);
+        }
         if (this.selectedCell >= 0) {
             const p = new Path2D(); this.hexPath(p, this.selectedCell);
             ctx.strokeStyle = INK; ctx.lineWidth = 4.5 / s; ctx.stroke(p);
@@ -2383,6 +2438,20 @@ class MapView {
             } else if (hexPx >= 2.5) {
                 ctx.beginPath(); ctx.arc(x, y, Math.max(1.6, Math.min(3.5, hexPx * 0.35)), 0, Math.PI * 2);
                 ctx.fillStyle = '#fff'; ctx.fill(); ctx.lineWidth = 1; ctx.strokeStyle = INK; ctx.stroke();
+            }
+        }
+
+        // Asedios: anillo rojo discontinuo y turnos que lleva
+        for (const [c, sg] of g.sieges) {
+            if (!g.sees(g.player, c)) continue;
+            const [x, y] = this.toScreen(G.cx[c], G.cy[c]);
+            if (!visible(x, y)) continue;
+            const r = Math.max(7, hexPx * 1.25);
+            ctx.setLineDash([4, 3]); ctx.lineWidth = 2.5; ctx.strokeStyle = '#e05a47';
+            ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+            if (hexPx >= 5) {
+                ctx.font = font(11, 700); ctx.lineWidth = 3; ctx.strokeStyle = INK; ctx.fillStyle = '#ffb3a8';
+                ctx.strokeText(`${sg.held}/${CONFIG.SIEGE_TURNS}`, x, y - r - 7); ctx.fillText(`${sg.held}/${CONFIG.SIEGE_TURNS}`, x, y - r - 7);
             }
         }
 
@@ -2491,6 +2560,7 @@ class GameUI {
         this.blocSecret = false;
         this.seenLog = 0;
         this.prefs = readPrefs();
+        this.multi = new Set();      // provincias seleccionadas con la herramienta Ciudades
         this.replaying = false;
 
         this.bindMap();
@@ -2515,6 +2585,7 @@ class GameUI {
             <li><i class="line" style="border-top:2px solid #efe9d6"></i>Carretera: ½ punto por tramo</li>
             <li><i class="line" style="border-top:3px solid #e3d9c0"></i>Fortificación</li>
             <li>★ capital &nbsp; ● ciudad &nbsp; A rayas: territorio en disputa (ocupado en guerra)</li>
+            <li>Anillo rojo: ciudad asediada (hay que mantener tropas ${CONFIG.SIEGE_TURNS} turnos para tomarla)</li>
             <li>Con niebla de guerra, en sombra: lo que no ves. Ojo junto a una ciudad: tu espía</li>
             <li>${Object.entries(E.resourceTypes).map(([k, name]) => `${CONFIG.RESOURCE_ICON[k]} ${name}`).join(' &nbsp;')}</li>
             <li>Un yacimiento abastece a su provincia; si una carretera pasa por él, también a las ciudades que una (más renta y tropas más baratas). Más tenue: aún sin carretera</li></ul>`;
@@ -2619,7 +2690,7 @@ class GameUI {
 
     planTo(cell) {
         const g = this.game, t = this.toolDef();
-        if (this.tool === 'command' || this.anchor < 0 || cell < 0 || !isLand(cell) || g.owner[cell] !== g.player) return null;
+        if (this.tool === 'command' || this.tool === 'cities' || this.anchor < 0 || cell < 0 || !isLand(cell) || g.owner[cell] !== g.player) return null;
         if (this.tool === 'fort') return g.planFort(g.player, this.anchor, cell);
         if (cell === this.anchor) return null;
         return g.planRoad(g.player, this.anchor, c => c === cell, t.cls);
@@ -2648,6 +2719,8 @@ class GameUI {
         }
         const supply = g.provinceSupply(G.prov[cell]);
         if (supply.length) lines.push(`Abastecida por ${supply.map(r => CONFIG.RESOURCE_ICON[r.type]).join('')}: +${Math.round(100 * Math.min(CONFIG.RESOURCE_INDUSTRY_MAX, CONFIG.RESOURCE_INDUSTRY * supply.length))} % de renta`);
+        const sg = g.sieges.get(cell);
+        if (sg) lines.push(`<span class="warn-text">Asediada por ${g.nm(sg.by)}: ${sg.held} de ${CONFIG.SIEGE_TURNS} turnos</span>`);
         if (g.fort[cell]) lines.push(`Fortificada: defensa ×${CONFIG.FORT_DEFENSE}`);
         else if (g.fortWork.has(cell)) lines.push(`Fortificando: ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}`);
         if (!g.sees(g.player, cell)) lines.push('<span class="muted">Niebla de guerra: no sabes qué tropas hay</span>');
@@ -2675,6 +2748,7 @@ class GameUI {
         if (cell < 0 || !isLand(cell)) { if (this.tool === 'command') this.select(-1); return; }
         if (g.player === null) { this.choice = g.owner[cell]; this.render(); return; }
         if (g.over) return;
+        if (this.tool === 'cities') { this.toggleCity(cell); return; }
         if (this.tool !== 'command') { this.buildClick(cell); return; }
         const army = this.selectedArmy();
         if (army && this.reachInfo && (this.reachInfo.attacks.has(cell) || this.reachInfo.moves.has(cell))) {
@@ -2719,6 +2793,59 @@ class GameUI {
         this.pending = null;
         this.view.preview = null;
         this.render();
+    }
+
+    myCities() { const g = this.game; return PROVINCES.filter(p => g.owner[p.city] === g.player && g.legal[p.city] === g.player); }
+    toggleCity(cell) {
+        const g = this.game;
+        if (cell < 0 || !isLand(cell)) return;
+        const p = PROVINCES[G.prov[cell]];
+        if (g.owner[p.city] !== g.player || g.legal[p.city] !== g.player) { this.flash('Solo puedes seleccionar ciudades tuyas que no estén en disputa.'); return; }
+        if (this.multi.has(p.id)) this.multi.delete(p.id); else this.multi.add(p.id);
+        this.render();
+    }
+    // Cuántas unidades saldrían (y por cuánto oro) reclutando `qty` por ciudad en la selección, ciudad por ciudad.
+    multiPlan(type, qty) {
+        const g = this.game;
+        let gold = g.nations[g.player].gold, units = 0, cost = 0;
+        for (const pid of this.multi) {
+            const p = PROVINCES[pid];
+            if (!g.canRecruitAt(g.player, p)) continue;
+            const c = g.unitCost(g.player, type, pid);
+            for (let n = Math.min(qty, g.recruitLeft(g.player, p)); n > 0 && gold >= c; n--) { gold -= c; cost += c; units++; }
+        }
+        return { units, cost };
+    }
+    renderMultiCard() {
+        const g = this.game, el = $('#card'), p0 = g.player, color = g.nations[p0].color;
+        for (const pid of [...this.multi]) { const p = PROVINCES[pid]; if (g.owner[p.city] !== p0 || g.legal[p.city] !== p0) this.multi.delete(pid); }
+        const list = [...this.multi].map(pid => PROVINCES[pid]);
+        const qty = this.recruitQty ?? 1, gold = g.nations[p0].gold;
+        const forts = list.map(p => p.city).filter(c => !g.fort[c] && !g.fortWork.has(c));
+        const canFort = Math.min(forts.length, Math.floor(gold / CONFIG.FORT_COST));
+        el.hidden = false;
+        el.style.setProperty('--owner', color);
+        el.innerHTML = `
+            <header class="card-head">
+                <div><h2>${list.length ? plural(list.length, 'ciudad seleccionada', 'ciudades seleccionadas') : 'Selecciona ciudades'}</h2>
+                <p class="small muted">Haz clic en tus provincias para añadirlas o quitarlas.</p></div>
+                <button class="btn ghost" data-action="tool" data-tool="command" aria-label="Cerrar" title="Cerrar (Esc)">✕</button>
+            </header>
+            <section class="sec"><div class="row">
+                <button class="btn" data-action="multi-all">Todas mis ciudades (${this.myCities().length})</button>
+                <button class="btn ghost" data-action="multi-none" ${list.length ? '' : 'disabled'}>Ninguna</button></div>
+                ${list.length ? `<p class="small muted" style="margin-top:8px">${list.slice(0, 12).map(p => esc(p.cityName)).join(', ')}${list.length > 12 ? ` y ${list.length - 12} más` : ''}</p>` : ''}
+            </section>
+            ${list.length ? `<section class="sec"><h3>Reclutar en todas</h3>
+                <div class="row" style="margin-bottom:8px"><span class="small">Por ciudad</span><div class="seg" style="flex:1">
+                    ${[['1', '×1'], ['5', '×5'], ['max', 'Máximo']].map(([v, label]) => `<button data-action="recruit-qty" data-qty="${v}" class="${String(qty) === v || (v === 'max' && qty === Infinity) ? 'on' : ''}">${label}</button>`).join('')}
+                </div></div>
+                <div class="recruit">${UNIT_KEYS.map(k => { const pl = this.multiPlan(k, qty); return `<button class="btn" data-action="multi-recruit" data-unit="${k}" ${pl.units ? '' : 'disabled'}>
+                    ${unitIcon(k, color)}${CONFIG.TYPES[k].name}<b>${pl.units} uds</b><small>${pl.cost} oro</small></button>`; }).join('')}</div>
+                <p class="note">Se recluta ciudad por ciudad hasta agotar el oro o el cupo de cada una.</p></section>
+            <section class="sec"><h3>Fortificar</h3>
+                <button class="btn" data-action="multi-fort" ${canFort ? '' : 'disabled'}>Fortificar ${plural(canFort, 'ciudad', 'ciudades')} (${canFort * CONFIG.FORT_COST} oro)</button>
+                <p class="note">Listas en ${CONFIG.FORT_TURNS} turnos. No cuentan las que ya están fortificadas o en obras${canFort < forts.length ? '; no te llega el oro para todas' : ''}.</p></section>` : ''}`;
     }
 
     flash(msg) { this.game.log(msg); this.hintOverride = msg; this.render(); }
@@ -2778,6 +2905,7 @@ class GameUI {
         }
         this.view.highlight = this.reachInfo;
         this.view.selectedCell = this.selected;
+        this.view.multi = this.tool === 'cities' ? new Set([...this.multi].map(pid => PROVINCES[pid].city)) : null;
     }
 
     // --- Entrada ---
@@ -2822,6 +2950,15 @@ class GameUI {
                 return;
             case 'end-turn': this.endTurnFlow(); return;
             case 'skip-replay': this.skipReplay(); return;
+            case 'multi-all': this.multi = new Set(this.myCities().map(p => p.id)); break;
+            case 'multi-none': this.multi.clear(); break;
+            case 'multi-recruit': g.playerRecruitMany([...this.multi], d.unit, this.recruitQty ?? 1); break;
+            case 'multi-fort': {
+                const cells = [...this.multi].map(pid => PROVINCES[pid].city).filter(c => !g.fort[c] && !g.fortWork.has(c))
+                    .slice(0, Math.floor(g.nations[g.player].gold / CONFIG.FORT_COST));
+                if (cells.length) g.playerFortify({ cells, path: cells, cost: cells.length * CONFIG.FORT_COST, cls: 'fort' });
+                break;
+            }
             case 'watch': this.prefs.watch = d.value; writePrefs(this.prefs); if ($('#game-dialog').open) this.renderGameDialog(); break;
             case 'speed': this.prefs.speed = d.value; writePrefs(this.prefs); if ($('#game-dialog').open) this.renderGameDialog(); break;
             case 'alerts-close': $('#alerts-dialog').close(); g.alerts = []; break;
@@ -3106,6 +3243,7 @@ class GameUI {
 
     renderCard() {
         const g = this.game, cell = this.selected, p0 = g.player, el = $('#card');
+        if (this.tool === 'cities' && p0 !== null && !g.over) { this.renderMultiCard(); return; }
         if (p0 === null || g.over || cell < 0 || !isLand(cell) || (isMobile() && this.tool !== 'command')) { el.hidden = true; return; }
         el.hidden = false;
         const p = PROVINCES[G.prov[cell]], o = g.owner[cell], a = g.armyOn(cell);
@@ -3199,6 +3337,7 @@ class GameUI {
                 <dt>Renta</dt><dd>${Math.round(p.value * (1 + g.dev[p.id] / 1000))} de oro${connected ? ` (+${CONFIG.ROAD_BONUS * 100} % por carretera)` : ', sin carretera a la capital'}</dd>
                 <dt>Desarrollo</dt><dd>+${Math.round(g.dev[p.id] / 10)} % de renta${g.dev[p.id] < (connected ? CONFIG.DEV_MAX_CONNECTED : CONFIG.DEV_MAX) && g.legal[p.city] === cityOwner ? `, crece un ${(connected ? CONFIG.DEV_GROWTH_CONNECTED : CONFIG.DEV_GROWTH) / 10} % por turno${connected ? '' : ' (con carretera a la capital crecería más)'}` : ''}</dd>
                 <dt>Terreno</dt><dd>${CONFIG.TERRAIN[p.terrain].name.toLowerCase()}${CONFIG.TERRAIN[p.terrain].def > 1 ? `, defensa ×${CONFIG.TERRAIN[p.terrain].def}` : ''}</dd>
+                ${g.sieges.has(p.city) ? `<dt>Asedio</dt><dd class="warn-text">${g.nm(g.sieges.get(p.city).by)} tiene tropas en ${esc(p.cityName)}: lleva ${g.sieges.get(p.city).held} de ${CONFIG.SIEGE_TURNS} turnos. Si las mantiene, toma la provincia.</dd>` : ''}
                 ${g.isDisputed(cell) ? `<dt>Estado</dt><dd class="warn-text">en disputa: la ocupa ${g.nm(o)} pero es de ${g.nm(g.legal[cell])}. Rinde la mitad y se anexiona al firmar la paz.</dd>` : ''}
                 ${res.map(r => { const reach = g.resourceReach(r); return `<dt>${r.typeName}</dt><dd>${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}, +${r.value} de oro. ${reach.length ? `Abastece también a ${reach.map(x => esc(PROVINCES[x].name)).join(', ')}.` : 'Solo abastece a esta provincia: pasa una carretera por su casilla y llévala hasta otras ciudades.'}</dd>`; }).join('')}
                 ${(() => { const s = g.provinceSupply(p.id); return s.length ? `<dt>Industria</dt><dd>+${Math.round(100 * Math.min(CONFIG.RESOURCE_INDUSTRY_MAX, CONFIG.RESOURCE_INDUSTRY * s.length))} % de renta y tropas más baratas: la abastecen ${s.map(r => `${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}`).join(', ')}</dd>` : ''; })()}
@@ -3279,7 +3418,7 @@ class GameUI {
         const g = this.game, el = $('#confirm'), plan = this.pending;
         if (!plan || g.player === null) {
             // Con el dedo, mientras se construye, un botón visible para terminar (no hay clic derecho ni Esc).
-            el.hidden = !(this.touch && this.tool !== 'command' && g.player !== null);
+            el.hidden = !(this.touch && this.tool !== 'command' && this.tool !== 'cities' && g.player !== null);
             if (!el.hidden) el.innerHTML = `<span class="small">${this.anchor < 0 ? 'Toca una casilla tuya para empezar' : 'Toca dónde termina la obra'}</span>
                 <button class="btn" data-action="stop-build">Terminar obras</button>`;
             return;
@@ -3298,6 +3437,7 @@ class GameUI {
         if (this.hintOverride) text = this.hintOverride;
         else if (g.player === null) text = 'Haz clic en un país para elegirlo. Rueda del ratón: zoom; arrastrar: mover el mapa.';
         else if (g.over) text = '';
+        else if (this.tool === 'cities') text = 'Ciudades: haz clic en tus provincias para añadirlas o quitarlas de la selección.';
         else if (this.tool === 'fort') text = this.anchor < 0 ? 'Fortificar: haz clic en una casilla tuya.' : 'Clic en otra casilla para fortificar la línea, o en la misma para solo esa. Clic derecho para terminar.';
         else if (this.tool !== 'command') text = this.anchor < 0 ? `${this.toolDef().label}: haz clic en una casilla tuya para empezar.` : 'Haz clic donde termina el tramo; se construye el camino más barato. Clic derecho para terminar.';
         else if (this.reachInfo) text = 'Verde: mover. Rojo: atacar. Clic derecho o Esc para cancelar.';
@@ -3371,6 +3511,7 @@ class GameUI {
             <dt>Imperio</dt><dd>+${e.empire}${e.empireRate > 0 ? ` (+${Math.round(e.empireRate * 100)} % por ${e.legalProvinces - START_PROVINCES[id]} provincias ganadas)` : ' (crece al anexionar provincias)'}</dd>
             <dt>Recursos</dt><dd>+${e.res}${counts ? ` (${counts})` : ''}${e.looseResources.length ? `<br><span class="small muted">${plural(e.looseResources.length, 'yacimiento', 'yacimientos')} sin carretera: solo abastecen a su provincia</span>` : ''}</dd>
             ${tr.in || tr.out ? `<dt>Tributo</dt><dd>${tr.in ? `+${tr.in}` : ''}${tr.out ? ` −${tr.out}` : ''}</dd>` : ''}
+            ${e.capitalLost ? `<dt>Capital</dt><dd class="warn-text">perdida: tus yacimientos y tu industria rinden la mitad hasta que la recuperes</dd>` : ''}
             <dt>Total</dt><dd><b>${g.income(id)} de oro por turno</b></dd>
             <dt>Precios en la capital</dt><dd>${UNIT_KEYS.map(k => `${CONFIG.TYPES[k].name.toLowerCase()} ${g.unitCost(id, k, G.prov[g.nations[id].capitalCell])}`).join(', ')}</dd>
         </dl>`;
@@ -3533,7 +3674,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.16-164358';
+const APP_VERSION = '2026.10.16-232615';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
