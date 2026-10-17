@@ -356,6 +356,7 @@ const CONFIG = {
         artillery: { hierro: 0.06, carbon: 0.05, minerales: 0.04 }
     },
     MAX_DISCOUNT: 0.5,
+    MAX_DEFENSE_BONUS: 3,           // tope del producto terreno × ciudad × capital × fortificación
     FLANKED_SIDES: 3,               // ejército con ejércitos enemigos en 3 o más de sus 6 lados: rodeado...
     FLANKED_FACTOR: 0.75,           // ... ataque y defensa ×0,75 y mueve la mitad
     SURROUNDED_SIDES: 5,            // con 5 o más lados: cercado...
@@ -1230,14 +1231,35 @@ class GameEngine {
         this.battle(army, def, target);
     }
 
+    // Factores de un combate, sin azar: sirven para resolverlo, preverlo y explicarlo.
+    combatFactors(attOwner, attUnits, fromCell, def, cell) {
+        const p = PROVINCES[G.prov[cell]], terrain = CONFIG.TERRAIN[p.terrain];
+        const parts = [];
+        if (terrain.def > 1) parts.push([terrain.name.toLowerCase(), terrain.def]);
+        if (CITY_OF[cell] >= 0) parts.push(['ciudad', CONFIG.CITY_DEFENSE]);
+        if (CAPITAL_OF[cell] >= 0) parts.push(['capital', CONFIG.CAPITAL_DEFENSE]);
+        if (this.fort[cell] === 1) parts.push(['fortificación', CONFIG.FORT_DEFENSE]);
+        const raw = parts.reduce((m, [, x]) => m * x, 1);
+        const bonus = Math.min(raw, CONFIG.MAX_DEFENSE_BONUS);
+        const attFlank = this.flankFactor(attOwner, fromCell), defFlank = this.flankFactor(def.owner, cell);
+        const baseAtk = unitPower(attUnits, 'atk'), baseDef = unitPower(def.units, 'def');
+        return { baseAtk, baseDef, parts, bonus, capped: raw > bonus, attFlank, defFlank,
+            atk: baseAtk * attFlank, dfn: Math.max(0.5, baseDef * bonus * defFlank) };
+    }
+    // Probabilidad de que gane el atacante (cada lado tira un ±20 % de azar).
+    winChance(atk, dfn) {
+        const N = 40;
+        let wins = 0;
+        for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) if (atk * (0.8 + 0.4 * (i + 0.5) / N) > dfn * (0.8 + 0.4 * (j + 0.5) / N)) wins++;
+        return wins / (N * N);
+    }
     battle(att, def, cell) {
         const roll = () => 0.8 + this.rng() * 0.4;
         const p = PROVINCES[G.prov[cell]];
-        const terrain = CONFIG.TERRAIN[p.terrain];
-        const fort = (CITY_OF[cell] >= 0 ? CONFIG.CITY_DEFENSE : 1) * (CAPITAL_OF[cell] >= 0 ? CONFIG.CAPITAL_DEFENSE : 1)
-            * (this.fort[cell] === 1 ? CONFIG.FORT_DEFENSE : 1);
-        const atk = unitPower(att.units, 'atk') * roll() * this.flankFactor(att.owner, att.cell);
-        const dfn = Math.max(0.5, unitPower(def.units, 'def') * roll() * terrain.def * fort * this.flankFactor(def.owner, cell));
+        const fx = this.combatFactors(att.owner, att.units, att.cell, def, cell);
+        const nA0 = countUnits(att.units), nD0 = countUnits(def.units);
+        const atk = fx.atk * roll();
+        const dfn = fx.dfn * roll();
         const attWins = atk > dfn;
         const [w, l] = attWins ? [atk, dfn] : [dfn, atk];
         const winnerLoss = 0.3 * l / w;
@@ -1245,15 +1267,16 @@ class GameEngine {
         const lostA = this.applyLosses(att.units, attWins ? winnerLoss : loserLoss, attWins);
         const lostD = this.applyLosses(def.units, attWins ? loserLoss : winnerLoss, !attWins);
         att.used = 999;
-        if (this.involvesPlayer(att.owner, def.owner)) {
-            this.log(`${this.nm(att.owner)} ataca ${p.name} (${this.nm(def.owner)}): ${Math.round(atk)} vs ${Math.round(dfn)}. ` +
-                `${attWins ? 'VICTORIA' : 'REPELIDO'}. Bajas: atacante ${unitText(lostA) || '0'}, defensor ${unitText(lostD) || '0'}.`);
-        }
+        let retreatNote = '';
         if (attWins) {
             this.removeArmy(def);
             if (countUnits(def.units) > 0) {
                 const retreat = this.retreatCell(def, cell);
-                if (retreat >= 0) { def.cell = retreat; def.used = 999; this.armies.set(def.id, def); this.settle(def); }
+                if (retreat >= 0) {
+                    const joins = !!this.armyOn(retreat);
+                    def.cell = retreat; def.used = 999; this.armies.set(def.id, def); this.settle(def);
+                    retreatNote = joins ? `; sus ${countUnits(def.units)} supervivientes se retiran y se unen a otro ejército suyo` : '; sus supervivientes se retiran a una casilla vecina';
+                } else retreatNote = '; sin sitio para retirarse, sus supervivientes se rinden';
             }
             if (this.armyAt[att.cell] === att.id) this.armyAt[att.cell] = 0;
             att.cell = cell;
@@ -1263,6 +1286,21 @@ class GameEngine {
             if (countUnits(att.units) === 0) this.removeArmy(att);
             else this.settle(att);
         }
+        if (this.involvesPlayer(att.owner, def.owner)) this.log(this.battleReport(att.owner, def.owner, p, fx, atk, dfn, attWins, nA0, nD0, nA0 - countUnits(lostA), nD0 - countUnits(lostD), retreatNote));
+    }
+    // Parte de combate para el registro, contado desde el lado del jugador.
+    battleReport(a, d, p, fx, atk, dfn, attWins, nA0, nD0, nA1, nD1, retreatNote) {
+        const num = x => String(Math.round(x * 100) / 100).replace('.', ',');
+        const factors = fx.parts.map(([n, x]) => ` ×${num(x)} ${n}`).join('') + (fx.capped ? ` (tope ×${CONFIG.MAX_DEFENSE_BONUS})` : '') + (fx.defFlank < 1 ? ` ×${num(fx.defFlank)} rodeado` : '');
+        const atkTxt = `${Math.round(fx.baseAtk)}${fx.attFlank < 1 ? ` ×${num(fx.attFlank)} rodeado` : ''}`;
+        const defTxt = `${Math.round(fx.baseDef)}${factors}${factors ? ` = ${Math.round(fx.dfn)}` : ''}`;
+        const luck = `con el azar, ${Math.round(atk)} contra ${Math.round(dfn)}`;
+        if (a === this.player) {
+            return `Atacas ${p.name} (${this.nm(d)}) con ${nA0} unidades contra ${nD0}. Tu ataque ${atkTxt} contra su defensa ${defTxt}; ${luck}. ` +
+                `${attWins ? 'VICTORIA' : 'DERROTA'}: te quedan ${nA1} y a ${this.nm(d)} ${nD1}${attWins ? retreatNote : ''}.`;
+        }
+        return `${this.nm(a)} ataca ${p.name} con ${nA0} unidades contra tus ${nD0}. Su ataque ${atkTxt} contra tu defensa ${defTxt}; ${luck}. ` +
+            `${attWins ? `PIERDES la posición: te quedan ${nD1}${retreatNote.replace('sus', 'tus').replace('suyo', 'tuyo')}` : `RESISTES: te quedan ${nD1}`} y a ${this.nm(a)} ${nA1}.`;
     }
 
     retreatCell(army, from) {
@@ -2071,9 +2109,8 @@ class GameEngine {
             let best = null, bestScore = 0;
             for (const [target, from] of r.attacks) {
                 const def = this.armyOn(target);
-                const fort = (CITY_OF[target] >= 0 ? CONFIG.CITY_DEFENSE : 1) * (CAPITAL_OF[target] >= 0 ? CONFIG.CAPITAL_DEFENSE : 1)
-                    * (this.fort[target] === 1 ? CONFIG.FORT_DEFENSE : 1);
-                const ratio = atk / Math.max(0.5, unitPower(def.units, 'def') * CONFIG.TERRAIN[PROVINCES[G.prov[target]].terrain].def * fort * this.flankFactor(def.owner, target));
+                const fx = this.combatFactors(id, army.units, from, def, target);
+                const ratio = fx.atk / fx.dfn;
                 // Rodeada, le basta una ventaja menor para atacar y prefiere romper el cerco antes que huir.
                 if (ratio < (trapped >= CONFIG.FLANKED_SIDES ? 1.1 : 1.3)) continue;
                 const score = 1000 + Math.min(ratio, 5) * 20 + (CITY_OF[target] >= 0 ? 300 : 0) + (trapped >= CONFIG.FLANKED_SIDES ? 200 : 0);
@@ -2804,7 +2841,18 @@ class GameUI {
         }
         if (g.spies.has(G.prov[cell])) lines.push('Tienes un espía en esta provincia');
         if (g.player !== null && o === g.player && !g.inSupply(g.player, cell)) lines.push('<span style="color:#ffb347">Sin suministro</span>');
-        if (this.reachInfo?.attacks.has(cell)) lines.push('<b style="color:#ff8a78">Clic para atacar</b>');
+        if (this.reachInfo?.attacks.has(cell) && a) {
+            const mine = this.selectedArmy();
+            const fx = g.combatFactors(g.player, this.send, mine.cell, a, cell);
+            const chance = g.winChance(fx.atk, fx.dfn), r = fx.atk / fx.dfn, n = countUnits(this.send);
+            const winLeft = Math.round(n * (1 - Math.min(1, 0.3 / r))), loseLeft = Math.round(n * (1 - Math.min(1, 0.35 + 0.35 * (1 / r - 1))));
+            const num = x => String(Math.round(x * 100) / 100).replace('.', ',');
+            const factors = fx.parts.map(([nm, x]) => `${nm} ×${num(x)}`).concat(fx.capped ? [`tope ×${CONFIG.MAX_DEFENSE_BONUS}`] : [], fx.defFlank < 1 ? [`rodeado ×${num(fx.defFlank)}`] : []).join(', ');
+            const color = chance >= 0.7 ? '#a8e38a' : chance >= 0.35 ? '#ffd166' : '#ff8a78';
+            lines.push(`<b style="color:${color}">Clic para atacar: ${Math.round(chance * 100)} % de victoria</b>`);
+            lines.push(`Tu ataque ${Math.round(fx.atk)}${fx.attFlank < 1 ? ' (rodeado)' : ''} contra su defensa ${Math.round(fx.dfn)}${factors ? ` (${factors})` : ''}`);
+            lines.push(`Si ganas te quedan unas ${winLeft} de ${n}; si pierdes, unas ${loseLeft}`);
+        } else if (this.reachInfo?.attacks.has(cell)) lines.push('<b style="color:#ff8a78">Clic para atacar</b>');
         else if (this.reachInfo?.moves.has(cell)) lines.push('<b style="color:#a8e38a">Clic para mover aquí</b>');
         const prev = this.view.preview;
         if (prev && cell === this.view.hoverCell) {
@@ -3754,7 +3802,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.16-233348';
+const APP_VERSION = '2026.10.17-093522';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
