@@ -986,7 +986,7 @@ class GameEngine {
             armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used]),
             nextArmyId: this.nextArmyId,
             ops: [...this.ops.values()].map(o => ({ id: o.id, owner: o.owner, kind: o.kind, name: o.name, cells: o.cells, ratio: o.ratio, auto: o.auto,
-                paused: o.paused, fortify: o.fortify, since: o.since, waiting: o.waiting, front: o.front ?? -1, gold: o.gold, template: o.template, pool: o.pool, formed: o.formed,
+                paused: o.paused, fortify: o.fortify, since: o.since, waiting: o.waiting, front: o.front ?? -1, gold: o.gold, extra: o.extra ?? 0, poolTurn: o.poolTurn ?? 0, template: o.template, pool: o.pool, formed: o.formed,
                 form: o.form ? { name: o.form.name, units: o.form.units, zone: o.form.zone, recruited: o.form.recruited, pending: o.form.pending } : null })),
             armyForms: [...this.armies.values()].filter(a => a.form).map(a => [a.id, a.form]),
             nextOpId: this.nextOpId,
@@ -1079,14 +1079,15 @@ class GameEngine {
             overlord: natOrNone(n?.overlord ?? -1),
             command: (() => {
                 const c = n?.command ?? {}, out = newCommand();
-                if (Object.prototype.hasOwnProperty.call(POSTURES, c.posture)) out.posture = c.posture;
+                if (Object.hasOwn(POSTURES, c.posture)) out.posture = c.posture;
                 out.spend = !!c.spend;
                 out.share = int(c.share, 0, 100, 60);
                 for (const k of Object.keys(BUDGET_KEYS)) out.budget[k] = int(c.budget?.[k], 0, 100, out.budget[k]);
                 for (const k of Object.keys(out.pools)) out.pools[k] = int(c.pools?.[k], 0, 1e8, 0);
+                out.spentTurn = int(c.spentTurn, 0, 1e6, 0);
                 out.goals = [...new Set(list(c.goals).slice(0, 400).map(provIdx))];
                 out.goalsMet = [...new Set(list(c.goalsMet).map(nat))];
-                for (const [k, v] of Object.entries(c.priority ?? {})) if (PRIORITY[v] && Number.isInteger(+k) && +k >= 0 && +k < NN) out.priority[+k] = v;
+                for (const [k, v] of Object.entries(c.priority ?? {})) if (Object.hasOwn(PRIORITY, v) && Number.isInteger(+k) && +k >= 0 && +k < NN) out.priority[+k] = v;
                 out.rear = !!c.rear;
                 return out;
             })(),
@@ -1119,7 +1120,7 @@ class GameEngine {
         g.blocsChanged();
         g.version++; g.roadVersion++; g.fortVersion++;
         // Operaciones: tipos, casillas, nombres y ajustes conocidos; los ejércitos, solo si son del mismo dueño.
-        for (const o of list(data.ops).slice(0, 200)) {
+        for (const o of list(data.ops).slice(0, 5000)) {
             const kind = ['ofensiva', 'defensa', 'reserva'].find(k => k === o?.kind), id = int(o?.id, 1, 1e6, 0);
             if (!kind || !id || g.ops.has(id)) continue;
             const cells = list(o.cells).slice(0, 400).map(c => int(c, -1, G.N - 1, -1)).filter(c => c >= 0 && isLand(c));
@@ -1128,7 +1129,7 @@ class GameEngine {
             g.ops.set(id, { id, owner: nat(o.owner), kind, name: str(o.name, 60) || 'Operación', cells: kind === 'ofensiva' ? cells : [...new Set(cells)],
                 ratio: [0, 1, 1.3, 1.8].includes(Number(o.ratio)) ? Number(o.ratio) : 1.3, auto: ['manual', 'asistida', 'auto'].find(k => k === o.auto) ?? 'manual',
                 paused: !!o.paused, fortify: !!o.fortify, since: int(o.since, 0, 1e6, g.turn), waiting: int(o.waiting, 0, 1e4, 0), uncovered: 0,
-                front: natOrNone(o.front ?? -1), gold: OP_GOLD.includes(Number(o.gold)) ? Number(o.gold) : 0, template: str(o.template, 12) || 'auto', pool: int(o.pool, 0, 1e7, 0), formed: int(o.formed, 0, 1e4, 0), form: null });
+                front: natOrNone(o.front ?? -1), extra: int(o.extra, 0, 1e7, 0), poolTurn: int(o.poolTurn, 0, 1e6, 0), gold: OP_GOLD.includes(Number(o.gold)) ? Number(o.gold) : 0, template: str(o.template, 12) || 'auto', pool: int(o.pool, 0, 1e7, 0), formed: int(o.formed, 0, 1e4, 0), form: null });
             const f = o.form, op = g.ops.get(id), units = u => ({ infantry: int(u?.infantry, 0, 99, 0), tank: int(u?.tank, 0, 99, 0), artillery: int(u?.artillery, 0, 99, 0) });
             const zone = int(f?.zone, -1, G.N - 1, -1);
             if (f && zone >= 0 && isLand(zone)) op.form = { name: str(f.name, 40), units: units(f.units), zone, recruited: units(f.recruited),
@@ -1833,7 +1834,7 @@ class GameEngine {
         return t;
     }
     createOp(owner, kind, cells, opts = {}) {
-        if (!['ofensiva', 'defensa', 'reserva'].includes(kind) || this.opsOf(owner).length >= this.commandCap(owner)) return null;
+        if (!['ofensiva', 'defensa', 'reserva'].includes(kind) || (!opts.noCap && this.opsOf(owner).length >= this.commandCap(owner))) return null;
         cells = cells.filter(c => Number.isInteger(c) && c >= 0 && c < G.N && isLand(c));
         const mine = c => this.owner[c] === owner;
         if (kind === 'ofensiva' && (cells.length < 2 || !(mine(cells[0]) || this.allied(owner, this.owner[cells[0]])))) return null;
@@ -1881,11 +1882,18 @@ class GameEngine {
         if (op.kind === 'defensa') return op.cells.filter(c => { const id = this.armyAt[c]; return !id || this.armies.get(id).owner !== op.owner; }).length;
         return this.opMembers(op).length ? op.waiting : 1;
     }
+    // Un ejército que pasa a otro país llega sin orden ni operación.
+    changeOwner(a, owner) {
+        a.owner = owner;
+        a.order = null; a.op = 0; a.form = 0;
+        this.orderVersion++;
+    }
     // Al salir de una ciudad suya, un ejército deja una infantería de guarnición fuera de la operación (como la IA).
     // Devuelve lo que sale; si al final no se mueve, reattach() lo vuelve a juntar con la guarnición.
     detach(a) {
-        if (CITY_OF[a.cell] < 0 || this.owner[a.cell] !== a.owner || a.units.infantry < 1 || countUnits(a.units) < 2) return a;
-        const send = copyUnits(a.units); send.infantry--;
+        if (CITY_OF[a.cell] < 0 || this.owner[a.cell] !== a.owner || countUnits(a.units) < 2) return a;
+        const send = copyUnits(a.units);
+        send[UNIT_KEYS.find(k => a.units[k] > 0)]--;   // una infantería o, si no hay, la primera unidad que tenga
         const b = this.split(a, send);
         a.op = 0;
         return b;
@@ -2009,7 +2017,7 @@ class GameEngine {
     // se juntan (army.form = id de la operación); cuando está completa, el ejército entra en la operación.
     templateOf(id, key) {
         if (/^c\d+$/.test(key)) { const t = this.nations[id].templates[+key.slice(1)]; return t ? { key, name: t.name, units: t.units, why: 'Plantilla propia.' } : null; }
-        const t = TEMPLATES[key];
+        const t = Object.hasOwn(TEMPLATES, key) ? TEMPLATES[key] : null;
         return t ? { key, ...t } : null;
     }
     // Composición sugerida para una operación según su tipo, su objetivo y el terreno de su eje.
@@ -2087,7 +2095,7 @@ class GameEngine {
         for (let guard = 0; guard < 200; guard++) {
             const missing = UNIT_KEYS.filter(k => f.recruited[k] < f.units[k]).sort((x, y) => f.recruited[x] / f.units[x] - f.recruited[y] / f.units[y]);
             if (!missing.length) break;
-            const type = missing[0], p = cities.find(c => this.canRecruitAt(id, c) && path.to(c.city) < Infinity);
+            const type = missing[0], p = cities.find(c => c.city !== f.zone && this.canRecruitAt(id, c) && path.to(c.city) < Infinity);
             if (!p) break;
             const cost = this.unitCost(id, type, p.id);
             if (op.pool < cost || n.gold < cost || !this.recruit(id, p, type)) break;
@@ -2102,11 +2110,13 @@ class GameEngine {
         const at = this.armyOn(f.zone), done = UNIT_KEYS.every(k => f.recruited[k] >= f.units[k]) && !f.pending.length;
         const marching = [...this.armies.values()].some(a => a.form === op.id && a !== at && a.owner === id);
         if (done && !marching) {
-            if (at && at.owner === id && at.form === op.id) { at.form = 0; at.order = null; at.op = op.id; }
+            const whole = at && at.owner === id && at.form === op.id;
+            if (whole) { at.form = 0; at.order = null; at.op = op.id; }
             op.form = null;
             op.formed = (op.formed ?? 0) + 1;
             this.orderVersion++;
-            if (id === this.player) this.log(`${op.name}: formada una ${f.name.toLowerCase()} en ${this.placeName(f.zone)}; entra en la operación.`);
+            if (id === this.player) this.log(whole ? `${op.name}: formada una ${f.name.toLowerCase()} en ${this.placeName(f.zone)}; entra en la operación.`
+                : `${op.name}: reclutada una ${f.name.toLowerCase()}; sus tropas se han unido a los ejércitos que había en ${this.placeName(f.zone)}.`);
         } else if (at && at.owner === id && at.form === op.id && !at.order) this.setOrder(at, { kind: 'hold' });
     }
     // Lo que lleva hecho una formación: reclutadas, en camino y ya en la zona.
@@ -2152,10 +2162,10 @@ class GameEngine {
         op._frontKey = key; op._front = front;
         return front;
     }
-    priorityOf(op) { const f = this.opFront(op); return PRIORITY[this.nations[op.owner].command.priority[f] ?? 'media'] ?? 2; }
+    priorityOf(op) { const v = this.nations[op.owner].command.priority[this.opFront(op)]; return Object.hasOwn(PRIORITY, v) ? PRIORITY[v] : 2; }
     setPosture(id, key) {
         const c = this.nations[id].command;
-        if (!POSTURES[key]) return;
+        if (!Object.hasOwn(POSTURES, key)) return;
         c.posture = key;
         c.budget = { ...POSTURES[key].budget };
     }
@@ -2203,7 +2213,8 @@ class GameEngine {
                 if (this.threat(id, a.cell) === 0) { a.op = res.id; this.orderVersion++; }
             }
         }
-        if (!c.spend) return;
+        if (!c.spend || c.spentTurn === this.turn) return;   // las órdenes se pueden cumplir varias veces por turno; el reparto, una
+        c.spentTurn = this.turn;
         // Presupuesto: una parte de la renta (share) se reparte según el presupuesto; el resto queda para ti.
         const income = Math.max(0, this.income(id)) * c.share / 100, total = Object.values(c.budget).reduce((x, y) => x + y, 0) || 1;
         const part = k => Math.floor(income * c.budget[k] / total);
@@ -2584,6 +2595,7 @@ class GameEngine {
         n.overlord = -1;
         this.blocsChanged();
         for (const a of [...this.armies.values()]) if (a.owner === id) this.removeArmy(a);
+        for (const op of this.opsOf(id)) this.endOp(op);
         for (const o of this.nations) if (o.id !== id) Object.assign(this.rel(id, o.id), { state: 'paz' });
         for (const b of this.blocsOf(id)) this.leaveBloc(b, id);
         this.proposals = this.proposals.filter(p => p.from !== id && p.against !== id);
@@ -3145,7 +3157,7 @@ class GameEngine {
         else if (key === 'spend' || key === 'rear') c[key] = !c[key];
         else if (key === 'share') c.share = Math.max(0, Math.min(100, Math.round(+value) || 0));
         else if (key in BUDGET_KEYS) c.budget[key] = Math.max(0, Math.min(100, Math.round(+value) || 0));
-        else if (key === 'priority') { const [nation, level] = String(value).split(':'); if (PRIORITY[level]) c.priority[+nation] = level; }
+        else if (key === 'priority') { const [nation, level] = String(value).split(':'); if (Object.hasOwn(PRIORITY, level)) c.priority[+nation] = level; }
         this.orderVersion++;
     }
     playerSaveTemplate(name, units) {
@@ -3175,7 +3187,7 @@ class GameEngine {
     }
     playerRedrawOp(op, cells) {
         if (!op || op.owner !== this.player) return null;
-        const probe = this.createOp(this.player, op.kind, cells, { name: op.name });   // valida el trazado como si fuera nueva
+        const probe = this.createOp(this.player, op.kind, cells, { name: op.name, noCap: true });   // valida el trazado como si fuera nueva
         if (!probe) return null;
         this.ops.delete(probe.id);
         this.nextOpId--;
@@ -3287,7 +3299,7 @@ class GameEngine {
             this.owner[c] = me;
             this.legal[c] = me;
             const a = this.armyOn(c);
-            if (a && a.owner === sat) a.owner = me;
+            if (a && a.owner === sat) this.changeOwner(a, me);
         }
         this.armyVersion++;
         this.version++;
@@ -3302,7 +3314,8 @@ class GameEngine {
             if (this.owner[i] === sat) this.owner[i] = me;
             if (this.legal[i] === sat) this.legal[i] = this.owner[i] === me ? me : this.owner[i];
         }
-        for (const a of this.armies.values()) if (a.owner === sat) a.owner = me;
+        for (const a of this.armies.values()) if (a.owner === sat) this.changeOwner(a, me);
+        for (const op of this.opsOf(sat)) this.endOp(op);
         for (const a of [...this.armies.values()]) if (a.owner === me) this.settle(a);
         this.nations[me].gold += s.gold;
         s.alive = false;
@@ -5402,7 +5415,7 @@ class GameUI {
     // «Ejecutar órdenes» (O): los ejércitos con órdenes de varios turnos las cumplen ya, con lo que les quede de movimiento.
     runOrders() {
         const g = this.game;
-        if (this.replaying || g.player === null || g.over) return;
+        if (this.replaying || this.proposal || g.player === null || g.over) return;
         if (!g.pendingOrders(g.player)) { this.flash('Ningún ejército con órdenes puede moverse ahora.'); return; }
         const sel = g.armyOn(this.selected)?.id;
         g.executeOrders(g.player, { assisted: true });

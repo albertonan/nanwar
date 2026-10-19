@@ -485,17 +485,17 @@ const CHECKS = [
         T.eq([c.pools.forts, c.pools.research], [0, 0], 'apagada no hace nada');
         Object.assign(c, { spend: true, share: 100, budget: { recruit: 0, research: 0, forts: 100, roads: 0 } });
         const before = g.fortWork.size;
-        for (let i = 0; i < 4; i++) g.directive(es);
+        for (let i = 0; i < 4; i++) { g.turn++; g.directive(es); }
         T.ok(g.fortWork.size > before, 'fortifica una ciudad amenazada');
         c.budget = { recruit: 0, research: 100, forts: 0, roads: 0 };
-        for (let i = 0; i < 12 && !g.nations[es].tech.current.length; i++) g.directive(es);
+        for (let i = 0; i < 12 && !g.nations[es].tech.current.length; i++) { g.turn++; g.directive(es); }
         T.ok(g.nations[es].tech.current.length === 1, 'empieza a investigar');
         c.budget = { recruit: 100, research: 0, forts: 0, roads: 0 };
         const [, from] = T.plainPair(g, es);
         const op = g.createOp(es, 'reserva', [from]);
-        g.directive(es);
+        g.turn++; g.directive(es);
         T.ok(op.extra > 0, `da oro a los refuerzos (${op.extra})`);
-        T.turns(g, es, 1);
+        T.turns(g, es, 3);   // la renta de un turno no basta para empezar una brigada: se va guardando
         T.ok(op.form && countUnits(op.form.recruited) > 0, 'y la operación recluta con él');
         return true;
     }],
@@ -646,6 +646,103 @@ const CHECKS = [
         const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
         T.eq([h.ops.size, [...h.armies.values()].filter(a => a.op).length], [g.ops.size, [...g.armies.values()].filter(a => a.op && g.ops.has(a.op)).length], 'se cargan igual');
         h.endTurn();
+        return true;
+    }],
+    ['Revisión · el presupuesto de la directiva se reparte una sola vez por turno', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        const c = g.nations[es].command;
+        Object.assign(c, { spend: true, share: 100, budget: { recruit: 0, research: 100, forts: 0, roads: 0 } });
+        g.nations[es].tech.current = ['infanteria1'];   // laboratorio ocupado: lo guardado no se gasta
+        g.nations[es].tech.progress.set('infanteria1', 0);
+        g.directive(es);
+        const once = c.pools.research;
+        g.directive(es); g.executeOrders(es);
+        T.ok(once > 0 && c.pools.research === once, `una vez (${once} → ${c.pools.research})`);
+        g.turn++;
+        g.directive(es);
+        T.ok(c.pools.research > once, 'y otra al turno siguiente');
+        return true;
+    }],
+    ['Revisión · se puede redibujar una operación con el estado mayor lleno', () => {
+        const g = T.uiStart('es'), es = g.player;
+        const [, from] = T.plainPair(g, es);
+        const ops = [];
+        for (let i = 0; i < g.commandCap(es); i++) ops.push(g.createOp(es, 'reserva', [from]));
+        const other = T.farCell(g, es, from, 4);
+        T.ok(g.playerRedrawOp(ops[0], [other]) === ops[0] && ops[0].cells[0] === other, 'redibujada');
+        T.eq(g.opsOf(es).length, g.commandCap(es), 'sin operaciones de más');
+        return true;
+    }],
+    ['Revisión · claves raras en una partida guardada no rompen nada', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.nations[es].gold = 5000;
+        const [, from] = T.plainPair(g, es);
+        g.createOp(es, 'reserva', [from], { gold: 100 });
+        const data = JSON.parse(JSON.stringify(g.serialize()));
+        data.ops[0].template = 'constructor';
+        data.nations[es].command.priority = { [fr]: 'toString' };
+        data.nations[es].command.posture = '__proto__';
+        const h = GameEngine.load(data), op = [...h.ops.values()][0];
+        T.eq([h.opTemplate(op).auto, h.nations[es].command.priority, h.nations[es].command.posture, h.priorityOf(op)], [true, {}, 'desgaste', 2], 'saneado');
+        h.reinforce(op);
+        return true;
+    }],
+    ['Revisión · al anexionar un satélite o eliminar un país, sus operaciones terminan', () => {
+        const g = T.game(), es = T.nation('es'), pt = T.nation('pt'), fr = T.nation('fr');
+        g.start(es);
+        g.makeSatellite(pt, es);
+        const [start, out] = T.border(g, pt, es);
+        const op = g.createOp(pt, 'ofensiva', [start, out]);
+        const a = T.army(g, pt, start, 3);
+        g.assignArmy(a, op.id);
+        const b = g.armyOn(g.nations[pt].capitalCell);
+        g.setOrder(b, { kind: 'march', dest: start });
+        g.playerAnnexSatellite(pt);
+        T.eq([g.ops.has(op.id), a.owner, a.op, b.owner, b.order], [false, es, 0, es, null], 'anexión');
+        g.declareWar(es, fr);
+        const fop = g.createOp(fr, 'reserva', [PROVINCES.find(p => g.owner[p.city] === fr).city]);
+        for (const c of G.land) if (g.owner[c] === fr) g.owner[c] = es;
+        g.checkElimination(fr, es);
+        T.eq([g.nations[fr].alive, g.ops.has(fop.id)], [false, false], 'eliminación');
+        return true;
+    }],
+    ['Revisión · una formación cuya zona es una ciudad se completa', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        g.nations[es].gold = 20000;
+        const city = PROVINCES.find(p => g.owner[p.city] === es && CAPITAL_OF[p.city] < 0).city;
+        const op = g.createOp(es, 'reserva', [city], { gold: 400, template: 'guarnicion' });
+        op.form = { name: 'Guarnición', units: { infantry: 3, tank: 0, artillery: 0 }, zone: city, recruited: { infantry: 0, tank: 0, artillery: 0 }, pending: [] };
+        for (let i = 0; i < 15 && !op.formed; i++) T.turns(g, es, 1);
+        T.eq(op.formed, 1, 'completada');
+        return true;
+    }],
+    ['Revisión · la tecla O no hace nada mientras se confirma la propuesta', async () => {
+        const g = T.uiStart('es'), es = g.player;
+        ui.prefs.watch = 'directo';
+        const [, from] = T.plainPair(g, es);
+        const op = g.createOp(es, 'reserva', [T.farCell(g, es, from, 8)], { auto: 'asistida' });
+        const a = T.army(g, es, from, 3);
+        g.assignArmy(a, op.id);
+        await ui.endTurnFlow();
+        T.ok(ui.proposal, 'propuesta');
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'o' }));
+        T.eq(a.cell, from, 'O no la cumple a escondidas');
+        document.querySelector('[data-action="assist-back"]').click();
+        return true;
+    }],
+    ['Revisión · sin infantería, deja de guarnición la primera unidad que tenga', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        const city = PROVINCES.find(p => g.owner[p.city] === es && CAPITAL_OF[p.city] < 0).city;
+        g.armyOn(city).units = { infantry: 0, tank: 3, artillery: 0 };
+        const zone = g.createOp(es, 'reserva', [T.farCell(g, es, city, 6)]);
+        g.assignArmy(g.armyOn(city), zone.id);
+        g.executeOp(zone);
+        T.eq(g.armyOn(city)?.units, { infantry: 0, tank: 1, artillery: 0 }, 'un tanque se queda');
         return true;
     }]
 ];
