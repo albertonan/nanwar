@@ -489,6 +489,60 @@ const CHECKS = [
         T.eq(styles(), { 2: 1, 1: 1 }, 'con Reconocimiento aéreo se ve su nivel');
         T.ok(ui.view.bunkers.includes(mine) && !ui.view.bunkers.includes(theirs), 'búnker solo en la de nivel 2');
         return true;
+    }],
+
+    ['Revisión · los avisos de siempre siguen yendo al registro', () => {
+        const g = T.uiStart('es'), p = g.player;
+        for (const a of g.armies.values()) if (a.owner === p) a.used = 999;
+        const before = g.logs.length;
+        ui.nextArmy();
+        T.ok(g.logs.length > before, 'el aviso queda en el registro');
+        return true;
+    }],
+    ['Revisión · la reserva de la IA no crece mientras ya investiga', () => {
+        const g = T.game(), es = T.nation('es'), de = T.nation('de');
+        g.start(es);
+        T.learn(g, de, 'infanteria1', 'blindados1');   // con investigaciones hechas, la siguiente cuesta más que la reserva normal
+        g.nations[de].gold = 1e6;
+        g.aiResearch(de);
+        T.ok(g.nations[de].tech.current.length === 1, 'investiga');
+        g.turn++;   // al turno siguiente vuelve a elegir: ya no hay nada en pausa ni laboratorio libre
+        T.eq(g.aiReserve(de), g.income(de) * 4, 'reserva normal con el laboratorio ocupado');
+        return true;
+    }],
+    ['Revisión · Universidades no deja turnos negativos', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        T.learn(g, es, 'infanteria1', 'infanteria2');
+        g.nations[es].tech.progress.set('infanteria3', 14);
+        T.learn(g, es, 'ciencia1');
+        T.eq(g.techTurns(es, 'infanteria3'), 11, 'turnos con Universidades');
+        T.ok(g.techTurns(es, 'infanteria3') - g.techProgress(es, 'infanteria3') >= 1, `faltan ${g.techTurns(es, 'infanteria3') - g.techProgress(es, 'infanteria3')}`);
+        g.startResearch(es, 'infanteria3');
+        g.beginNationTurn(es);
+        T.eq(g.techState(es, 'infanteria3'), 'done', 'termina al turno siguiente');
+        return true;
+    }],
+    ['Revisión · la leyenda se rehace al cargar otra partida', () => {
+        const g = T.uiStart('es');
+        T.learn(g, g.player, 'movilidad1'); ui.render();
+        T.ok(/montaña 2/.test($('#legend').textContent), 'con Tropas de montaña');
+        const fresh = T.game(7); fresh.start(T.nation('es'));
+        const h = GameEngine.load(JSON.parse(JSON.stringify(fresh.serialize())));   // partida guardada sin investigar
+        T.eq(h.techVersion, g.techVersion, 'misma techVersion');
+        ui.setGame(h); ui.render();
+        T.ok(/montaña 3/.test($('#legend').textContent), 'partida nueva, sin investigar');
+        return true;
+    }],
+    ['Revisión · la fortificación defiende según las reglas del dueño de la casilla', () => {
+        const g = T.game(), es = T.nation('es'), pt = T.nation('pt'), fr = T.nation('fr');
+        g.start(es); g.declareWar(fr, es); g.declareWar(fr, pt);
+        const [from, cell] = T.plainPair(g, es);
+        g.fort[cell] = 1;
+        T.learn(g, es, 'fortificacion1');
+        const fx = g.combatFactors(fr, { infantry: 1, tank: 0, artillery: 0 }, from, { owner: pt, units: { infantry: 1, tank: 0, artillery: 0 } }, cell);
+        T.eq(fx.parts.find(([n]) => n === 'fortificación')[1], 2, 'un aliado en tu muro de hormigón');
+        return true;
     }]
 ];
 

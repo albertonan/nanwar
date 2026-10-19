@@ -1531,9 +1531,10 @@ class GameEngine {
         if (d >= 0 && RIVER[fromCell * 6 + d] && !ra.ignoreRiver) parts.push(['río', CONFIG.RIVER_DEFENSE]);
         if (CITY_OF[cell] >= 0) parts.push(['ciudad', CONFIG.CITY_DEFENSE]);
         if (CAPITAL_OF[cell] >= 0) parts.push(['capital', CONFIG.CAPITAL_DEFENSE]);
-        if (this.fort[cell] === 1) parts.push(['fortificación', rd.fortDefense]);
+        const rf = this.fort[cell] === 1 ? this.rules(this.owner[cell]) : null;   // la fortificación, según quien la construyó
+        if (rf) parts.push(['fortificación', rf.fortDefense]);
         const raw = parts.reduce((m, [, x]) => m * x, 1);
-        const cap = this.fort[cell] === 1 ? rd.fortCap : CONFIG.MAX_DEFENSE_BONUS;
+        const cap = rf ? rf.fortCap : CONFIG.MAX_DEFENSE_BONUS;
         const bonus = Math.min(raw, cap);
         const attFlank = this.flankFactor(attOwner, fromCell), defFlank = this.flankFactor(def.owner, cell);
         const baseAtk = unitPower(attUnits, 'atk', ra), baseDef = unitPower(def.units, 'def', rd);
@@ -1882,7 +1883,7 @@ class GameEngine {
     }
     techLevel(id, branch) { const d = this.nations[id].tech.done; return d.has(`${branch}3`) ? 3 : d.has(`${branch}2`) ? 2 : d.has(`${branch}1`) ? 1 : 0; }
     techTurns(id, techId) { return Math.max(1, Math.round(CONFIG.RESEARCH.TURNS[TECH_BY_ID.get(techId).tier - 1] * this.rules(id).researchTurns)); }
-    techProgress(id, techId) { return this.nations[id].tech.progress.get(techId) ?? 0; }
+    techProgress(id, techId) { return Math.min(this.nations[id].tech.progress.get(techId) ?? 0, this.techTurns(id, techId) - 1); }
     // Oro de una investigación: turnos de renta según el nivel, un 10 % más por cada una ya terminada.
     researchCost(id, techId) {
         const R = CONFIG.RESEARCH, i = TECH_BY_ID.get(techId).tier - 1;
@@ -2485,7 +2486,9 @@ class GameEngine {
     // En paz guarda cuatro turnos de renta, o lo que cueste la próxima investigación si tiene el laboratorio libre.
     aiReserve(id) {
         if (this.enemiesOf(id).length) return 0;
-        const base = this.income(id) * 4, next = this.aiTechChoice(id);
+        const base = this.income(id) * 4;
+        if (this.nations[id].tech.current.length >= this.rules(id).labs) return base;
+        const next = this.aiTechChoice(id);
         return next && this.techState(id, next) === 'open' ? Math.max(base, this.researchCost(id, next)) : base;
     }
 
@@ -3361,6 +3364,7 @@ class GameUI {
     setGame(g) {
         game = g;
         this.game = g;
+        this.legendKey = null;
         Object.assign(this.view, { game: g, builtVersion: -1, builtRoads: -1, builtForts: -1, preview: null, hoverNation: -1 });
         this.tool = 'command';
         this.anchor = -1;
@@ -3876,7 +3880,7 @@ class GameUI {
             $('#replay').hidden = true;
         }
         g.finishAiPhase();
-        for (const t of g.nations[g.player].tech.done) if (!knew.has(t)) this.flash(`${uiIcon('check')} Investigación terminada: <b>${TECH_BY_ID.get(t).name}</b>.`, 'open-research', 'Ver investigación');
+        for (const t of g.nations[g.player].tech.done) if (!knew.has(t)) this.notify(`${uiIcon('check')} Investigación terminada: <b>${TECH_BY_ID.get(t).name}</b>.`, 'open-research', 'Ver investigación');
         writeSave('auto', g);
         this.select(this.selected);
         if (g.alerts.length || g.proposals.some(p => p.kind === 'llamada')) this.openAlerts();
@@ -4228,7 +4232,7 @@ class GameUI {
     }
 
     // Aviso pasajero (unos segundos) con un botón opcional.
-    flash(html, action, label) {
+    notify(html, action, label) {
         const note = { html, action, label, id: (this.flashId = (this.flashId ?? 0) + 1) };
         (this.flashes ??= []).push(note);
         setTimeout(() => { this.flashes = this.flashes.filter(x => x !== note); this.renderToasts(); }, 6000);
