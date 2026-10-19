@@ -1,6 +1,11 @@
 # NanWar
 
-Estrategia por turnos sobre un mapa hexagonal de Europa: 42 países y 343 provincias reales, divididas en más de 11 500 hexágonos. Ejércitos con las fuerzas de 2024, carreteras y autopistas que construyes tú, fortificaciones, logística, recursos y alianzas públicas o secretas.
+Estrategia por turnos sobre un mapa hexagonal de Europa o del mundo entero. Ejércitos con las fuerzas de 2024, carreteras y autopistas que construyes tú, fortificaciones, logística, recursos y alianzas públicas o secretas.
+
+Al empezar una partida nueva se elige el mapa (se recuerda en cada dispositivo; también vale `?mapa=europa` o `?mapa=mundo` en la dirección):
+
+- **Europa:** 42 países y 343 provincias reales en más de 11 500 hexágonos de unos 20 km.
+- **Mundo:** 181 países y unas mil provincias (estados, provincias y regiones reales) en unos 21 000 hexágonos de unos 85 km, sobre una proyección equivalente (Equal Earth): cada casilla abarca la misma superficie real en todo el planeta. Quedan fuera la Antártida y los microestados de menos de 150 000 habitantes sin superficie para una casilla. Las rentas salen de la población y del PIB por habitante de cada país.
 
 **Jugar:** https://albertonan.github.io/nanwar/
 
@@ -19,7 +24,7 @@ El mapa tiene dos vistas, que se cambian en cualquier momento con el botón «Re
 
 El terreno de cada casilla sale de datos reales y cuenta en las reglas (coste de mover y defensa): llanura 1, urbano 1 (×1,4), bosque 2 (×1,25), colinas 2 (×1,3), montaña 3 (×1,6), pantano 3 (×1,2) y lago 4. Cruzar un río sin carretera cuesta medio punto más, y quien defiende al otro lado tiene ×1,25.
 
-Las partidas se guardan en el propio dispositivo (autoguardado al final de cada turno y tres ranuras). Para pasar una partida a otro dispositivo, usa «Partida → Exportar a archivo» e «Importar archivo».
+Las partidas se guardan en el propio dispositivo (autoguardado al final de cada turno y tres ranuras por mapa). Para pasar una partida a otro dispositivo, usa «Partida → Exportar a archivo» e «Importar archivo». Cargar o importar una partida del otro mapa cambia a ese mapa.
 
 ## Investigación
 
@@ -41,23 +46,29 @@ Con niebla de guerra, de un ejército enemigo a la vista solo se sabe de quién 
 | Archivo | Qué es |
 | --- | --- |
 | `index.html` | El juego entero: motor, mapa e interfaz. |
-| `europa-data.js` | El mapa generado: rejilla de hexágonos, provincias, países, recursos, fuerzas iniciales, terreno de cada casilla y ríos. |
-| `relieve.png` | Elevación, bosque y usos del suelo a ~5 km por píxel, para pintar la vista realista. |
+| `europa-data.js` | El mapa de Europa generado: rejilla de hexágonos, provincias, países, recursos, fuerzas iniciales, terreno de cada casilla y ríos. |
+| `relieve.png` | Elevación, bosque y usos del suelo de Europa a ~5 km por píxel, para pintar la vista realista. |
+| `mundo-data.js`, `relieve-mundo.png` | Lo mismo para el mapa del mundo (~20 km por píxel). |
 | `vista-realista.js` | La vista realista y las animaciones de los ejércitos (en las dos vistas). |
 | `manifest.webmanifest`, `sw.js`, `icons/` | Lo que la convierte en aplicación instalable y sin conexión. |
 | `fonts/` | Barlow Semi Condensed, incluida para que se vea igual sin conexión. |
 | `tools/build-map.mjs` | Genera `europa-data.js` a partir de los datos del simulador GeoSim (no incluidos aquí). Al final llama a `tools/terrain.mjs`. |
+| `tools/build-world.mjs` | Genera `mundo-data.js` y `relieve-mundo.png` a partir de Natural Earth (países y provincias), GeoNames (ciudades) y una tabla de fuerzas; el terreno, con `tools/terrain.mjs`. La primera vez descarga unos 2 700 bloques de usos del suelo (varios minutos). |
+| `tools/projection-world.mjs` | La proyección Equal Earth del mapa del mundo. |
 | `tools/build-terrain.mjs` | Añade al `europa-data.js` existente el terreno real por casilla y los ríos, y genera `relieve.png`. Descarga los datos la primera vez a `tools/cache/` (unos 50 s). |
 | `tools/smoke-research.mjs` | Pruebas del motor y de la interfaz en el navegador (Playwright): investigación, sus efectos en las reglas, la IA, la inteligencia y las insignias. |
 | `tools/smoke-vista.mjs` | Prueba en el navegador (Playwright): empieza una partida, comprueba la vista realista y las animaciones y guarda capturas. |
+| `tools/smoke-mundo.mjs` | Prueba en el navegador (Playwright) del selector de mapas y del mapa del mundo: relieve, turnos de la IA, fotogramas y cargar una partida del otro mapa. |
 | `tools/release.mjs` | Marca una versión nueva (`index.html`, `sw.js`, `version.json`) antes de publicar. |
 | `tools/resources.json` | Yacimientos (petróleo, gas, carbón, hierro, minerales), editable a mano. |
+| `tools/resources-world.json` | Los yacimientos del resto del mundo para el mapa del mundo (que también usa los de Europa). |
 
 ## Fuentes y licencias de los datos
 
+- Mapa del mundo: países, provincias, capitales, población y PIB de Natural Earth 5.1.1 (dominio público); Crimea y Sebastopol, con Ucrania como en el mapa de Europa.
 - Fronteras de las regiones: © EuroGeographics para las fronteras administrativas, vía Eurostat GISCO (NUTS 2021/2024); Natural Earth 5.1.1 (dominio público) para Rusia, Ucrania, Bielorrusia, Moldavia, Bosnia y Herzegovina y Kosovo.
 - Ciudades: GeoNames (CC BY 4.0) y Natural Earth.
-- Fuerzas armadas iniciales: aproximación a partir de IISS Military Balance 2024 y SIPRI.
+- Fuerzas armadas iniciales: aproximación a partir de IISS Military Balance 2024 y SIPRI (en el mapa del mundo, por países; los que no están en la tabla, el 0,15 % de su población en infantería).
 - Yacimientos: ubicación aproximada de cuencas y minas conocidas.
 - Relieve: teselas Terrarium de Mapzen en AWS (elevation-tiles-prod), a partir de SRTM, GMTED2010, ETOPO1 y otras fuentes públicas.
 - Bosques, humedales, lagos y zonas urbanas: © ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium (CC BY 4.0).

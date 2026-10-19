@@ -232,7 +232,7 @@ const PAINT = {
     hill: [150, 146, 98], rock: [140, 128, 112], rockhi: [184, 174, 160], snow: [244, 243, 238],
     seaDeep: [36, 82, 108], seaShallow: [74, 134, 156], lake: [80, 136, 156]
 };
-const BASE_RES = 3;        // píxeles del lienzo del terreno por unidad del mapa
+const BASE_RES = window.MAPA?.paintRes ?? 3;   // píxeles del lienzo del terreno por unidad del mapa (el del mundo, menos: es muy grande)
 const TILE = 512;          // lado en píxeles de las teselas del mundo pintado
 const SEA_COLOR = '#2a5670';
 
@@ -253,9 +253,9 @@ class RealisticMap {
 
     async load() {
         const R = E.relief;
-        if (!R) throw new Error('europa-data.js no trae relieve');
+        if (!R) throw new Error('los datos del mapa no traen relieve');
         const img = new Image();
-        img.src = 'relieve.png';
+        img.src = R.src ?? 'relieve.png';
         await img.decode();
         const c = document.createElement('canvas');
         c.width = R.w; c.height = R.h;
@@ -268,13 +268,14 @@ class RealisticMap {
             this.tree[i] = px[i * 4 + 1] / 200;
             this.cls[i] = px[i * 4 + 2] & 7;
         }
-        // Sombreado del relieve, luz del noroeste; pendientes exageradas para que se lean a esta escala.
+        // Sombreado del relieve, luz del noroeste; pendientes exageradas para que se lean a esta escala (más en el mapa
+        // del mundo, donde cada píxel abarca más y las pendientes medias salen más suaves).
         this.shade = new Float32Array(n);
-        const metersPerPx = 5000 * R.res;
+        const unitKm = E.unitKm ?? 5, metersPerPx = unitKm * 1000 * R.res, exaggerate = 9 * Math.sqrt(unitKm / 5);
         for (let yy = 1; yy < R.h - 1; yy++) for (let xx = 1; xx < R.w - 1; xx++) {
             const i = yy * R.w + xx, e = this.elev;
             const sx = (e[i + 1] - e[i - 1]) / (2 * metersPerPx), sy = (e[i + R.w] - e[i - R.w]) / (2 * metersPerPx);
-            this.shade[i] = Math.max(-1, Math.min(1, (sx + sy) * 9));
+            this.shade[i] = Math.max(-1, Math.min(1, (sx + sy) * exaggerate));
         }
         this.buildStatic();
         await this.buildBase();
@@ -578,7 +579,7 @@ class RealisticMap {
         x.strokeStyle = 'rgba(40,52,58,0.55)'; x.lineWidth = 0.9 / b; x.stroke(this.landPath);
     }
 
-    // Capa del mundo: un mapa general de toda Europa y, al acercarse, teselas guardadas a la resolución de la pantalla.
+    // Capa del mundo: una vista general de todo el mapa y, al acercarse, teselas guardadas a la resolución de la pantalla.
     // Solo se repintan cuando cambian los dueños o las carreteras; mientras, se sigue enseñando la versión anterior.
     drawWorld(ctx, now) {
         const v = this.view, g = v.game, R = E.relief;

@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { PNG } from 'pngjs';
 import { fromUrl } from 'geotiff';
 import mapshaper from 'mapshaper';
-import { projectLonLat, unprojectXY } from './projection.mjs';
+import * as europe from './projection.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CACHE = join(here, 'cache');
@@ -19,11 +19,12 @@ const CACHE = join(here, 'cache');
 export const TERRAIN_CODES = { p: 'plain', f: 'forest', h: 'hills', m: 'mountain', w: 'marsh', u: 'urban', l: 'lake' };
 // Umbrales de clasificación (metros y fracciones de la casilla). Cuenta sobre todo el desnivel dentro de la casilla:
 // una meseta alta y llana (Castilla, Anatolia) es llanura; las colinas y montañas son terreno quebrado.
-const MOUNTAIN_RELIEF = 900, MOUNTAIN_HIGH = 1800, MOUNTAIN_HIGH_RELIEF = 500, MOUNTAIN_MEAN = 2000;
-const HILLS_RELIEF = 280, HILLS_HIGH = 900, HILLS_HIGH_RELIEF = 150;
-const URBAN = 0.2, LAKE = 0.6, MARSH = 0.25, FOREST = 0.5;
-const RIVER_MAX_RANK = 6;    // ríos de Natural Earth con scalerank ≤ 6: los que se dibujan y cuentan para las reglas
-const RELIEF_RES = 1;        // unidades del mapa por píxel de relieve.png (~5 km)
+// Son los del mapa de Europa; el del mundo, con casillas más grandes, pasa los suyos en `opts.thresholds`.
+const THRESHOLDS = {
+    MOUNTAIN_RELIEF: 900, MOUNTAIN_HIGH: 1800, MOUNTAIN_HIGH_RELIEF: 500, MOUNTAIN_MEAN: 2000,
+    HILLS_RELIEF: 280, HILLS_HIGH: 900, HILLS_HIGH_RELIEF: 150,
+    URBAN: 0.2, LAKE: 0.6, MARSH: 0.25, FOREST: 0.5
+};
 
 const fetchBuf = async (url, tries = 3) => {
     for (let k = 0; ; k++) {
@@ -44,17 +45,20 @@ async function pool(items, n, fn) {
 }
 
 // --- Elevación (Terrarium) ---
-const Z = 6, TN = 2 ** Z;
+let Z = 6, TN = 2 ** Z;
 const elevTiles = new Map();
+function setZoom(z) { if (z !== Z) { Z = z; TN = 2 ** z; elevTiles.clear(); } }
 const tileXY = (lon, lat) => {
     const s = Math.sin(lat * Math.PI / 180);
     return [(lon + 180) / 360 * TN * 256, (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * TN * 256];
 };
+// Tesela de un píxel global: la x da la vuelta al mundo (antimeridiano) y la y se queda dentro del mapa.
+const tileKey = (ix, iy) => `${((Math.floor(ix / 256) % TN) + TN) % TN}/${Math.max(0, Math.min(TN - 1, Math.floor(iy / 256)))}`;
 async function loadElevation(lonlats) {
     const need = new Set();
     for (const [lon, lat] of lonlats) {
         const [x, y] = tileXY(lon, lat);
-        for (const dx of [-1, 1]) for (const dy of [-1, 1]) need.add(`${Math.floor((x + dx) / 256)}/${Math.floor((y + dy) / 256)}`);
+        for (const dx of [-1, 1]) for (const dy of [-1, 1]) need.add(tileKey(Math.floor(x + dx), Math.floor(y + dy)));
     }
     const dir = join(CACHE, `terrarium-${Z}`);
     mkdirSync(dir, { recursive: true });
@@ -76,7 +80,7 @@ async function loadElevation(lonlats) {
     });
 }
 function elevPx(ix, iy) {
-    const t = elevTiles.get(`${Math.floor(ix / 256)}/${Math.floor(iy / 256)}`);
+    const t = elevTiles.get(tileKey(ix, iy));
     return t ? t[(iy & 255) * 256 + (ix & 255)] : 0;
 }
 function elevAt(lon, lat) {
@@ -131,7 +135,7 @@ function coverAt(lon, lat) {
 }
 
 // --- Ríos (Natural Earth) ---
-async function loadRivers() {
+async function loadRivers(maxRank) {
     const file = join(CACHE, 'ne_10m_rivers_lake_centerlines.zip');
     if (!existsSync(file)) {
         mkdirSync(CACHE, { recursive: true });
@@ -139,7 +143,7 @@ async function loadRivers() {
         if (!buf) throw new Error('No se pudo descargar ne_10m_rivers_lake_centerlines.zip');
         writeFileSync(file, buf);
     }
-    const out = await mapshaper.applyCommands(`-i "${file}" -filter "scalerank <= ${RIVER_MAX_RANK} && featurecla != 'Lake Centerline'" -o out.json format=geojson`);
+    const out = await mapshaper.applyCommands(`-i "${file}" -filter "scalerank <= ${maxRank} && featurecla != 'Lake Centerline'" -o out.json format=geojson`);
     return Object.values(out).map(b => JSON.parse(b.toString())).flatMap(fc => fc.features ?? []);
 }
 function simplify(pts, tol) {   // Douglas-Peucker
@@ -192,19 +196,28 @@ function makeGrid(data) {
     };
     return { S, W, STEP, N, cx, cy, nb, cellAt, width: W * (cols + 0.5), height: STEP * (rows - 1) + 2 * S, ox: x0 - W / 2, oy: y0 - S };
 }
-// 19 puntos repartidos por el hexágono: centro, anillo interior y anillo exterior.
-function hexSamples(S) {
+// Puntos repartidos por el hexágono: centro, anillo interior y anillo exterior (19); con `dense`, cinco anillos (61).
+function hexSamples(S, dense) {
     const pts = [[0, 0]];
-    for (let k = 0; k < 6; k++) { const a = Math.PI / 3 * k; pts.push([Math.cos(a) * S * 0.45, Math.sin(a) * S * 0.45]); }
-    for (let k = 0; k < 12; k++) { const a = Math.PI / 6 * k + Math.PI / 12; pts.push([Math.cos(a) * S * 0.8, Math.sin(a) * S * 0.8]); }
+    const rings = dense ? [[6, 0.2], [12, 0.38], [12, 0.55], [12, 0.7], [18, 0.85]] : [[6, 0.45], [12, 0.8]];
+    for (const [n, r] of rings) for (let k = 0; k < n; k++) { const a = 2 * Math.PI * k / n + (n === 12 ? Math.PI / 12 : 0); pts.push([Math.cos(a) * S * r, Math.sin(a) * S * r]); }
     return pts;
 }
 
-// Añade a `data` (europa-data) el terreno por casilla, los ríos y el marco de relieve.png; escribe relieve.png en `pngOut`.
-export async function addTerrain(data, pngOut) {
+// Añade a `data` (datos de un mapa) el terreno por casilla, los ríos y el marco del relieve; escribe el relieve en `pngOut`.
+// opts: proj ({ projectLonLat, unprojectXY, projectLine }), unitKm (km por unidad del mapa), zoom (Terrarium),
+// thresholds (umbrales de clasificación), riverMaxRank, reliefRes (unidades por píxel del relieve), dense (más muestras).
+export async function addTerrain(data, pngOut, opts = {}) {
+    const { projectLonLat, unprojectXY } = opts.proj ?? europe;
+    const projectLine = opts.proj?.projectLine ?? (line => line.map(p => projectLonLat(p)));
+    const { MOUNTAIN_RELIEF, MOUNTAIN_HIGH, MOUNTAIN_HIGH_RELIEF, MOUNTAIN_MEAN, HILLS_RELIEF, HILLS_HIGH, HILLS_HIGH_RELIEF,
+        URBAN, LAKE, MARSH, FOREST } = { ...THRESHOLDS, ...opts.thresholds };
+    const RIVER_MAX_RANK = opts.riverMaxRank ?? 6;   // ríos de Natural Earth con scalerank ≤ 6: los que se dibujan y cuentan para las reglas
+    const RELIEF_RES = opts.reliefRes ?? 1;          // unidades del mapa por píxel del relieve (~5 km en Europa)
+    setZoom(opts.zoom ?? 6);
     const G = makeGrid(data), land = [];
     for (let i = 0; i < G.N; i++) if (data.cells[i] >= 0) land.push(i);
-    const SAMPLES = hexSamples(G.S);
+    const SAMPLES = hexSamples(G.S, opts.dense);
     const cityCells = new Set(data.provinces.map(p => p.city));
 
     // Puntos que hay que consultar: muestras de cada casilla y centros de los píxeles del relieve sobre tierra o junto a ella.
@@ -279,14 +292,14 @@ export async function addTerrain(data, pngOut) {
     writeFileSync(pngOut, PNG.sync.write(png, { colorType: 2 }));
 
     // --- Ríos: trazado en unidades del mapa y aristas de casilla que cruzan ---
-    const feats = await loadRivers();
+    const feats = await loadRivers(RIVER_MAX_RANK);
     const rivers = [], riverEdge = new Set();
     const inside = ([x, y]) => x >= G.ox && y >= G.oy && x <= G.ox + G.width && y <= G.oy + G.height;
     for (const f of feats) {
         const lines = f.geometry?.type === 'LineString' ? [f.geometry.coordinates] : f.geometry?.type === 'MultiLineString' ? f.geometry.coordinates : [];
         const rank = f.properties.scalerank, width = rank <= 3 ? 3 : rank <= 5 ? 2 : 1;
         for (const line of lines) {
-            const pts = simplify(line.map(p => projectLonLat(p)), 0.2).filter(inside);
+            const pts = simplify(projectLine(line), 0.2).filter(inside);
             if (pts.length < 2) continue;
             let len = 0;
             for (let k = 1; k < pts.length; k++) len += Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]);
@@ -314,6 +327,7 @@ export async function addTerrain(data, pngOut) {
 
     data.terrain = terrain.join('');
     data.relief = { x0: +G.ox.toFixed(3), y0: +G.oy.toFixed(3), res: RELIEF_RES, w: RW, h: RH };
+    data.unitKm = opts.unitKm ?? 5;
     data.rivers = rivers;
     data.riverEdges = [...riverEdge].flatMap(k => k.split(':').map(Number));
     if (!/WorldCover/.test(data.sources)) data.sources += '; relieve: Mapzen Terrarium (SRTM, GMTED, ETOPO); usos del suelo: ESA WorldCover 2021 (CC BY 4.0); ríos: Natural Earth 5.1.1';

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>NanWar</title>
-    <meta name="description" content="Estrategia por turnos sobre un mapa hexagonal de Europa.">
+    <meta name="description" content="Estrategia por turnos sobre un mapa hexagonal de Europa o del mundo entero.">
     <meta name="theme-color" content="#2b3125">
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
@@ -194,6 +194,16 @@
         .seg button { flex: 1; padding: 7px 4px; border: 0; border-right: 1px solid var(--line); background: var(--raised); color: var(--text); font: 600 13px var(--font); cursor: pointer; }
         .seg button:last-child { border-right: 0; }
         .seg button.on { background: var(--signal); color: var(--ink); }
+        .maps { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .map-pick { display: flex; gap: 9px; align-items: flex-start; text-align: left; padding: 9px 10px; border-radius: 8px;
+            border: 1px solid var(--line); background: var(--raised); color: var(--text); font: 14px var(--font); cursor: pointer; }
+        .map-pick:hover { border-color: var(--muted); }
+        .map-pick svg { flex: none; width: 24px; height: 24px; margin-top: 1px; color: var(--muted); }
+        .map-pick span { display: flex; flex-direction: column; gap: 2px; }
+        .map-pick small { color: var(--muted); font-size: 12px; line-height: 1.3; }
+        .map-pick.on { border-color: var(--signal); box-shadow: inset 0 0 0 1px var(--signal); }
+        .map-pick.on svg { color: var(--signal); }
+        .slots-other { font-size: 13px; color: var(--muted); margin: 14px 0 0; }
         select, input[type="text"], input[type="search"] {
             width: 100%; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--line);
             background: var(--ink); color: var(--text); font: 14px var(--font);
@@ -412,12 +422,29 @@
 <dialog id="alerts-dialog"><div class="float" id="alerts-body"></div></dialog>
 <div id="overlay" hidden><div class="float" id="overlay-card"></div></div>
 <input type="file" id="import-file" accept=".json,application/json" hidden>
-<script src="europa-data.js"></script>
+<script>
+// Mapas: se elige uno al empezar una partida nueva y se recuerda en este dispositivo (o con ?mapa= en la dirección).
+// El de la partida se carga antes que el juego, que se construye entero sobre él.
+const MAPS = {
+    europa: { file: 'europa-data.js', name: 'Europa', lead: 'Europa, 2025', of: 'de Europa', all: 'Toda Europa', it: 'Europa',
+        desc: '42 países y 343 provincias en casillas de unos 20 km.' },
+    mundo: { file: 'mundo-data.js', name: 'Mundo', lead: 'El mundo, 2025', of: 'del mundo', all: 'Todo el mundo', it: 'el mundo',
+        desc: '181 países y más de mil provincias en casillas de unos 85 km. Más lento en móviles modestos.' }
+};
+const MAP_KEY = 'nanwar.map';
+const MAP_ID = (() => {
+    let id = new URLSearchParams(location.search).get('mapa');
+    try { id ??= localStorage.getItem(MAP_KEY); } catch { /* sin almacenamiento: el de la dirección o Europa */ }
+    return Object.prototype.hasOwnProperty.call(MAPS, id) ? id : 'europa';
+})();
+const MAP = MAPS[MAP_ID];
+document.write(`<script src="${MAP.file}"><\/script>`);
+</script>
 <script src="vista-realista.js"></script>
 <script>
 'use strict';
 
-const E = window.EUROPA;
+const E = window.MAPA;
 
 const MOVE = 12;  // subpuntos por punto de movimiento (las carreteras cuestan fracciones: ½, ⅓, ¼…)
 const CONFIG = {
@@ -506,7 +533,7 @@ const AGGRESSION = {
         warChance: 0.4, warRatio: 0.85, warFrom: 1, maxWars: 3, peaceRatio: 0.25, peaceAfter: 30, blocChance: 0.4, betrayChance: 0.08 }
 };
 const ALLIANCE_SETUPS = { reales: "Reales: OTAN y OTSC", ninguna: "Ninguna: cada país por su cuenta" };
-const VICTORY_SETUPS = { 0.5: "Dominar el 50 % de Europa", 0.75: "Dominar el 75 % de Europa", 1: "Eliminar a todas las naciones" };
+const VICTORY_SETUPS = { 0.5: `Dominar el 50 % ${MAP.of}`, 0.75: `Dominar el 75 % ${MAP.of}`, 1: "Eliminar a todas las naciones" };
 
 const UNIT_KEYS = Object.keys(CONFIG.TYPES);
 
@@ -735,7 +762,7 @@ for (const p of PROVINCES) {
     p.value = Math.max(1, Math.round(p.population / 1e6 * p.productivity * CONFIG.INCOME_PER_MILLION));
     p.recruitCap = 1 + Math.floor(p.population / 1e6 * CONFIG.RECRUIT_PER_MILLION);
 }
-// Terreno real de cada casilla (europa-data.js lo trae por casilla; si falta, el de su provincia) y aristas con río.
+// Terreno real de cada casilla (los datos del mapa lo traen por casilla; si falta, el de su provincia) y aristas con río.
 const TERRAIN_CODE = { p: 'plain', f: 'forest', h: 'hills', m: 'mountain', w: 'marsh', u: 'urban', l: 'lake' };
 const CELL_TERRAIN = Array.from({ length: G.N }, (_, i) => (isLand(i) ? TERRAIN_CODE[E.terrain?.[i]] ?? PROVINCES[G.prov[i]].terrain : null));
 const terrainOf = i => CONFIG.TERRAIN[CELL_TERRAIN[i]];
@@ -877,7 +904,7 @@ class GameEngine {
             if (r.state !== 'paz' || r.since || r.truceUntil) relations.push([a, b, r.state, r.since, r.truceUntil]);
         }
         return {
-            format: 'eurowar-1', map: `${G.land.length}:${PROVINCES.length}`, move: MOVE,
+            format: 'eurowar-1', mapId: MAP_ID, map: `${G.land.length}:${PROVINCES.length}`, move: MOVE,
             seed: this.seed, rng: this.rng.state, turn: this.turn, player: this.player, over: this.over, won: this.won,
             settings: this.settings, logs: this.logs.slice(-150), proposals: this.proposals, proposed: [...this.proposedThisTurn],
             owner: runs, legal: compress(this.legal), dev: Array.from(this.dev), roads: this.roadEdges(),
@@ -896,7 +923,9 @@ class GameEngine {
 
     static load(data) {
         if (data?.format !== 'eurowar-1') throw new Error('El archivo no es una partida de NanWar.');
-        if (data.map !== `${G.land.length}:${PROVINCES.length}`) throw new Error('La partida se guardó con otro mapa (europa-data.js distinto).');
+        const mapId = data.mapId ?? 'europa';   // las partidas de antes del selector son todas de Europa
+        if (mapId !== MAP_ID) throw new Error(`La partida es del mapa ${Object.prototype.hasOwnProperty.call(MAPS, mapId) ? MAPS[mapId].name : 'desconocido'}.`);
+        if (data.map !== `${G.land.length}:${PROVINCES.length}`) throw new Error(`La partida se guardó con otra versión del mapa ${MAP.name}.`);
         // Todo lo que llega del archivo se valida antes de usarlo: enteros dentro de rango, índices de países,
         // casillas y provincias válidos, textos acotados y claves conocidas. Un archivo manipulado no puede
         // colar datos raros (ni HTML) en la partida.
@@ -1725,7 +1754,7 @@ class GameEngine {
         const share = [p, ...this.satellitesOf(p)].reduce((s, x) => s + lands[x], 0) / G.land.length;
         if (share >= this.settings.victory || this.nations.every(n => n.id === p || !n.alive || n.overlord === p)) {
             this.over = true; this.won = true;
-            this.log("VICTORIA: Europa está bajo tu mando.");
+            this.log(`VICTORIA: ${MAP.it[0].toUpperCase() + MAP.it.slice(1)} está bajo tu mando.`);
         }
     }
 
@@ -2667,19 +2696,31 @@ const $ = sel => document.querySelector(sel);
 const INK = '#151a12';
 const SIGNAL = '#f0c419';
 
-// Partidas guardadas (localStorage del navegador; también exportables a archivo)
-const SAVE_KEY = 'eurowar.saves.v1';
+// Partidas guardadas (localStorage del navegador; también exportables a archivo). Cada mapa tiene sus ranuras.
+const saveKey = map => (map === 'europa' ? 'eurowar.saves.v1' : `nanwar.saves.${map}`);
 const SLOTS = { auto: 'Autoguardado', s1: 'Ranura 1', s2: 'Ranura 2', s3: 'Ranura 3' };
-function readSaves() {
-    try { return JSON.parse(localStorage.getItem(SAVE_KEY)) || {}; } catch { return {}; }
+function readSaves(map = MAP_ID) {
+    try { return JSON.parse(localStorage.getItem(saveKey(map))) || {}; } catch { return {}; }
 }
 function writeSave(slot, g) {
     try {
         const all = readSaves();
         all[slot] = { date: new Date().toISOString(), turn: g.turn, nation: g.nm(g.player), data: g.serialize() };
-        localStorage.setItem(SAVE_KEY, JSON.stringify(all));
+        localStorage.setItem(saveKey(MAP_ID), JSON.stringify(all));
         return true;
     } catch { return false; }
+}
+// Cambia de mapa recargando la página; `resume` es lo que se abrirá al volver: una ranura ("mundo:s1") o un
+// archivo importado ("import", que espera en sessionStorage).
+const IMPORT_KEY = 'nanwar.import';
+function switchMap(id, resume = null) {
+    try {
+        localStorage.setItem(MAP_KEY, id);
+        if (resume) localStorage.setItem(RESUME_KEY, resume);
+    } catch { /* sin almacenamiento: vale con la dirección */ }
+    const q = new URLSearchParams(location.search);
+    q.set('mapa', id);
+    location.href = `${location.pathname}?${q}`;
 }
 
 const ICONS = {
@@ -2691,6 +2732,11 @@ const ICONS = {
     globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.2 3 14.8 0 18M12 3c-3 3.2-3 14.8 0 18"/></svg>',
     supply: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M2 6h11v10H2zM13 9h4.5l3.5 3.5V16h-8"/><circle cx="6" cy="18" r="2"/><circle cx="17" cy="18" r="2"/></svg>',
     relief: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M2 20 9 7l4 6 3-4 6 11z"/><path d="M7.5 9.8 9 11l1.6-1.4"/></svg>'
+};
+// Selector de mapa: un mapa plegado para Europa y el globo para el mundo.
+const MAP_ICON = {
+    europa: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 6l6-2.5 6 2.5 6-2.5v14.5l-6 2.5-6-2.5-6 2.5zM9 3.5V18M15 6v14.5"/></svg>',
+    mundo: ICONS.globe
 };
 // Investigación: símbolos OTAN para las tropas y los ingenieros, pictogramas reales para el resto (32×32).
 const RS_STAR = (() => { const p = []; for (let i = 0; i < 10; i++) { const r = i % 2 ? 5.2 : 12.5, a = Math.PI / 5 * i - Math.PI / 2; p.push(`${(16 + r * Math.cos(a)).toFixed(1)},${(16.8 + r * Math.sin(a)).toFixed(1)}`); } return p.join(' '); })();
@@ -2794,7 +2840,7 @@ class MapView {
         this.canvas.height = Math.round(r.height * this.dpr);
     }
 
-    // Encaja Europa en el hueco que dejan libre los paneles flotantes (padLeft píxeles a la izquierda).
+    // Encaja el mapa en el hueco que dejan libre los paneles flotantes (padLeft píxeles a la izquierda).
     fit(padLeft = 0, padBottom = 0) {
         const w = this.w - padLeft, hh = this.h - padBottom;
         this.scale = Math.min(w / G.width, hh / G.height) * 0.98;
@@ -3339,7 +3385,16 @@ class GameUI {
             const file = e.target.files[0];
             e.target.value = '';
             if (!file) return;
-            try { this.setGame(GameEngine.load(JSON.parse(await file.text()))); this.game.log(`Partida importada de ${file.name}.`); }
+            try {
+                const text = await file.text(), data = JSON.parse(text), map = data?.mapId ?? 'europa';
+                // Partida de otro mapa: se cambia a ese mapa y se importa allí.
+                if (data?.format === 'eurowar-1' && map !== MAP_ID && Object.prototype.hasOwnProperty.call(MAPS, map)) {
+                    sessionStorage.setItem(IMPORT_KEY, text);
+                    switchMap(map, 'import');
+                    return;
+                }
+                this.setGame(GameEngine.load(data)); this.game.log(`Partida importada de ${file.name}.`);
+            }
             catch (err) { this.game.log(`No se pudo importar: ${err.message}`); }
             $('#game-dialog').close();
             this.render();
@@ -3831,6 +3886,7 @@ class GameUI {
                 break;
             }
             case 'load': {
+                if (d.map && d.map !== MAP_ID) { switchMap(d.map, `${d.map}:${d.slot}`); return; }
                 const save = readSaves()[d.slot];
                 if (!save) return;
                 try { this.setGame(GameEngine.load(save.data)); this.game.log(`Partida cargada de ${SLOTS[d.slot]}.`); }
@@ -3851,6 +3907,7 @@ class GameUI {
             }
             case 'import': $('#import-file').click(); return;
             case 'restart': location.href = location.pathname; return;
+            case 'map': if (d.value !== MAP_ID && g.player === null) switchMap(d.value); return;
             default: return;
         }
         this.render();
@@ -4055,7 +4112,7 @@ class GameUI {
                 <h3>${g.nm(c)}</h3>
                 <dl class="facts" style="margin-top:8px">
                     <dt>Capital</dt><dd>${esc(g.nations[c].capitalName)}</dd>
-                    <dt>Territorio</dt><dd>${plural(g.citiesOf(c).length, 'provincia', 'provincias')}, ${(100 * lands[c] / G.land.length).toFixed(1)} % de Europa</dd>
+                    <dt>Territorio</dt><dd>${plural(g.citiesOf(c).length, 'provincia', 'provincias')}, ${(100 * lands[c] / G.land.length).toFixed(1)} % ${MAP.of}</dd>
                     <dt>Ejército</dt><dd>fuerza ${powers[c]}</dd>
                     <dt>Economía</dt><dd>${e.total} de oro por turno, ${g.nations[c].gold} en el tesoro</dd>
                     <dt>Recursos</dt><dd>${[...e.resources, ...e.looseResources].map(r => `${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}`).join(', ') || 'ninguno'}${e.resources.length ? '<br><span class="small muted">Cada uno abastece a su provincia; con carretera, también a las ciudades que una.</span>' : ''}</dd>
@@ -4065,7 +4122,9 @@ class GameUI {
         }
         el.innerHTML = `
             <h2>Nueva partida</h2>
-            <p class="lead">Europa, 2025. Elige cómo será la partida y qué país diriges.</p>
+            <p class="lead">${MAP.lead}. Elige cómo será la partida y qué país diriges.</p>
+            <div class="field"><span>Mapa</span><div class="maps">${Object.entries(MAPS).map(([id, m]) => `<button class="map-pick ${id === MAP_ID ? 'on' : ''}" data-action="map" data-value="${id}" aria-pressed="${id === MAP_ID}">
+                    ${MAP_ICON[id]}<span><b>${m.name}</b><small>${m.desc}</small></span></button>`).join('')}</div></div>
             <div class="field"><span>Agresividad de los demás países</span>
                 ${seg('aggression', Object.fromEntries(Object.entries(AGGRESSION).map(([k, v]) => [k, v.name])), s.aggression)}
                 <p class="note">${g.ai.desc}</p></div>
@@ -4073,8 +4132,8 @@ class GameUI {
             <div class="field"><span>Niebla de guerra</span>${seg('fog', [['no', 'Ver todo'], ['si', 'Solo lo que ves']], s.fog ? 'si' : 'no')}
                 <p class="note">${s.fog
                     ? `Solo ves las tropas en tu territorio y el de tus aliados, en una franja de ${this.myRules().visionTerritory} casillas alrededor y a ${this.myRules().visionArmy} de tus ejércitos. Puedes enviar espías.`
-                    : 'Ves todas las tropas de Europa.'}</p></div>
-            <div class="field"><span>Para ganar</span>${seg('victory', [['0.5', '50 % de Europa'], ['0.75', '75 %'], ['1', 'Toda Europa']], s.victory)}</div>
+                    : `Ves todas las tropas ${MAP.of}.`}</p></div>
+            <div class="field"><span>Para ganar</span>${seg('victory', [['0.5', `50 % ${MAP.of}`], ['0.75', '75 %'], ['1', MAP.all]], s.victory)}</div>
             <div class="field"><span>Tu país</span>
                 <select id="nation-select"><option value="" ${c === null ? 'selected' : ''} disabled>Elige un país…</option>
                 ${sorted.map(n => `<option value="${n.id}" ${c === n.id ? 'selected' : ''}>${n.name}</option>`).join('')}</select>
@@ -4470,7 +4529,7 @@ class GameUI {
                     <h3>${n.name}</h3><p class="row" style="margin-top:4px">${this.relationChip(t)}</p>
                     <dl class="facts" style="margin-top:8px">
                         <dt>Capital</dt><dd>${esc(n.capitalName)}${g.owner[n.capitalCell] !== t ? ` (en manos de ${g.nm(g.owner[n.capitalCell])})` : ''}</dd>
-                        <dt>Territorio</dt><dd>${(100 * lands[t] / G.land.length).toFixed(1)} % de Europa</dd>
+                        <dt>Territorio</dt><dd>${(100 * lands[t] / G.land.length).toFixed(1)} % ${MAP.of}</dd>
                         <dt>Fuerza</dt><dd>${this.powerText(t, powers)}</dd>
                         <dt>Investigación</dt><dd>${this.researchText(t)}</dd>
                         <dt>Alianzas</dt><dd>${blocs.map(b => esc(b.name) + (b.secret ? ' (secreta)' : '')).join(', ') || 'ninguna conocida'}</dd>
@@ -4526,7 +4585,7 @@ class GameUI {
             ['Tus satélites', n => n.alive && n.overlord === p0],
             ['En guerra contigo', n => n.alive && g.atWar(p0, n.id)],
             ['Aliados', n => n.alive && g.allied(p0, n.id) && !g.atWar(p0, n.id) && n.overlord !== p0],
-            ['Resto de Europa', n => n.alive && n.id !== p0 && !g.atWar(p0, n.id) && !g.allied(p0, n.id)],
+            [`Resto ${MAP.of}`, n => n.alive && n.id !== p0 && !g.atWar(p0, n.id) && !g.allied(p0, n.id)],
             ['Eliminados', n => !n.alive]
         ];
         list.innerHTML = (spies && !q ? `<p class="group-title">Tus espías</p>${spies}` : '') + groups.map(([title, test]) => {
@@ -4534,7 +4593,7 @@ class GameUI {
                 .sort((a, b) => (g.settings.fog ? lands[b.id] - lands[a.id] : powers[b.id] - powers[a.id]))
                 .map(n => `<button class="nation-row" data-action="nation" data-id="${n.id}">
                     <span class="sw" style="background:${n.color}"></span><span>${n.name}</span>
-                    <span class="num" title="Parte de Europa">${(100 * lands[n.id] / G.land.length).toFixed(1)} %</span>
+                    <span class="num" title="Parte ${MAP.of}">${(100 * lands[n.id] / G.land.length).toFixed(1)} %</span>
                     <span class="num" title="Fuerza militar">${this.powerText(n.id, powers)}</span></button>`).join('');
             return rows ? `<p class="group-title">${title}</p>${rows}` : '';
         }).join('') || '<p class="note">Ningún país coincide con la búsqueda.</p>';
@@ -4646,6 +4705,11 @@ class GameUI {
                     ${slot === 'auto' ? '<span></span>' : `<button class="btn" data-action="save" data-slot="${slot}" ${playing && !g.over ? '' : 'disabled'}>Guardar aquí</button>`}
                     <button class="btn" data-action="load" data-slot="${slot}" ${s ? '' : 'disabled'}>Cargar</button></div>`;
             }).join('')}
+            ${Object.keys(MAPS).filter(m => m !== MAP_ID).map(m => {
+                const other = readSaves(m), list = Object.keys(SLOTS).filter(slot => other[slot]);
+                return list.length ? `<h3 class="slots-other">Mapa ${MAPS[m].name}</h3>${list.map(slot => `<div class="slot"><div><b>${SLOTS[slot]}</b><div class="small muted">${esc(other[slot].nation)}, turno ${other[slot].turn}, ${when(other[slot])}</div></div>
+                    <span></span><button class="btn" data-action="load" data-map="${m}" data-slot="${slot}" title="Cambia al mapa ${MAPS[m].name} y carga la partida">Cargar</button></div>`).join('')}` : '';
+            }).join('')}
             ${this.watchSettings()}
             <div class="row" style="margin-top:14px">
                 <button class="btn" data-action="export" ${playing ? '' : 'disabled'}>Exportar a archivo</button>
@@ -4659,7 +4723,7 @@ class GameUI {
         if (!g.over) return;
         $('#overlay-card').innerHTML = `
             <h2 style="color:${g.won ? SIGNAL : 'var(--war)'}">${g.won ? 'Victoria' : 'Derrota'}</h2>
-            <p>${g.won ? `${g.nm(g.player)} domina Europa en el turno ${g.turn}.` : `${g.nm(g.player)} ha caído en el turno ${g.turn}.`}</p>
+            <p>${g.won ? `${g.nm(g.player)} domina ${MAP.it} en el turno ${g.turn}.` : `${g.nm(g.player)} ha caído en el turno ${g.turn}.`}</p>
             <button class="btn primary" style="margin-top:16px" data-action="restart">Nueva partida</button>`;
     }
 }
@@ -4670,7 +4734,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.19-120016';
+const APP_VERSION = '2026.10.19-122342';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
@@ -4701,10 +4765,23 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
 }
 // Tras una actualización, se reanuda la partida que se estaba jugando.
 try {
-    if (localStorage.getItem(RESUME_KEY)) {
+    const resume = localStorage.getItem(RESUME_KEY);
+    if (resume) {
         localStorage.removeItem(RESUME_KEY);
-        const save = readSaves().auto;
-        if (save) { ui.setGame(GameEngine.load(save.data)); game.log(`NanWar se ha actualizado a la versión ${APP_VERSION}. Continúas tu partida.`); ui.render(); }
+        if (resume === 'import') {
+            const text = sessionStorage.getItem(IMPORT_KEY);
+            sessionStorage.removeItem(IMPORT_KEY);
+            if (text) { ui.setGame(GameEngine.load(JSON.parse(text))); game.log(`Partida importada (mapa ${MAP.name}).`); ui.render(); }
+        } else {
+            // "auto" tras una actualización; "mapa:ranura" al cargar una partida de otro mapa.
+            const [map, slot] = resume.includes(':') ? resume.split(':') : [MAP_ID, resume];
+            const save = map === MAP_ID && Object.prototype.hasOwnProperty.call(SLOTS, slot) ? readSaves()[slot] : null;
+            if (save) {
+                ui.setGame(GameEngine.load(save.data));
+                game.log(resume.includes(':') ? `Partida cargada de ${SLOTS[slot]} (mapa ${MAP.name}).` : `NanWar se ha actualizado a la versión ${APP_VERSION}. Continúas tu partida.`);
+                ui.render();
+            }
+        }
     }
 } catch { /* sin almacenamiento local */ }
 setTimeout(checkForUpdate, 2000);

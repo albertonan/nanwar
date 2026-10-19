@@ -304,7 +304,7 @@ const data = {
 };
 
 await addTerrain(data, join(here, '../relieve.png'));
-writeFileSync(out, `// Generado por tools/build-map.mjs. No editar a mano.\nwindow.EUROPA = ${JSON.stringify(data)};\n`);
+writeFileSync(out, `// Generado por tools/build-map.mjs. No editar a mano.\nwindow.MAPA = ${JSON.stringify(data)};\n`);
 const counts = countCells();
 const sorted = [...counts].sort((a, b) => a - b);
 console.log(`${resources.length} recursos`);
