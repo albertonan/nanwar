@@ -473,6 +473,22 @@ const CHECKS = [
         T.learn(g, p, 'reconocimiento1', 'reconocimiento2'); ui.render();
         T.ok(/6 tanque/.test($('#card').textContent), 'con Inteligencia de señales sí');
         return true;
+    }],
+
+    ['F6 · cada fortificación se dibuja con el nivel de su dueño, o rayada si no lo conoces', () => {
+        const g = T.uiStart('es', true), p = g.player, fr = T.nation('fr');
+        const mine = T.plainPair(g, p)[1], theirs = T.plainPair(g, fr)[1];
+        g.fort[mine] = 1; g.fort[theirs] = 1; g.fortVersion++;
+        T.learn(g, p, 'fortificacion1', 'fortificacion2');
+        T.learn(g, fr, 'fortificacion1');
+        ui.view.draw();
+        const styles = () => Object.fromEntries([...ui.view.fortGroups].map(([k, v]) => [k, v.n]));
+        T.eq(styles(), { 2: 1, unk: 1 }, 'propia de nivel 2, francesa desconocida');
+        T.learn(g, p, 'reconocimiento1', 'reconocimiento2', 'reconocimiento3');
+        ui.view.draw();
+        T.eq(styles(), { 2: 1, 1: 1 }, 'con Reconocimiento aéreo se ve su nivel');
+        T.ok(ui.view.bunkers.includes(mine) && !ui.view.bunkers.includes(theirs), 'búnker solo en la de nivel 2');
+        return true;
     }]
 ];
 

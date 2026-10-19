@@ -644,6 +644,10 @@ class RealisticMap {
             ctx.beginPath(); ctx.ellipse(x, y + U * 0.28, U * 1.28 + Math.sin(now / 220) * 1.2, U * 0.5, 0, 0, TAU); ctx.stroke();
         }
         ctx.fillStyle = shadeHex(color, -0.4); ctx.beginPath(); ctx.ellipse(x, y + U * 0.34, U, U * 0.38, 0, 0, TAU); ctx.fill();
+        if (o.level > 0) {   // borde de la peana: bronce, plata u oro según el nivel de su rama de tropa
+            ctx.strokeStyle = BASE_RIM[o.level]; ctx.lineWidth = Math.max(1.6, U * 0.13);
+            ctx.beginPath(); ctx.ellipse(x, y + U * 0.34, U, U * 0.38, 0, 0, Math.PI); ctx.stroke();
+        }
         ctx.fillStyle = color; ctx.beginPath(); ctx.ellipse(x, y + U * 0.25, U, U * 0.36, 0, 0, TAU); ctx.fill();
         if (flanked || noSupply) {
             ctx.strokeStyle = flanked ? '#e05a47' : '#ff9f1c'; ctx.lineWidth = 2.4;
@@ -678,6 +682,7 @@ class RealisticMap {
     }
 }
 
+const BASE_RIM = [null, '#b87333', '#c9ced6', '#e8b931'];
 function miniRect(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
 function miniPoly(ctx, pts) { ctx.beginPath(); pts.forEach((p, k) => (k ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]))); ctx.closePath(); }
 function miniSoldier(ctx, x, y, now, moving, ph, k = 1) {

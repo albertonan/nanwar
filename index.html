@@ -764,6 +764,14 @@ const ECHELONS = [
 ];
 const echelonOf = n => ECHELONS.find(e => n <= e.max);
 const FORT_LEVELS = ['sacos terreros', 'hormigón armado', 'búnkeres', 'casamatas'];
+// Cómo se dibuja la fortificación de cada nivel: relleno, muro (oscuro y claro) y sus grosores.
+const FORT_STYLE = {
+    0: { fill: 'rgba(214,203,178,0.5)', dark: '#2b2620', light: '#e3d9c0', wall: [3.8, 2.1] },
+    1: { fill: 'rgba(150,156,162,0.55)', dark: '#151a12', light: '#cfd2d6', wall: [4.6, 2.6] },
+    2: { fill: 'rgba(132,138,144,0.6)', dark: '#151a12', light: '#cfd2d6', wall: [4.6, 2.6] },
+    3: { fill: 'rgba(92,97,102,0.65)', dark: '#151a12', light: '#e6e8eb', wall: [5.4, 3] },
+    unk: { dark: '#151a12', light: '#a6a892', wall: [3.8, 2] }
+};
 const RESOURCES = E.resources.map(r => ({ ...r, typeName: E.resourceTypes[r.type], province: G.prov[r.cell] }));
 const RESOURCE_AT = new Map(RESOURCES.map(r => [r.cell, r]));
 
@@ -2860,22 +2868,48 @@ class MapView {
         this.builtRoads = this.game.roadVersion;
     }
 
-    // Fortificaciones: relleno de piedra y muro en el contorno de cada bloque; obras en curso, discontinuas.
+    // Fortificaciones: relleno y muro en el contorno de cada bloque, con el material del nivel de Fortificación de su
+    // dueño (sacos terreros, hormigón, búnkeres, casamatas) o rayadas si no lo conoces; obras en curso, discontinuas.
+    fortKey() {
+        const g = this.game;
+        return `${g.fortVersion}:${g.techVersion}:${g.player}:${g.settings.fog}:${g.turn}:${g.spyVersion}:${g.blocVersion}:${g.version}`;
+    }
     buildForts() {
         const g = this.game;
-        this.fortFill = new Path2D();
-        this.walls = new Path2D();
+        this.fortGroups = new Map();   // nivel (0–3) o 'unk' → { fill, walls, inner, n }
+        this.bunkers = [];             // casillas con búnker dibujado (niveles 2 y 3)
         this.works = new Path2D();
         for (const i of G.land) {
             if (!g.fort[i]) continue;
-            this.hexPath(this.fortFill, i);
+            const lv = g.fortLevel(g.player, i), k = lv === null ? 'unk' : lv;
+            if (!this.fortGroups.has(k)) this.fortGroups.set(k, { fill: new Path2D(), walls: new Path2D(), inner: new Path2D(), n: 0 });
+            const gr = this.fortGroups.get(k);
+            gr.n++;
+            this.hexPath(gr.fill, i);
+            if (k === 3) this.hexPath(gr.inner, i, 0.7);
+            if (k === 2 || k === 3) this.bunkers.push(i);
             for (let d = 0; d < 6; d++) {
                 const j = G.nb[i * 6 + d];
-                if (j < 0 || !g.fort[j]) this.edge(this.walls, i, d);
+                if (j < 0 || !g.fort[j]) this.edge(gr.walls, i, d);
             }
         }
         for (const c of g.fortWork.keys()) this.hexPath(this.works, c, 0.8);
-        this.builtForts = g.fortVersion;
+        this.builtForts = this.fortKey();
+    }
+    // Rayado neutro de las fortificaciones de nivel desconocido (mismo grosor en pantalla a cualquier zoom).
+    hatchPattern(s) {
+        if (!this.hatchTile) {
+            const c = document.createElement('canvas');
+            c.width = c.height = 8;
+            const x = c.getContext('2d');
+            x.fillStyle = 'rgba(76,81,68,0.55)'; x.fillRect(0, 0, 8, 8);
+            x.strokeStyle = 'rgba(166,168,146,0.75)'; x.lineWidth = 2;
+            x.beginPath(); x.moveTo(-2, 10); x.lineTo(10, -2); x.moveTo(-2, 2); x.lineTo(2, -2); x.moveTo(6, 10); x.lineTo(10, 6); x.stroke();
+            this.hatchTile = c;
+        }
+        const p = this.ctx.createPattern(this.hatchTile, 'repeat');
+        p.setTransform(new DOMMatrix().scale(1 / s));
+        return p;
     }
 
     buildDynamic() {
@@ -2936,7 +2970,7 @@ class MapView {
         const g = this.game, ctx = this.ctx, s = this.scale, dpr = this.dpr;
         if (this.builtVersion !== g.version) this.buildDynamic();
         if (this.builtRoads !== g.roadVersion) this.buildRoads();
-        if (this.builtForts !== g.fortVersion) this.buildForts();
+        if (this.builtForts !== this.fortKey()) this.buildForts();
         const hexPx = G.S * s, now = performance.now();
         this.motion.consume(now);
         const real = this.isRealistic();
@@ -3017,10 +3051,20 @@ class MapView {
         ctx.stroke(this.roads[2]);
         }
 
-        // Fortificaciones
-        ctx.fillStyle = 'rgba(214,203,178,0.5)'; ctx.fill(this.fortFill);
-        ctx.strokeStyle = '#2b2620'; ctx.lineWidth = 3.8 / s; ctx.stroke(this.walls);
-        ctx.strokeStyle = '#e3d9c0'; ctx.lineWidth = 2.1 / s; ctx.stroke(this.walls);
+        // Fortificaciones, con el material de su nivel
+        for (const [k, gr] of this.fortGroups) {
+            const st = FORT_STYLE[k];
+            ctx.fillStyle = k === 'unk' ? this.hatchPattern(s) : st.fill; ctx.fill(gr.fill);
+            ctx.strokeStyle = st.dark; ctx.lineWidth = st.wall[0] / s; ctx.stroke(gr.walls);
+            ctx.strokeStyle = st.light; ctx.lineWidth = st.wall[1] / s; ctx.stroke(gr.walls);
+            if (k === 3) { ctx.lineWidth = 1.2 / s; ctx.stroke(gr.inner); }
+        }
+        if (hexPx >= 7) for (const c of this.bunkers) {   // búnker con tronera en el centro de la casilla
+            const r = G.S * 0.34, bx = G.cx[c], by = G.cy[c] + r * 0.45;
+            ctx.beginPath(); ctx.arc(bx, by, r, Math.PI, 0); ctx.closePath();
+            ctx.fillStyle = '#a3a9ae'; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 1.2 / s; ctx.stroke();
+            ctx.fillStyle = INK; ctx.fillRect(bx - r * 0.55, by - r * 0.55, r * 1.1, r * 0.22);
+        }
         ctx.setLineDash([3 / s, 2 / s]);
         ctx.strokeStyle = '#e3d9c0'; ctx.lineWidth = 1.5 / s; ctx.stroke(this.works);
         ctx.setLineDash([]);
@@ -3138,16 +3182,18 @@ class MapView {
         }
         for (const gh of this.motion.ghosts(now)) {
             if (!seen(gh.p.x, gh.p.y, gh.tr.cells[gh.tr.cells.length - 1])) continue;
-            const known = g.intel(g.player, gh.tr.owner, gh.tr.cells[gh.tr.cells.length - 1]).exact;
-            tokens.push({ id: gh.id, owner: gh.tr.owner, type: known ? gh.tr.type : null, n: known ? gh.tr.n : null, echelon: echelonOf(gh.tr.n).mark, wx: gh.p.x, wy: gh.p.y, mine: gh.tr.owner === g.player,
+            const k = g.intel(g.player, gh.tr.owner, gh.tr.cells[gh.tr.cells.length - 1]);
+            tokens.push({ id: gh.id, owner: gh.tr.owner, type: k.exact ? gh.tr.type : null, n: k.exact ? gh.tr.n : null, echelon: echelonOf(gh.tr.n).mark,
+                level: k.levels && k.exact ? g.techLevel(gh.tr.owner, UNIT_BRANCH[gh.tr.type]) : null, wx: gh.p.x, wy: gh.p.y, mine: gh.tr.owner === g.player,
                 moving: gh.p.moving, facing: this.motion.facingOf(gh.id, gh.p), alpha: 1 });
         }
         for (const f of this.motion.fx) {   // quien cae en combate se desvanece al terminar el choque
             for (const [id, owner, type, n, cell] of [[f.def, f.defOwner, f.defType, f.defN, f.cell], [f.att, f.attOwner, f.attType, f.attN, f.from]]) {
                 if (g.armies.has(id) || now < f.start || this.motion.tracks.has(id) || !g.sees(g.player, cell)) continue;
                 const alpha = now < f.end ? 1 : Math.max(0, 1 - (now - f.end) / 500);
-                const known = g.intel(g.player, owner, cell).exact;
-                tokens.push({ id, owner, type: known ? type : null, n: known ? n : null, echelon: echelonOf(n).mark, wx: G.cx[cell], wy: G.cy[cell], mine: owner === g.player, facing: 1, alpha });
+                const k = g.intel(g.player, owner, cell);
+                tokens.push({ id, owner, type: k.exact ? type : null, n: k.exact ? n : null, echelon: echelonOf(n).mark,
+                    level: k.levels && k.exact ? g.techLevel(owner, UNIT_BRANCH[type]) : null, wx: G.cx[cell], wy: G.cy[cell], mine: owner === g.player, facing: 1, alpha });
             }
         }
         if (real) tokens.sort((p, q) => p.wy - q.wy);
@@ -3216,6 +3262,18 @@ class MapView {
         ctx.lineWidth = t.selected ? 3 : t.flanked || t.noSupply ? 2.6 : 1.6;
         ctx.strokeStyle = t.selected ? '#fff' : t.flanked ? '#e05a47' : t.noSupply ? '#ff9f1c' : INK;
         ctx.strokeRect(x0, y0, w, hh);
+        if (t.level > 0 && hexPx >= 8) {   // galones bajo la ficha: nivel de su rama de tropa
+            const cw = Math.max(5, w * 0.2), ch = Math.max(2.5, hh * 0.14), gap = ch + 1.8;
+            ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+            for (let i = 0; i < t.level; i++) {
+                const cy = y0 + hh + 3 + ch + i * gap;
+                for (const [color, width] of [[INK, 3.6], [SIGNAL, 1.8]]) {
+                    ctx.strokeStyle = color; ctx.lineWidth = width;
+                    ctx.beginPath(); ctx.moveTo(x - cw, cy); ctx.lineTo(x, cy - ch); ctx.lineTo(x + cw, cy); ctx.stroke();
+                }
+            }
+            ctx.lineCap = 'butt'; ctx.lineJoin = 'miter';
+        }
         if (t.n === null) {   // tamaño desconocido: el escalón de la OTAN encima de la ficha
             ctx.font = font(Math.round(Math.max(10, hh * 0.55)), 700);
             ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
@@ -3286,7 +3344,8 @@ class GameUI {
             <li>${unitIcon('infantry', '#9aa57a')} Infantería &nbsp;${unitIcon('tank', '#9aa57a')} Blindados &nbsp;${unitIcon('artillery', '#9aa57a')} Artillería</li>
             <li><i class="line" style="border-top:3px solid ${SIGNAL}"></i>Autopista: <span data-legend="highway">⅓</span> de punto por tramo</li>
             <li><i class="line" style="border-top:2px solid #efe9d6"></i>Carretera: <span data-legend="road">½</span> punto por tramo</li>
-            <li><i class="line" style="border-top:3px solid #e3d9c0"></i>Fortificación</li>
+            <li><i class="line" style="border-top:3px solid #e3d9c0"></i>Fortificación: sacos terreros; con la rama Fortificación, hormigón (gris), búnkeres (con búnker) y casamatas (muro doble). Rayada: no sabes su nivel</li>
+            <li>${galones(2)} Galones bajo la ficha: nivel investigado en la rama de su tipo de tropa. Ficha vacía con II, III, X o XX: ejército sin identificar y su tamaño (batallón 1–3, regimiento 4–9, brigada 10–24, división 25 o más)</li>
             <li>★ capital &nbsp; ● ciudad &nbsp; A rayas: territorio en disputa (ocupado en guerra)</li>
             <li>Terreno (coste de mover, defensa): <span data-legend="terrain"></span></li>
             <li><i class="line" style="border-top:3px solid #4a86a0"></i>Río: <span data-legend="river"></span>; quien defiende tras él, ×${String(CONFIG.RIVER_DEFENSE).replace('.', ',')}</li>
