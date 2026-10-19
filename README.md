@@ -43,6 +43,17 @@ En el mapa, los galones bajo la ficha (o el borde de bronce, plata u oro de la p
 
 La niebla de guerra es obligatoria (y antes de elegir país no se ve ningún ejército): de un ejército enemigo a la vista solo se sabe de quién es y su tamaño aproximado, con el escalón de la OTAN sobre una ficha vacía (II batallón, III regimiento, X brigada, XX división). Su tipo y su número se conocen con Reconocimiento 2 o con un espía en la provincia; sus galones y el nivel de sus fortificaciones, con Reconocimiento 3 o con Agentes dobles.
 
+## Mando estratégico
+
+Para que una guerra larga no obligue a mover ficha a ficha, se manda en tres escalones. Cualquier ejército se puede mover a mano en cualquier momento: ese turno manda lo tuyo y al siguiente vuelve a su orden o a su operación.
+
+- **Órdenes de varios turnos** (ficha del ejército): marchar a, atacar, mantener, fortificar aquí y seguir a otro ejército. Mayúsculas + clic da la orden de marchar. Van por el camino más rápido, atacan solo con la ventaja que marques (1,8, 1,3 o 1 a 1; con niebla, contra lo peor del escalón enemigo), se apartan si los rodean y se cancelan tras tres turnos sin paso. Se cumplen solas al terminar el turno o ya con «Ejecutar órdenes» (tecla O). El camino y los turnos que faltan se ven en el mapa.
+- **Operaciones** (herramienta Operación, tecla 5, y pestaña Mando): una flecha de ofensiva hasta un objetivo, una línea de defensa por tu territorio o una zona de reunión de reserva, con sus ejércitos asignados. La ofensiva avanza y ataca hasta tomar el objetivo; la defensa cubre primero las casillas más amenazadas, contraataca y puede fortificar; la reserva manda ejércitos a las operaciones que piden ayuda. Cada una puede ser manual (solo dibuja y calcula), asistida (al terminar el turno enseña lo que haría y confirmas) o automática. Al salir de una ciudad dejan una infantería de guarnición. Tu estado mayor lleva 3 a la vez, hasta 6 con Doctrina, y una más por cada 20 provincias.
+- **Plantillas y refuerzos**: siete plantillas de serie (guarnición, brigadas de infantería, mecanizada y acorazada, punta de lanza, grupo de artillería y división) y hasta doce propias. Con oro por turno, una operación recluta su plantilla (o la sugerida según su tipo, su objetivo y el terreno) en las ciudades más cercanas; las tropas marchan a la zona de reunión y, completa, entra en la operación.
+- **Directiva nacional** (pestaña Mando): postura (defensa total, desgaste, ofensiva limitada o guerra total), objetivos estratégicos marcados desde la ficha de cada provincia, con aviso al cumplirlos, y un presupuesto opcional (apagado al empezar) que reparte parte de la renta entre refuerzos, investigación, fortificación y carreteras. Las operaciones se agrupan por frente, con prioridad alta, media o baja; un frente nuevo propone una línea en la frontera y una ofensiva. La retaguardia manda a la reserva lo que sobra en las ciudades sin peligro. De lejos se ve una ficha por operación y, al volver al turno, un parte de operaciones.
+
+La IA manda con el mismo sistema: en cada frente, una ofensiva si es lo bastante fuerte y una línea si no. Sus ofensivas se ven venir con un espía en la provincia de salida o del objetivo, o con Reconocimiento aéreo.
+
 ## Archivos
 
 | Archivo | Qué es |
@@ -59,6 +70,7 @@ La niebla de guerra es obligatoria (y antes de elegir país no se ve ningún ej�
 | `tools/projection-world.mjs` | La proyección Equal Earth del mapa del mundo. |
 | `tools/build-terrain.mjs` | Añade al `europa-data.js` existente el terreno real por casilla y los ríos, y genera `relieve.png`. Descarga los datos la primera vez a `tools/cache/` (unos 50 s). |
 | `tools/smoke-research.mjs` | Pruebas del motor y de la interfaz en el navegador (Playwright): investigación, sus efectos en las reglas, la IA, la inteligencia y las insignias. |
+| `tools/smoke-mando.mjs` | Pruebas del mando estratégico en el navegador (Playwright): órdenes de varios turnos, operaciones, plantillas y refuerzos, directiva, teatros y la IA con operaciones. |
 | `tools/smoke-vista.mjs` | Prueba en el navegador (Playwright): empieza una partida, comprueba la vista realista y las animaciones y guarda capturas. |
 | `tools/perf-mapa.mjs` | Mide cuánto cuesta dibujar el mapa al arrastrar y al hacer zoom, en las dos vistas y los dos mapas. |
 | `tools/smoke-mundo.mjs` | Prueba en el navegador (Playwright) del selector de mapas y del mapa del mundo: relieve, turnos de la IA, fotogramas y cargar una partida del otro mapa. |
