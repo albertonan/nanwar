@@ -770,6 +770,41 @@ const CHECKS = [
         key('m');
         T.ok(document.querySelector('#map-menu').hidden && ui.view.showOps, 'todo como estaba');
         return true;
+    }],
+    ['Carreteras · la casilla «Autopista» va en el panel de la carretera, no en la barra', () => {
+        T.uiStart('es');
+        T.ok(!document.querySelector('#tools [data-action="highway"]'), 'fuera de la barra de herramientas');
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: '2' }));
+        const tick = document.querySelector('#confirm [data-action="highway"]');
+        T.ok(tick && !document.querySelector('#confirm').hidden, 'en el panel de la carretera');
+        tick.click();
+        T.eq([ui.highway, document.querySelector('#confirm [data-action="highway"]').getAttribute('aria-pressed')], [true, 'true'], 'marcada');
+        document.querySelector('#confirm [data-action="highway"]').click();
+        return true;
+    }],
+    ['Carreteras · elegir un tramo existente y pasarlo a autopista pagando solo la diferencia', () => {
+        const g = T.uiStart('es'), es = g.player;
+        g.nations[es].gold = 100000;
+        const cities = PROVINCES.filter(p => g.owner[p.city] === es);
+        const a = cities[0].city, b = cities.map(p => p.city).find(c => c !== a && g.planRoad(es, a, x => x === c, 1)?.path.length > 4);
+        const plan = g.planRoad(es, a, x => x === b, 1);
+        g.buildRoad(es, plan);
+        const mid = plan.path[Math.floor(plan.path.length / 2)];
+        const st = g.roadStretch(es, mid);
+        T.eq(st.edges.length, plan.path.length - 1, 'el tramo va de ciudad a ciudad');
+        const full = g.planRoad(es, a, x => x === b, 2);   // por las mismas casillas, como autopista
+        const fresh = Math.round(plan.path.slice(0, -1).reduce((s, c, i) => s + (CONFIG.ROAD_COST + CONFIG.HIGHWAY_COST) * Math.max(terrainOf(c).cost, terrainOf(plan.path[i + 1]).cost) + 0, 0));
+        T.ok(st.cost < fresh, `mejorar (${st.cost}) cuesta menos que hacerla nueva (${fresh})`);
+        T.eq(full.cost, st.cost, 'el trazado de autopista por encima cuesta lo mismo que la mejora');
+        ui.setTool('road');
+        ui.clickCell(mid);
+        const btn = document.querySelector('[data-action="upgrade-stretch"]');
+        T.ok(btn && btn.textContent.includes(String(st.cost)), 'el panel ofrece la mejora con su precio');
+        const gold = g.nations[es].gold;
+        btn.click();
+        T.eq([g.nations[es].gold, plan.path.slice(0, -1).every((c, i) => g.road[c * 6 + G.dirTo(c, plan.path[i + 1])] === 2)], [gold - st.cost, true], 'autopista y cobrado');
+        T.eq(g.roadStretch(es, mid), null, 'ya no queda carretera que mejorar');
+        return true;
     }]
 ];
 

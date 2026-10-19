@@ -180,6 +180,11 @@
             padding: 7px 10px; border-radius: 6px; font-size: 13px; line-height: 1.45; max-width: 290px; z-index: 4;
         }
         #legend { position: absolute; right: 14px; bottom: 14px; font-size: 12.5px; padding: 6px 10px; }
+        #confirm.road { left: 384px; transform: none; flex-wrap: wrap; width: min(540px, calc(100% - 400px)); gap: 8px 12px; }
+        #confirm.road > span:not(.road-price) { flex: 1 1 100%; }
+        #confirm .road-tick { flex-direction: row; gap: 6px; padding: 6px 10px; border: 1px solid var(--line); }
+        #confirm .road-tick kbd { display: inline; }
+        #confirm .road-price { flex: 1; }
         #map-menu { position: absolute; right: 14px; top: 14px; width: 290px; padding: 12px 14px 14px; z-index: 4; display: grid; gap: 8px; }
         #map-menu header { display: flex; justify-content: space-between; align-items: center; }
         #map-menu .layer { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: start; padding: 8px 10px; border-radius: 8px; background: var(--raised); cursor: pointer; }
@@ -418,6 +423,7 @@
             #confirm .btn { flex: 1; padding: 10px; }
             #legend, #tooltip { display: none !important; }
             #map-menu { left: 8px; right: 8px; top: 8px; width: auto; }
+            #confirm.road { left: 8px; right: 8px; width: auto; }
             .recruit .btn { font-size: 12.5px; }
             dialog .float { padding: 14px; }
             .slot { grid-template-columns: 1fr auto; }
@@ -1445,6 +1451,55 @@ class GameEngine {
         for (let c = goal; c !== from; c = prev.get(c)) path.push(prev.get(c));
         path.reverse();
         return { path, cost: Math.round(dist.get(goal)), cls };
+    }
+    // Tramo de carretera (sin autopista) que pasa por `cell`, de ciudad o cruce a ciudad o cruce, por territorio propio:
+    // lo que se puede pasar a autopista de una vez. Desde una ciudad o un cruce, todos los tramos que salen de ella.
+    roadStretch(id, cell) {
+        const degree = c => { let n = 0; for (let d = 0; d < 6; d++) if (this.road[c * 6 + d]) n++; return n; };
+        const edges = [], seen = new Set();
+        for (let d0 = 0; d0 < 6; d0++) {
+            if (this.road[cell * 6 + d0] !== 1) continue;
+            for (let u = cell, d = d0; ;) {
+                const v = G.nb[u * 6 + d], key = u < v ? u * 6 + d : v * 6 + (d + 3) % 6;
+                if (seen.has(key) || this.owner[u] !== id || this.owner[v] !== id) break;
+                seen.add(key);
+                edges.push([u, d]);
+                if (CITY_OF[v] >= 0 || degree(v) !== 2) break;
+                const next = [0, 1, 2, 3, 4, 5].find(k => k !== (d + 3) % 6 && this.road[v * 6 + k] === 1);
+                if (next === undefined) break;   // sigue en autopista: el tramo acaba aquí
+                u = v; d = next;
+            }
+        }
+        if (!edges.length) return null;
+        const mult = this.rules(id).roadCost;
+        const cost = Math.round(edges.reduce((sum, [u, d]) => sum + this.roadEdgeCost(u, d, 2, mult), 0));
+        const ends = [...new Set(edges.flatMap(([u, d]) => [u, G.nb[u * 6 + d]]))];
+        return { edges, cost, cls: 2, upgrade: true, ends };
+    }
+    upgradeRoad(id, plan) {
+        const n = this.nations[id];
+        if (!plan?.edges?.length || plan.cost > n.gold) return 0;
+        let done = 0;
+        for (const [u, d] of plan.edges) {
+            const v = G.nb[u * 6 + d];
+            if (this.road[u * 6 + d] !== 1 || this.owner[u] !== id || this.owner[v] !== id) continue;
+            this.road[u * 6 + d] = 2; this.road[v * 6 + (d + 3) % 6] = 2;
+            done++;
+        }
+        if (!done) return 0;
+        n.gold -= plan.cost;
+        this.roadVersion++;
+        return done;
+    }
+    // Tramos nuevos y mejorados de un trazado (para explicar el precio).
+    roadSplit(plan) {
+        let fresh = 0, up = 0;
+        for (let i = 0; i + 1 < plan.path.length; i++) {
+            const a = plan.path[i], d = G.dirTo(a, plan.path[i + 1]), cur = d >= 0 ? this.road[a * 6 + d] : 0;
+            if (cur >= plan.cls) continue;
+            if (cur) up++; else fresh++;
+        }
+        return { fresh, up };
     }
     // Construye los tramos que falten del trazado; devuelve cuántos se construyeron (0 si ya existían o no hay fondos).
     roadEdges() {
@@ -3253,6 +3308,13 @@ class GameEngine {
         this.log(`Construyes ${plan.cls === 2 ? 'autopista' : 'carretera'}: ${built} tramos por ${plan.cost}g.`);
         return true;
     }
+    playerUpgradeRoad(plan) {
+        if (this.over || !plan) return false;
+        if (plan.cost > this.nations[this.player].gold) { this.log(`Fondos insuficientes: la autopista cuesta ${plan.cost}g.`); return false; }
+        const n = this.upgradeRoad(this.player, plan);
+        if (n) this.log(`Pasas a autopista ${plural(n, 'tramo', 'tramos')} de carretera por ${plan.cost}g (solo la diferencia).`);
+        return n > 0;
+    }
     playerFortify(plan) {
         if (this.over || !plan) return false;
         if (!plan.cells.length) { this.log("Esas casillas ya están fortificadas o en obras."); return true; }
@@ -4239,6 +4301,13 @@ class MapView {
             }
         }
 
+        if (this.stretch) {   // tramo de carretera elegido para pasarlo a autopista
+            const p = new Path2D();
+            for (const [u, d] of this.stretch.edges) { const v = G.nb[u * 6 + d]; p.moveTo(G.cx[u], G.cy[u]); p.lineTo(G.cx[v], G.cy[v]); }
+            ctx.lineCap = 'round';
+            ctx.strokeStyle = INK; ctx.lineWidth = 6 / s; ctx.stroke(p);
+            ctx.setLineDash([6 / s, 4 / s]); ctx.strokeStyle = SIGNAL; ctx.lineWidth = 3.4 / s; ctx.stroke(p); ctx.setLineDash([]);
+        }
         if (this.hoverCell >= 0 && isLand(this.hoverCell) && this.hoverCell !== this.selectedCell) {
             const p = new Path2D(); this.hexPath(p, this.hoverCell);
             ctx.strokeStyle = real ? 'rgba(255,252,240,0.7)' : 'rgba(255,255,255,0.75)'; ctx.lineWidth = (real ? 1.1 : 1.4) / s; ctx.stroke(p);
@@ -4698,7 +4767,8 @@ class GameUI {
         game = g;
         this.game = g;
         this.legendKey = null;
-        Object.assign(this.view, { game: g, builtVersion: -1, builtRoads: -1, builtForts: -1, preview: null, hoverNation: -1 });
+        Object.assign(this.view, { game: g, builtVersion: -1, builtRoads: -1, builtForts: -1, preview: null, stretch: null, hoverNation: -1 });
+        this.stretch = null;
         this.tool = 'command';
         this.anchor = -1;
         this.choice = g.player;
@@ -4960,6 +5030,8 @@ class GameUI {
         if (g.owner[cell] !== g.player) { this.flash('Solo puedes construir en tu territorio.'); return; }
         const fort = this.tool === 'fort';
         this.pending = null;
+        this.stretch = fort ? null : g.roadStretch(g.player, cell);
+        this.view.stretch = this.stretch;
         if (this.anchor < 0 || (cell === this.anchor && !fort)) {
             this.anchor = cell;
         } else {
@@ -5072,6 +5144,7 @@ class GameUI {
     setTool(id, draft = null) {
         if (this.game.player === null || this.game.over) return;
         this.tool = id;
+        this.stretch = this.view.stretch = null;
         this.opDraft = id === 'op' ? draft ?? { kind: this.opDraft?.kind ?? 'ofensiva', cells: [], redraw: null } : null;
         this.anchor = -1;
         this.pending = null;
@@ -5093,6 +5166,7 @@ class GameUI {
 
     cancel() {
         if (this.mapMenu) { this.mapMenu = false; this.render(); return; }
+        if (this.stretch && !this.pending) { this.stretch = this.view.stretch = null; this.render(); return; }
         if (this.ordering) { this.ordering = null; this.render(); return; }
         if (this.proposal) { this.endProposal(); return; }
         if (this.tool === 'op' && this.opDraft?.cells.length) { this.opDraft.cells.pop(); this.render(); return; }
@@ -5276,6 +5350,9 @@ class GameUI {
                 if (this.installPrompt) { this.installPrompt.prompt(); this.installPrompt.userChoice.finally(() => { this.installPrompt = null; this.renderTop(); }); }
                 return;
             case 'confirm-build': this.confirmBuild(); return;
+            case 'upgrade-stretch':
+                if (this.stretch && g.playerUpgradeRoad(this.stretch)) { this.stretch = this.view.stretch = null; }
+                break;
             case 'cancel-build': this.cancel(); return;
             case 'stop-build': this.setTool('command'); return;
             case 'highway': this.toggleHighway(); return;
@@ -5622,13 +5699,9 @@ class GameUI {
     renderTools() {
         const playing = this.game.player !== null && !this.game.over;
         const r = this.myRules();
-        // Con la carretera activa aparece la casilla «Autopista»: mismo trazado, más caro y más rápido.
-        const highway = () => this.tool !== 'road' ? '' : `
-            <button class="tool tick ${this.highway ? 'on' : ''}" data-action="highway" aria-pressed="${this.highway}" title="Construir como autopista, o mejorar a autopista la carretera que ya haya (+${decimal(CONFIG.HIGHWAY_COST * r.roadCost)} de oro por tramo). Tecla A" ${playing ? '' : 'disabled'}>
-                <span class="box" aria-hidden="true">${this.highway ? '✓' : ''}</span>Autopista<kbd>A</kbd></button>`;
         $('#tools').innerHTML = TOOLS.map(t => `
             <button class="tool ${this.tool === t.id ? 'on' : ''}" data-action="tool" data-tool="${t.id}" title="${typeof t.title === 'function' ? t.title(r) : t.title}" ${playing ? '' : 'disabled'}>
-                ${t.id === 'road' && this.highway ? ICONS.highway : t.icon}${t.label}<kbd>${t.key}</kbd></button>${t.id === 'road' ? highway() : ''}`).join('') + `<hr>
+                ${t.id === 'road' && this.highway ? ICONS.highway : t.icon}${t.label}<kbd>${t.key}</kbd></button>`).join('') + `<hr>
             <button class="tool ${this.mapMenu ? 'on' : ''}" data-action="map-menu" aria-expanded="${this.mapMenu}" title="Vista del mapa y capas: sencilla o realista, logística, operaciones (M)">
                 ${ICONS.layers}Mapa<kbd>M</kbd></button>
             <button class="tool mobile-only" data-action="open-drawer" ${playing ? '' : 'disabled'}>${ICONS.globe}Países</button>`;
@@ -6056,6 +6129,7 @@ class GameUI {
 
     renderConfirm() {
         const g = this.game, el = $('#confirm'), plan = this.pending;
+        el.classList.toggle('road', this.tool === 'road' && g.player !== null && !g.over && !this.proposal);
         if (this.proposal) {
             const pr = this.proposal, moves = pr.ghost.filter(e => e.kind === 'move').length, fights = pr.ghost.filter(e => e.kind === 'battle').length;
             const names = pr.ids.map(id => g.ops.get(id)?.name).filter(Boolean).map(esc).join(', ');
@@ -6067,10 +6141,12 @@ class GameUI {
                 <button class="btn ghost" data-action="assist-back">Volver</button>`;
             return;
         }
+        if (this.tool === 'road' && g.player !== null && !g.over) { this.renderRoadBar(el); return; }
         if (!plan || g.player === null) {
             // Con el dedo, mientras se construye, un botón visible para terminar (no hay clic derecho ni Esc).
             el.hidden = !(this.touch && ['road', 'fort'].includes(this.tool) && g.player !== null);
-            if (!el.hidden) el.innerHTML = `<span class="small">${this.anchor < 0 ? 'Toca una casilla tuya para empezar' : 'Toca dónde termina la obra'}</span>
+            if (el.hidden) el.innerHTML = '';
+            else el.innerHTML = `<span class="small">${this.anchor < 0 ? 'Toca una casilla tuya para empezar' : 'Toca dónde termina la obra'}</span>
                 <button class="btn" data-action="stop-build">Terminar obras</button>`;
             return;
         }
@@ -6082,6 +6158,30 @@ class GameUI {
             <button class="btn" data-action="cancel-build">Cancelar</button>`;
     }
 
+    // Panel de la herramienta Carretera: carretera o autopista, qué hacer, lo que cuesta el trazado (nuevo y mejorado)
+    // y, si la casilla elegida ya tiene carretera, pasar a autopista todo su tramo.
+    renderRoadBar(el) {
+        const g = this.game, r = this.myRules(), gold = g.nations[g.player].gold, plan = this.pending;
+        const per = cls => decimal((cls === 1 ? CONFIG.ROAD_COST : CONFIG.ROAD_COST + CONFIG.HIGHWAY_COST) * r.roadCost);
+        let body;
+        if (plan) {
+            const sp = g.roadSplit(plan), ok = plan.cost <= gold;
+            body = `<span>${[sp.fresh ? plural(sp.fresh, 'tramo nuevo', 'tramos nuevos') : '', sp.up ? `${plural(sp.up, 'tramo mejorado', 'tramos mejorados')} (solo la diferencia)` : ''].filter(Boolean).join(' y ') || 'Ya está hecho'}
+                de ${plan.cls === 2 ? 'autopista' : 'carretera'}: <b style="color:${ok ? 'var(--signal)' : 'var(--war)'}">${plan.cost} de oro</b></span>
+                <button class="btn primary" data-action="confirm-build" ${ok ? '' : 'disabled'}>Confirmar</button>
+                <button class="btn" data-action="cancel-build">Cancelar</button>`;
+        } else body = `<span class="small">${this.anchor < 0 ? `${this.touch ? 'Toca' : 'Haz clic en'} una casilla tuya para empezar, o en una carretera para mejorar su tramo.`
+            : `${this.touch ? 'Toca' : 'Haz clic en'} donde termina el tramo: se construye el camino más barato.`}</span>`;
+        const st = this.stretch, stOk = st && st.cost <= gold;
+        el.hidden = false;
+        el.innerHTML = `<button class="tool tick road-tick ${this.highway ? 'on' : ''}" data-action="highway" aria-pressed="${this.highway}" title="Construir como autopista, o mejorar a autopista la carretera que ya haya (tecla A)">
+                <span class="box" aria-hidden="true">${this.highway ? '✓' : ''}</span>Autopista<kbd>A</kbd></button>
+            <span class="small muted road-price">${this.highway ? `⅓ de punto por tramo, ${per(2)} de oro (${decimal(CONFIG.HIGHWAY_COST * r.roadCost)} si ya hay carretera)` : `½ punto por tramo, ${per(1)} de oro`} × terreno</span>
+            ${body}
+            ${st && !plan ? `<button class="btn" data-action="upgrade-stretch" ${stOk ? '' : 'disabled'} title="De ciudad o cruce a ciudad o cruce">Pasar a autopista este tramo (${plural(st.edges.length, 'tramo', 'tramos')}, ${st.cost} de oro)</button>` : ''}
+            ${plan ? '' : '<button class="btn ghost" data-action="stop-build">Terminar obras</button>'}`;
+    }
+
     renderHint() {
         const g = this.game, el = $('#hint');
         let text;
@@ -6090,7 +6190,7 @@ class GameUI {
         else if (g.over) text = '';
         else if (this.tool === 'cities') text = 'Ciudades: haz clic en tus provincias para añadirlas o quitarlas de la selección.';
         else if (this.tool === 'fort') text = this.anchor < 0 ? 'Fortificar: haz clic en una casilla tuya.' : 'Clic en otra casilla para fortificar la línea, o en la misma para solo esa. Clic derecho para terminar.';
-        else if (this.tool !== 'command') text = this.anchor < 0 ? `${this.highway ? 'Autopista (A para quitarla)' : 'Carretera (A para autopista)'}: haz clic en una casilla tuya para empezar.` : 'Haz clic donde termina el tramo; se construye el camino más barato. Clic derecho para terminar.';
+        else if (this.tool === 'road') text = '';   // lo explica su panel
         else if (this.proposal) text = 'Líneas blancas: lo que harían tus operaciones asistidas. Confirma, termina sin ellas o vuelve al turno.';
         else if (this.tool === 'op') text = `${OP_KINDS[this.opDraft.kind].name}: ${OP_KINDS[this.opDraft.kind].how}`;
         else if (this.ordering) text = this.ordering.kind === 'follow' ? 'Haz clic en el ejército tuyo al que debe seguir. Esc para cancelar.'
