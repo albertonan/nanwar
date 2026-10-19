@@ -624,7 +624,8 @@ class RealisticMap {
         if (pending) v.requestFrame();
     }
 
-    // Miniatura de un ejército: carro, pelotón o cañón sobre una peana del color del país.
+    // Miniatura de un ejército: carro, pelotón o cañón sobre una peana del color del país. Si no se sabe qué es
+    // (niebla de guerra sin inteligencia), un camión con lona y el escalón de la OTAN en lugar del número.
     drawArmy(ctx, o) {
         const { x, y, hexPx, color, type, n, mine, spent, flanked, noSupply, selected, moving, facing, now } = o;
         const alpha = (o.alpha ?? 1) * (spent ? 0.6 : 1);
@@ -659,13 +660,14 @@ class RealisticMap {
         ctx.translate(x, y + U * 0.22); ctx.scale(k * facing, k);
         if (type === 'tank') miniTank(ctx, now, moving, color);
         else if (type === 'artillery') miniGun(ctx, now, moving);
+        else if (type === null) miniTruck(ctx, now, moving);
         else { miniSoldier(ctx, -8, -1, now, moving, 0); miniSoldier(ctx, 9, -1, now, moving, 2.1); miniSoldier(ctx, 0.5, 1.5, now, moving, 1.1); }
         ctx.restore();
         ctx.save();
         const dpr = this.view.dpr;
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.globalAlpha = alpha;
-        const t = String(n);
+        const t = n === null ? o.echelon : String(n);
         ctx.font = `700 ${Math.round(Math.max(10, Math.min(15, U * 0.62)))}px 'Barlow Semi Condensed', Bahnschrift, 'Arial Narrow', sans-serif`;
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         const w = Math.max(ctx.measureText(t).width + 8, 16), by = y + U * 0.82;
@@ -700,6 +702,18 @@ function miniTank(ctx, now, moving, color) {
     ctx.fillStyle = '#7d874c'; miniRect(ctx, -7, -15.5, 13, 6, 3); ctx.fill();
     ctx.fillStyle = '#3e4428'; ctx.fillRect(5, -13.8, 14, 2.2); ctx.fillRect(18, -14.3, 2.2, 3.2);
     ctx.fillStyle = color; ctx.beginPath(); ctx.arc(-1.5, -12.5, 2.1, 0, TAU); ctx.fill(); ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 0.6; ctx.stroke();
+}
+function miniTruck(ctx, now, moving) {
+    ctx.translate(0, moving ? Math.sin(now / 50) * 0.3 : 0);
+    ctx.fillStyle = '#2a2a22';
+    for (const x of [-9, 0, 9]) { ctx.beginPath(); ctx.arc(x, -1.5, 2.6, 0, TAU); ctx.fill(); }
+    ctx.fillStyle = '#4b5530'; miniRect(ctx, -14, -6, 28, 4, 1.5); ctx.fill();
+    ctx.fillStyle = '#6b7342'; miniRect(ctx, 6, -12, 8, 7, 2); ctx.fill();
+    ctx.fillStyle = 'rgba(200,220,230,0.5)'; ctx.fillRect(9.5, -11, 3.5, 2.8);
+    ctx.fillStyle = '#7a7d5c';
+    ctx.beginPath(); ctx.moveTo(-14, -6); ctx.lineTo(-14, -12); ctx.quadraticCurveTo(-4.5, -18, 5, -12); ctx.lineTo(5, -6); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 0.8;
+    ctx.beginPath(); ctx.moveTo(-9, -6); ctx.lineTo(-9, -14.5); ctx.moveTo(-3, -6); ctx.lineTo(-3, -15.6); ctx.stroke();
 }
 function miniGun(ctx, now, moving) {
     ctx.strokeStyle = '#4a4a35'; ctx.lineWidth = 2.2; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(-2, -4); ctx.lineTo(-15, 0); ctx.stroke();

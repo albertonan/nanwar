@@ -22,7 +22,7 @@ const port = server.address().port;
 // Ayudantes disponibles en la página (se definen en `setup`): T.game(seed), T.nation(key), T.eq(a, b, msg).
 const setup = () => {
     window.T = {
-        game(seed = 7) { const g = new GameEngine(seed); g.configure({ aggression: 'normal', alliances: 'ninguna', victory: 1, fog: false }); return g; },
+        game(seed = 7, fog = false) { const g = new GameEngine(seed); g.configure({ aggression: 'normal', alliances: 'ninguna', victory: 1, fog }); return g; },
         nation: key => E.countries.findIndex(c => c.key === key),
         eq(a, b, msg) { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${msg}: ${JSON.stringify(a)} ≠ ${JSON.stringify(b)}`); },
         ok(c, msg) { if (!c) throw new Error(msg); },
@@ -48,9 +48,9 @@ const setup = () => {
         },
         // Primer paso u → dirección d entre casillas de tierra que cumple la condición.
         // Empieza una partida en la interfaz con el país dado y devuelve su motor.
-        uiStart(key) {
+        uiStart(key, fog = false) {
             for (const d of document.querySelectorAll('dialog[open]')) d.close();
-            ui.setGame(T.game(7));
+            ui.setGame(T.game(7, fog));
             ui.choice = T.nation(key); ui.render();
             document.querySelector('[data-action="start"]').click();
             return ui.game;
@@ -398,6 +398,80 @@ const CHECKS = [
         T.ok(g.nations[p].tech.done.has('infanteria1'), 'terminada');
         T.ok(/Investigación terminada/.test($('#toasts').textContent), 'aviso en pantalla');
         T.ok($('#end-turn').classList.contains('nudge'), 'laboratorio libre otra vez');
+        return true;
+    }],
+
+    ['F5 · Reconocimiento amplía la visión', () => {
+        const g = T.game(7, true), es = T.nation('es');
+        g.start(es);
+        const seen = () => g.visibleCells(es).reduce((s, x) => s + x, 0);
+        const v0 = seen();
+        T.learn(g, es, 'reconocimiento1');
+        const v1 = seen();
+        T.ok(v1 > v0, `patrullas: ${v0} → ${v1}`);
+        T.learn(g, es, 'reconocimiento2', 'reconocimiento3');
+        T.ok(seen() > v1, 'reconocimiento aéreo');
+        return true;
+    }],
+    ['F5 · de un ejército enemigo a la vista solo se sabe el escalón, salvo con inteligencia', () => {
+        const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const cell = T.plainPair(g, es)[1];
+        const a = g.newArmy(fr, cell, { infantry: 5, tank: 0, artillery: 0 }, 0); g.settle(a);
+        T.ok(g.sees(es, cell), 'a la vista');
+        T.eq(g.armyView(es, a), { type: null, n: null, echelon: 'III', level: null }, 'sin inteligencia');
+        T.eq(echelonOf(3).mark, 'II', 'batallón'); T.eq(echelonOf(10).mark, 'X', 'brigada'); T.eq(echelonOf(25).mark, 'XX', 'división');
+        T.learn(g, es, 'reconocimiento1', 'reconocimiento2');
+        T.eq(g.armyView(es, a), { type: 'infantry', n: 5, echelon: 'III', level: null }, 'Inteligencia de señales');
+        T.learn(g, es, 'reconocimiento3');
+        T.learn(g, fr, 'infanteria1');
+        T.eq(g.armyView(es, a).level, 1, 'Reconocimiento aéreo: galones');
+        T.eq(g.fortLevel(es, cell), 0, 'nivel de fortificación visible');
+        const h = T.game(7, false); h.start(es);
+        const b = [...h.armies.values()].find(x => x.owner === fr);
+        T.eq(h.armyView(es, b).n, countUnits(b.units), 'sin niebla se ve todo');
+        return true;
+    }],
+    ['F5 · espías más baratos, fiables y duraderos', () => {
+        const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        const pid = PROVINCES.find(p => p.country === fr && CAPITAL_OF[p.city] < 0).id;
+        T.eq(g.spyOdds(pid).success, 0.7, 'éxito base');
+        T.learn(g, es, 'espionaje1');
+        g.nations[es].gold = 1000;
+        g.playerSendSpy(pid);
+        T.eq(g.nations[es].gold, 960, 'espía a 40');
+        T.eq(g.spyOdds(pid).success, 0.8, 'informa más');
+        const caught0 = g.spyOdds(pid).caught;
+        T.learn(g, es, 'espionaje2');
+        T.ok(g.spyOdds(pid).caught < caught0, `captura ${caught0} → ${g.spyOdds(pid).caught}`);
+        T.eq(g.spyOdds(pid).caught, 0.04, 'riesgo el primer turno');
+        return true;
+    }],
+    ['F5 · Agentes dobles: el informe cubre las provincias vecinas y la investigación', () => {
+        const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        const p = PROVINCES.find(q => q.country === fr && CAPITAL_OF[q.city] < 0 && [...PROVINCE_NEIGHBORS[q.id]].some(x => PROVINCES[x].country === fr));
+        const nb = [...PROVINCE_NEIGHBORS[p.id]].find(x => PROVINCES[x].country === fr);
+        g.spies.set(p.id, { since: g.turn, revealedTurn: g.turn }); g.spyVersion++;
+        T.ok(g.visibleCells(es)[p.city] === 1, 've la provincia espiada');
+        T.ok(!g.knowsResearch(es, fr), 'sin agentes dobles no sabe qué investiga (no es la capital)');
+        T.learn(g, es, 'espionaje1', 'espionaje2', 'espionaje3');
+        T.ok(PROVINCES[nb].cells.every(c => g.visibleCells(es)[c] === 1), 've la provincia vecina');
+        T.ok(g.knowsResearch(es, fr), 'sabe qué investiga');
+        return true;
+    }],
+    ['F5 · la interfaz no enseña lo que no sabes', () => {
+        const g = T.uiStart('es', true), p = g.player, fr = T.nation('fr');
+        g.declareWar(p, fr);
+        const cell = T.plainPair(g, p)[1];
+        g.settle(g.newArmy(fr, cell, { infantry: 0, tank: 6, artillery: 0 }, 0));
+        ui.select(cell); ui.render();
+        const card = $('#card').textContent;
+        T.ok(/sin identificar/.test(card), 'tarjeta: sin identificar');
+        T.ok(!/6 tanque/i.test(card), 'tarjeta: no dice el tipo ni el número');
+        T.learn(g, p, 'reconocimiento1', 'reconocimiento2'); ui.render();
+        T.ok(/6 tanque/.test($('#card').textContent), 'con Inteligencia de señales sí');
         return true;
     }]
 ];

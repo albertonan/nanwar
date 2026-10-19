@@ -749,6 +749,21 @@ E.countries.forEach((c, i) => { CAPITAL_OF[PROVINCES[c.capital].city] = i; });
 const START_PROVINCES = E.countries.map((c, i) => E.provinces.filter(p => p.country === i).length);
 const CELL_VALUE = new Float32Array(G.N);
 for (const p of PROVINCES) for (const c of p.cells) CELL_VALUE[c] = p.value / p.cells.length;
+// Provincias que comparten frontera con cada provincia.
+const PROVINCE_NEIGHBORS = PROVINCES.map(() => new Set());
+for (const i of G.land) for (let d = 0; d < 6; d++) {
+    const j = G.nb[i * 6 + d];
+    if (j >= 0 && isLand(j) && G.prov[j] !== G.prov[i]) PROVINCE_NEIGHBORS[G.prov[i]].add(G.prov[j]);
+}
+// Escalones de la OTAN: lo que se ve de un ejército enemigo sin identificar es su tamaño aproximado.
+const ECHELONS = [
+    { max: 3, mark: 'II', name: 'batallón', range: '1–3' },
+    { max: 9, mark: 'III', name: 'regimiento', range: '4–9' },
+    { max: 24, mark: 'X', name: 'brigada', range: '10–24' },
+    { max: Infinity, mark: 'XX', name: 'división', range: '25 o más' }
+];
+const echelonOf = n => ECHELONS.find(e => n <= e.max);
+const FORT_LEVELS = ['sacos terreros', 'hormigón armado', 'búnkeres', 'casamatas'];
 const RESOURCES = E.resources.map(r => ({ ...r, typeName: E.resourceTypes[r.type], province: G.prov[r.cell] }));
 const RESOURCE_AT = new Map(RESOURCES.map(r => [r.cell, r]));
 
@@ -1706,15 +1721,15 @@ class GameEngine {
     // Casillas que ve la nación: su territorio y el de sus aliados con una franja alrededor, el entorno de sus
     // ejércitos y los de sus aliados, y las provincias de las que un espía ha informado este turno.
     visibleCells(id) {
-        const key = `${id}:${this.version}:${this.armyVersion}:${this.blocVersion}:${this.turn}:${this.spyVersion}`;
+        const key = `${id}:${this.version}:${this.armyVersion}:${this.blocVersion}:${this.turn}:${this.spyVersion}:${this.techVersion}`;
         if (this.visCache?.key === key) return this.visCache.map;
-        const R = Math.max(CONFIG.VISION_TERRITORY, CONFIG.VISION_ARMY);
+        const rules = this.rules(id), R = Math.max(rules.visionTerritory, rules.visionArmy);
         const range = new Int8Array(G.N).fill(-1);
         const buckets = Array.from({ length: R + 1 }, () => []);
         const seed = (c, r) => { if (range[c] < r) { range[c] = r; buckets[r].push(c); } };
         const friend = o => o === id || this.allied(id, o);
-        for (const i of G.land) if (friend(this.owner[i])) seed(i, CONFIG.VISION_TERRITORY);
-        for (const a of this.armies.values()) if (friend(a.owner)) seed(a.cell, CONFIG.VISION_ARMY);
+        for (const i of G.land) if (friend(this.owner[i])) seed(i, rules.visionTerritory);
+        for (const a of this.armies.values()) if (friend(a.owner)) seed(a.cell, rules.visionArmy);
         for (let r = R; r > 0; r--) {
             for (const u of buckets[r]) {
                 if (range[u] !== r) continue;
@@ -1728,19 +1743,61 @@ class GameEngine {
         }
         const map = new Uint8Array(G.N);
         for (let i = 0; i < G.N; i++) if (range[i] >= 0) map[i] = 1;
-        if (id === this.player) for (const [pid, s] of this.spies) if (s.revealedTurn === this.turn) for (const c of PROVINCES[pid].cells) map[c] = 1;
+        if (id === this.player) for (const pid of this.spiedProvinces()) for (const c of PROVINCES[pid].cells) map[c] = 1;
         this.visCache = { key, map };
         return map;
     }
     sees(id, cell) { return !this.settings.fog || id === null || this.visibleCells(id)[cell] === 1; }
 
+    // Provincias de las que un espía del jugador ha informado este turno; con Agentes dobles, también sus vecinas del
+    // mismo país.
+    spiedProvinces() {
+        const key = `${this.turn}:${this.spyVersion}:${this.techVersion}:${this.version}`;
+        if (this.spiedCache?.key === key) return this.spiedCache.set;
+        const set = new Set(), wide = this.player !== null && this.rules(this.player).spyWide;
+        for (const [pid, s] of this.spies) {
+            if (s.revealedTurn !== this.turn) continue;
+            set.add(pid);
+            const o = this.owner[PROVINCES[pid].city];
+            if (wide) for (const q of PROVINCE_NEIGHBORS[pid]) if (this.owner[PROVINCES[q].city] === o) set.add(q);
+        }
+        this.spiedCache = { key, set };
+        return set;
+    }
+    // Qué sabe `viewer` de las tropas y muros de `owner` en `cell`: tipo y número (exact) y niveles (galones y
+    // fortificación). Sin niebla, de lo propio y de los aliados, todo; si no, depende de Reconocimiento y de los espías.
+    intel(viewer, owner, cell) {
+        if (!this.settings.fog || viewer === null || owner === viewer || owner < 0 || this.allied(viewer, owner)) return { exact: true, levels: true };
+        const r = this.rules(viewer);
+        if (viewer === this.player && this.spiedProvinces().has(G.prov[cell])) return { exact: true, levels: r.spyWide || r.intelLevels };
+        return { exact: r.intelExact, levels: r.intelLevels };
+    }
+    // Cómo ve `viewer` un ejército: tipo y unidades si los conoce (si no, solo el escalón) y galones si conoce los niveles.
+    armyView(viewer, a) {
+        const k = this.intel(viewer, a.owner, a.cell), n = countUnits(a.units), type = dominantType(a.units);
+        return { type: k.exact ? type : null, n: k.exact ? n : null, echelon: echelonOf(n).mark, level: k.levels ? this.techLevel(a.owner, UNIT_BRANCH[type]) : null };
+    }
+    // Nivel de Fortificación del dueño de una casilla, si `viewer` lo conoce (null si no).
+    fortLevel(viewer, cell) {
+        const o = this.owner[cell];
+        return this.intel(viewer, o, cell).levels ? this.techLevel(o, 'fortificacion') : null;
+    }
+    // ¿Sabe `viewer` qué investiga `id`? Sin niebla sí; si no, con un espía que informe desde su capital o, con
+    // Agentes dobles, desde cualquier provincia suya.
+    knowsResearch(viewer, id) {
+        if (!this.settings.fog || viewer === id || this.allied(viewer, id)) return true;
+        if (viewer !== this.player) return false;
+        const wide = this.rules(viewer).spyWide;
+        return [...this.spiedProvinces()].some(pid => this.owner[PROVINCES[pid].city] === id && (wide || CAPITAL_OF[PROVINCES[pid].city] === id));
+    }
+
     spyOdds(pid) {
-        const p = PROVINCES[pid], s = this.spies.get(pid);
+        const p = PROVINCES[pid], s = this.spies.get(pid), r = this.rules(this.player);
         const hard = CAPITAL_OF[p.city] >= 0 || this.fort[p.city] === 1;
         const turns = s ? this.turn - s.since : 0;
         return {
-            success: hard ? CONFIG.SPY_SUCCESS_HARD : CONFIG.SPY_SUCCESS,
-            caught: Math.min(CONFIG.SPY_CATCH_MAX, (CONFIG.SPY_CATCH_BASE + CONFIG.SPY_CATCH_PER_TURN * turns) * (hard ? 1.5 : 1))
+            success: hard ? r.spySuccessHard : r.spySuccess,
+            caught: Math.min(r.spyCatchMax, (r.spyCatchBase + r.spyCatchPerTurn * turns) * (hard ? 1.5 : 1))
         };
     }
     canSpy(pid) {
@@ -1757,7 +1814,15 @@ class GameEngine {
                 const a = this.armyOn(c);
                 if (a && a.owner !== this.player && !this.allied(this.player, a.owner)) for (const k of UNIT_KEYS) units[k] += a.units[k];
             }
-            this.log(`Tu espía en ${p.name} informa: ${countUnits(units) ? unitWords(units) : 'no hay tropas enemigas'}.`);
+            let extra = '';
+            if (this.rules(this.player).spyWide) {   // Agentes dobles: también muros e investigación
+                const o = this.owner[p.city], t = this.nations[o].tech;
+                const forts = p.cells.filter(c => this.fort[c]).length;
+                if (forts) extra += ` ${plural(forts, 'casilla fortificada', 'casillas fortificadas')} (${FORT_LEVELS[this.techLevel(o, 'fortificacion')]}).`;
+                extra += t.current.length ? ` ${this.nm(o)} investiga ${t.current.map(x => `${TECH_BY_ID.get(x).name} (faltan ${this.techTurns(o, x) - this.techProgress(o, x)})`).join(' y ')}.`
+                    : ` ${this.nm(o)} no investiga nada ahora.`;
+            }
+            this.log(`Tu espía en ${p.name} informa: ${countUnits(units) ? unitWords(units) : 'no hay tropas enemigas'}.${extra}`);
         } else {
             this.log(`Tu espía en ${p.name} no consigue información este turno.`);
         }
@@ -1784,8 +1849,9 @@ class GameEngine {
     playerSendSpy(pid) {
         if (this.over || !this.canSpy(pid)) return;
         const n = this.nations[this.player], p = PROVINCES[pid];
-        if (n.gold < CONFIG.SPY_COST) { this.log(`No tienes oro para un espía (cuesta ${CONFIG.SPY_COST}).`); return; }
-        n.gold -= CONFIG.SPY_COST;
+        const cost = this.rules(this.player).spyCost;
+        if (n.gold < cost) { this.log(`No tienes oro para un espía (cuesta ${cost}).`); return; }
+        n.gold -= cost;
         this.spies.set(pid, { since: this.turn, revealedTurn: -1 });
         this.log(`Envías un espía a ${p.name} (${this.nm(this.owner[p.city])}).`);
         this.spyReport(pid);
@@ -3064,21 +3130,24 @@ class MapView {
             const wx = pose ? pose.x : G.cx[a.cell], wy = pose ? pose.y : G.cy[a.cell];
             if (!seen(wx, wy, a.cell)) continue;
             const mine = a.owner === g.player;
-            tokens.push({ id: a.id, owner: a.owner, type: dominantType(a.units), n: countUnits(a.units), wx, wy, mine,
+            const view = g.armyView(g.player, a);
+            tokens.push({ id: a.id, owner: a.owner, type: view.type, n: view.n, echelon: view.echelon, level: view.level, wx, wy, mine,
                 spent: mine && g.mp(a) === 0, noSupply: mine && !g.inSupply(a.owner, a.cell),
                 flanked: g.hostileSides(a.owner, a.cell) >= CONFIG.FLANKED_SIDES, selected: a.cell === this.selectedCell && !pose?.moving,
                 moving: !!pose?.moving, facing: this.motion.facingOf(a.id, pose), alpha: 1 });
         }
         for (const gh of this.motion.ghosts(now)) {
             if (!seen(gh.p.x, gh.p.y, gh.tr.cells[gh.tr.cells.length - 1])) continue;
-            tokens.push({ id: gh.id, owner: gh.tr.owner, type: gh.tr.type, n: gh.tr.n, wx: gh.p.x, wy: gh.p.y, mine: gh.tr.owner === g.player,
+            const known = g.intel(g.player, gh.tr.owner, gh.tr.cells[gh.tr.cells.length - 1]).exact;
+            tokens.push({ id: gh.id, owner: gh.tr.owner, type: known ? gh.tr.type : null, n: known ? gh.tr.n : null, echelon: echelonOf(gh.tr.n).mark, wx: gh.p.x, wy: gh.p.y, mine: gh.tr.owner === g.player,
                 moving: gh.p.moving, facing: this.motion.facingOf(gh.id, gh.p), alpha: 1 });
         }
         for (const f of this.motion.fx) {   // quien cae en combate se desvanece al terminar el choque
             for (const [id, owner, type, n, cell] of [[f.def, f.defOwner, f.defType, f.defN, f.cell], [f.att, f.attOwner, f.attType, f.attN, f.from]]) {
                 if (g.armies.has(id) || now < f.start || this.motion.tracks.has(id) || !g.sees(g.player, cell)) continue;
                 const alpha = now < f.end ? 1 : Math.max(0, 1 - (now - f.end) / 500);
-                tokens.push({ id, owner, type, n, wx: G.cx[cell], wy: G.cy[cell], mine: owner === g.player, facing: 1, alpha });
+                const known = g.intel(g.player, owner, cell).exact;
+                tokens.push({ id, owner, type: known ? type : null, n: known ? n : null, echelon: echelonOf(n).mark, wx: G.cx[cell], wy: G.cy[cell], mine: owner === g.player, facing: 1, alpha });
             }
         }
         if (real) tokens.sort((p, q) => p.wy - q.wy);
@@ -3142,10 +3211,19 @@ class MapView {
         ctx.beginPath();
         if (t.type === 'infantry') { ctx.moveTo(x0, y0); ctx.lineTo(x0 + w, y0 + hh); ctx.moveTo(x0 + w, y0); ctx.lineTo(x0, y0 + hh); ctx.stroke(); }
         else if (t.type === 'tank') { ctx.ellipse(x, y0 + hh / 2, w * 0.28, hh * 0.24, 0, 0, Math.PI * 2); ctx.stroke(); }
-        else { ctx.arc(x, y0 + hh / 2, hh * 0.17, 0, Math.PI * 2); ctx.fillStyle = INK; ctx.fill(); }
+        else if (t.type === 'artillery') { ctx.arc(x, y0 + hh / 2, hh * 0.17, 0, Math.PI * 2); ctx.fillStyle = INK; ctx.fill(); }
+        // sin tipo conocido: el marco queda vacío, como en un mapa militar
         ctx.lineWidth = t.selected ? 3 : t.flanked || t.noSupply ? 2.6 : 1.6;
         ctx.strokeStyle = t.selected ? '#fff' : t.flanked ? '#e05a47' : t.noSupply ? '#ff9f1c' : INK;
         ctx.strokeRect(x0, y0, w, hh);
+        if (t.n === null) {   // tamaño desconocido: el escalón de la OTAN encima de la ficha
+            ctx.font = font(Math.round(Math.max(10, hh * 0.55)), 700);
+            ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+            ctx.lineWidth = 3; ctx.strokeStyle = INK; ctx.fillStyle = '#ebe7d8';
+            ctx.strokeText(t.echelon, x, y0 - 3); ctx.fillText(t.echelon, x, y0 - 3);
+            ctx.globalAlpha = 1;
+            return;
+        }
         // número de unidades
         const n = String(t.n), r = Math.max(7, hh * 0.42);
         const bx = x0 + w, by = y0;
@@ -3359,17 +3437,21 @@ class GameUI {
         if (supply.length) lines.push(`Abastecida por ${supply.map(r => CONFIG.RESOURCE_ICON[r.type]).join('')}: +${Math.round(100 * Math.min(ownerRules.resIndustryMax, ownerRules.resIndustry * supply.length))} % de renta`);
         const sg = g.sieges.get(cell);
         if (sg) lines.push(`<span class="warn-text">Asediada por ${g.nm(sg.by)}: ${sg.held} de ${g.rules(sg.by).siegeTurns} turnos</span>`);
-        if (g.fort[cell]) lines.push(`Fortificada: defensa ×${decimal(ownerRules.fortDefense)}`);
+        if (g.fort[cell]) { const lv = g.fortLevel(g.player, cell); lines.push(lv === null ? 'Fortificada (no sabes de qué nivel)' : `Fortificada con ${FORT_LEVELS[lv]}: defensa ×${decimal(ownerRules.fortDefense)}`); }
         else if (g.fortWork.has(cell)) lines.push(`Fortificando: ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}`);
         if (!g.sees(g.player, cell)) lines.push('<span class="muted">Niebla de guerra: no sabes qué tropas hay</span>');
         else if (a) {
-            lines.push(`Ejército de ${g.nm(a.owner)}: ${this.unitsLong(a.units)}`);
+            const view = g.armyView(g.player, a), ech = ECHELONS.find(x => x.mark === view.echelon);
+            lines.push(view.n === null ? `Ejército de ${g.nm(a.owner)}: ${ech.name} sin identificar (${ech.range} unidades)` : `Ejército de ${g.nm(a.owner)}: ${this.unitsLong(a.units)}`);
             const sides = g.hostileSides(a.owner, cell);
             if (sides >= CONFIG.FLANKED_SIDES) lines.push(`<span class="warn-text">${sides >= CONFIG.SURROUNDED_SIDES ? 'Cercado' : 'Rodeado'} por ${sides} lados: ataque y defensa ×${g.flankFactor(a.owner, cell)}</span>`);
         }
         if (g.spies.has(G.prov[cell])) lines.push('Tienes un espía en esta provincia');
         if (g.player !== null && o === g.player && !g.inSupply(g.player, cell)) lines.push('<span style="color:#ffb347">Sin suministro</span>');
-        if (this.reachInfo?.attacks.has(cell) && a) {
+        if (this.reachInfo?.attacks.has(cell) && a && g.armyView(g.player, a).n === null) {
+            lines.push('<b style="color:#ffd166">Clic para atacar a un ejército sin identificar</b>');
+            lines.push('<span class="muted">Sin Reconocimiento 2 ni un espía en la provincia no hay previsión del combate.</span>');
+        } else if (this.reachInfo?.attacks.has(cell) && a) {
             const mine = this.selectedArmy();
             const fx = g.combatFactors(g.player, this.send, this.reachInfo.from.get(cell) ?? mine.cell, a, cell);
             const chance = g.winChance(fx.atk, fx.dfn), r = fx.atk / fx.dfn, n = countUnits(this.send);
@@ -3908,7 +3990,7 @@ class GameUI {
             <div class="field"><span>Alianzas al empezar</span>${seg('alliances', { reales: 'OTAN y OTSC', ninguna: 'Ninguna' }, s.alliances)}</div>
             <div class="field"><span>Niebla de guerra</span>${seg('fog', [['no', 'Ver todo'], ['si', 'Solo lo que ves']], s.fog ? 'si' : 'no')}
                 <p class="note">${s.fog
-                    ? `Solo ves las tropas en tu territorio y el de tus aliados, en una franja de ${CONFIG.VISION_TERRITORY} casillas alrededor y a ${CONFIG.VISION_ARMY} de tus ejércitos. Puedes enviar espías.`
+                    ? `Solo ves las tropas en tu territorio y el de tus aliados, en una franja de ${this.myRules().visionTerritory} casillas alrededor y a ${this.myRules().visionArmy} de tus ejércitos. Puedes enviar espías.`
                     : 'Ves todas las tropas de Europa.'}</p></div>
             <div class="field"><span>Para ganar</span>${seg('victory', [['0.5', '50 % de Europa'], ['0.75', '75 %'], ['1', 'Toda Europa']], s.victory)}</div>
             <div class="field"><span>Tu país</span>
@@ -3956,10 +4038,15 @@ class GameUI {
                 ${supplied ? '' : `<p class="note warn">Sin suministro: lejos de tus ciudades y de tu red de carreteras solo avanza una casilla por turno. Construye carreteras hasta el frente para abastecerlo (llegan a ${g.rules(p0).supplyRoad} casillas de la red).</p>`}
                 ${left > 0 ? `<p class="note">Haz clic en una casilla ${this.view.isRealistic() ? 'de la zona clara' : 'verde'} para mover o en una roja para atacar. Por carretera llegas más lejos; si no se ha movido este turno, siempre puede avanzar al menos una casilla.</p>` : ''}
             </section>`);
+        } else if (a && g.sees(p0, cell) && g.armyView(p0, a).n === null) {
+            const ech = echelonOf(countUnits(a.units));
+            sections.push(`<section class="sec"><h3>Ejército de ${g.nm(a.owner)}</h3>
+                <p class="small">Un ${ech.name} sin identificar (escalón ${ech.mark}: ${ech.range} unidades).</p>
+                <p class="note">Con Reconocimiento 2 o un espía en la provincia sabrías su tipo, su número y su fuerza.</p></section>`);
         } else if (a && g.sees(p0, cell)) {
             sections.push(`<section class="sec"><h3>Ejército de ${g.nm(a.owner)}</h3>
                 <div class="units">${UNIT_KEYS.filter(k => a.units[k] > 0).map(k => `<div class="unit-row">${unitIcon(k, g.nations[a.owner].color)}<div>${a.units[k]} ${CONFIG.TYPES[k].name.toLowerCase()}</div><span></span></div>`).join('')}</div>
-                <p class="small muted">Ataque ${unitPower(a.units, 'atk', g.rules(a.owner))}, defensa ${unitPower(a.units, 'def', g.rules(a.owner))}${g.fort[cell] ? `, ×${String(g.rules(g.owner[cell]).fortDefense).replace('.', ',')} por la fortificación` : ''}.</p></section>`);
+                <p class="small muted">Ataque ${unitPower(a.units, 'atk', g.rules(a.owner))}, defensa ${unitPower(a.units, 'def', g.rules(a.owner))}${g.fort[cell] ? (g.fortLevel(p0, cell) === null ? ', en una casilla fortificada' : `, ×${String(g.rules(g.owner[cell]).fortDefense).replace('.', ',')} por la fortificación`) : ''}.</p></section>`);
         }
 
         // Reclutar
@@ -3991,11 +4078,11 @@ class GameUI {
             if (spy) {
                 body = `<p class="small">${spy.revealedTurn === g.turn ? 'Tu espía ha informado este turno: ves las tropas de la provincia.' : 'Tu espía no ha conseguido informar este turno.'}
                     ${g.turn === spy.since ? 'Acaba de llegar.' : `Lleva ${plural(g.turn - spy.since, 'turno', 'turnos')} allí.`}</p>
-                    <p class="note">Cada turno informa con un ${pct(odds.success)} de probabilidad; el riesgo de que lo capturen el próximo turno es del ${pct(Math.min(CONFIG.SPY_CATCH_MAX, odds.caught + CONFIG.SPY_CATCH_PER_TURN))}.</p>
+                    <p class="note">Cada turno informa con un ${pct(odds.success)} de probabilidad; el riesgo de que lo capturen el próximo turno es del ${pct(Math.min(g.rules(p0).spyCatchMax, odds.caught + g.rules(p0).spyCatchPerTurn))}.</p>
                     <div class="row" style="margin-top:8px"><button class="btn" data-action="spy-recall" data-pid="${p.id}">Retirar el espía</button></div>`;
             } else {
                 body = `<p class="small">${seen ? 'Ahora mismo ves esta casilla.' : 'No ves qué tropas hay en esta provincia.'} Un espía informa de las tropas de toda la provincia cada turno (${pct(odds.success)}) hasta que lo capturan (${pct(odds.caught)} el primer turno, y más cada turno).</p>
-                    <div class="row" style="margin-top:8px"><button class="btn" data-action="spy-send" data-pid="${p.id}" ${g.canSpy(p.id) && g.nations[p0].gold >= CONFIG.SPY_COST ? '' : 'disabled'}>Enviar un espía (${CONFIG.SPY_COST} oro)</button></div>`;
+                    <div class="row" style="margin-top:8px"><button class="btn" data-action="spy-send" data-pid="${p.id}" ${g.canSpy(p.id) && g.nations[p0].gold >= g.rules(p0).spyCost ? '' : 'disabled'}>Enviar un espía (${g.rules(p0).spyCost} oro)</button></div>`;
             }
             sections.push(`<section class="sec"><h3>Espionaje</h3>${body}</section>`);
         }
@@ -4099,6 +4186,15 @@ class GameUI {
         set('highway', moveFraction(r.roadMove[2]));
         set('river', r.riverCrossing ? `cruzarlo sin carretera cuesta ${moveFraction(r.riverCrossing)} punto más` : 'tus pontoneros lo cruzan sin coste extra');
         set('siege', r.siegeTurns);
+    }
+    // Lo que sabes de la investigación de otro país: cuántas ha terminado y, si un espía informa, cuáles y qué investiga.
+    researchText(id) {
+        const g = this.game, s = g.nations[id].tech;
+        const head = plural(s.done.size, 'terminada', 'terminadas');
+        if (!g.knowsResearch(g.player, id)) return `${head}<br><span class="small muted">Un espía en su capital te diría cuáles.</span>`;
+        const names = [...s.done].map(x => TECH_BY_ID.get(x).name).join(', ');
+        const now = s.current.map(x => `${TECH_BY_ID.get(x).name} (faltan ${g.techTurns(id, x) - g.techProgress(id, x)})`).join(' y ');
+        return `${head}${names ? `: ${names}` : ''}<br><span class="small muted">${now ? `Investiga ${now}.` : 'No investiga nada ahora.'}</span>`;
     }
     myRules() { return this.game.player !== null ? this.game.rules(this.game.player) : BASE_RULES; }
 
@@ -4294,6 +4390,7 @@ class GameUI {
                         <dt>Capital</dt><dd>${esc(n.capitalName)}${g.owner[n.capitalCell] !== t ? ` (en manos de ${g.nm(g.owner[n.capitalCell])})` : ''}</dd>
                         <dt>Territorio</dt><dd>${(100 * lands[t] / G.land.length).toFixed(1)} % de Europa</dd>
                         <dt>Fuerza</dt><dd>${this.powerText(t, powers)}</dd>
+                        <dt>Investigación</dt><dd>${this.researchText(t)}</dd>
                         <dt>Alianzas</dt><dd>${blocs.map(b => esc(b.name) + (b.secret ? ' (secreta)' : '')).join(', ') || 'ninguna conocida'}</dd>
                         ${n.overlord >= 0 ? `<dt>Señor</dt><dd>${g.nm(n.overlord)}</dd>` : ''}
                         ${n.overlord === g.player ? `<dt>Tributo</dt><dd>${Math.round(g.economy(t).total * CONFIG.TRIBUTE)} de oro por turno</dd>` : ''}
