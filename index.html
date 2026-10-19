@@ -612,6 +612,10 @@ const TEMPLATES = {
 const OP_GOLD = [0, 50, 100, 200, 400];   // oro por turno que se puede dar a una operación para refuerzos
 const OP_GATHER_TURNS = 3;   // una ofensiva reúne los ejércitos libres a este número de turnos de marcha o menos
 const LINE_BAND = 6;         // franja de una línea de defensa: casillas a esta distancia o menos de su trazado
+const LINE_HOLD = 1;         // por debajo de esta relación de fuerzas, la línea se repliega
+const LINE_RETURN = 1.5;     // con esta relación en la línea dibujada, vuelve a ella
+const LINE_STEP_TURNS = 2;   // cada repliegue busca a este número de turnos de marcha del ejército más lento
+const LINE_MAX_TURNS = 4;    // y, sumando todos, no se aleja más de la línea dibujada
 // Directiva nacional: la postura fija la ventaja con la que atacan las ofensivas nuevas y un reparto de la renta.
 const POSTURES = {
     defensa: { name: 'Defensa total', ratio: 1.8, budget: { recruit: 45, research: 10, forts: 35, roads: 5 }, desc: 'Ofensivas nuevas en «cauta» (1,8 a 1). Mucho oro para fortificar.' },
@@ -2122,8 +2126,8 @@ class GameEngine {
     // Coste de marcha hasta `dest` desde cada casilla propia o aliada a `limit` subpuntos o menos: como orderField
     // pero acotado, para buscar fuerzas sin recorrer el mapa entero.
     marchCosts(owner, dest, limit) {
-        const dist = new Map([[dest, 0]]), heap = new MinHeap();
-        heap.push(0, dest);
+        const dist = new Map(), heap = new MinHeap();
+        for (const d of Array.isArray(dest) ? dest : [dest]) { dist.set(d, 0); heap.push(0, d); }
         while (heap.size) {
             const [k, v] = heap.pop();
             if (k > dist.get(v)) continue;
@@ -2188,7 +2192,7 @@ class GameEngine {
         const id = op.owner, rules = this.rules(id);
         const free = this.opMembers(op).filter(a => !a.order && a.direct !== this.turn)
             .sort((x, y) => unitPower(y.units, 'atk', rules) - unitPower(x.units, 'atk', rules) || x.id - y.id);
-        const tally = { moved: 0, attacked: 0, waiting: 0, fortified: 0, sent: [] };
+        const tally = { moved: 0, attacked: 0, waiting: 0, fortified: 0, sent: [], notes: [] };
         const live = a => this.armies.has(a.id) && a.owner === id && this.armyOn(a.cell) === a && this.mp(a) > 0;
         if (op.kind === 'ofensiva') {
             const obj = op.cells[op.cells.length - 1];
@@ -2215,43 +2219,7 @@ class GameEngine {
             op.waiting = tally.waiting;
             if (this.owner[obj] === id) this.endOp(op, `objetivo cumplido, ${this.placeName(obj)} es tuya`);
         } else if (op.kind === 'defensa') {
-            const held = c => { const x = this.armyAt[c]; return x && this.armies.get(x).owner === id; };
-            const line = new Set(op.cells), danger = new Map(op.cells.map(c => [c, this.threat(id, c)]));
-            const idle = free.filter(a => !line.has(a.cell));
-            // Contraataque desde la línea contra la casilla de la línea que haya ocupado el enemigo, si hay ventaja.
-            for (const a of free) {
-                if (!line.has(a.cell) || !live(a)) continue;
-                const r = this.reach(id, a.cell, this.mp(a), a.used === 0);
-                for (const [target, from] of r.attacks) {
-                    if (!line.has(target) || from !== a.cell) continue;
-                    if (this.expectedRatio(id, a.units, from, this.armyOn(target), target) >= op.ratio) { this.attack(a, from, target, r); tally.attacked++; break; }
-                }
-            }
-            const empty = op.cells.filter(c => !held(c) && (this.owner[c] === id || this.atWar(id, this.owner[c]))).sort((x, y) => danger.get(y) - danger.get(x));
-            for (const c of empty) {
-                let pick = null, pd = Infinity;
-                for (const a of idle) { const d = (G.cx[a.cell] - G.cx[c]) ** 2 + (G.cy[a.cell] - G.cy[c]) ** 2; if (d < pd) { pd = d; pick = a; } }
-                if (!pick) break;
-                idle.splice(idle.indexOf(pick), 1);
-                if (!live(pick)) continue;
-                const a = this.detach(pick), r = this.reach(id, a.cell, this.mp(a), a.used === 0);
-                if (this.advance(a, c, r, false) !== 'blocked') tally.moved++; else this.reattach(a);
-            }
-            // Los que sobran refuerzan la casilla más amenazada de la línea (se juntan con quien la guarde).
-            const hot = [...op.cells].sort((x, y) => danger.get(y) - danger.get(x))[0];
-            for (const a0 of idle) {
-                if (!live(a0) || hot === undefined) continue;
-                const a = this.detach(a0), r = this.reach(id, a.cell, this.mp(a), a.used === 0);
-                if (this.advance(a, hot, r, true) !== 'blocked') tally.moved++; else this.reattach(a);
-            }
-            if (op.fortify) {
-                for (const c of [...op.cells].sort((x, y) => danger.get(y) - danger.get(x))) {
-                    if (tally.fortified >= 2 || this.nations[id].gold < rules.fortCost) break;
-                    if (!held(c) || this.owner[c] !== id || this.fort[c] || this.fortWork.has(c)) continue;
-                    this.buildFort(id, { cells: [c], path: [c], cost: rules.fortCost, cls: 'fort' });
-                    tally.fortified++;
-                }
-            }
+            this.defenseStep(op, free, tally, live);
             op.uncovered = this.opNeed(op);
         } else {
             const zone = op.cells[0], near = this.nearCells(zone, 2);
@@ -2282,9 +2250,161 @@ class GameEngine {
             if (tally.fortified) parts.push(plural(tally.fortified, 'casilla fortificada', 'casillas fortificadas'));
             if (op.kind === 'defensa' && op.uncovered) parts.push(`${plural(op.uncovered, 'casilla', 'casillas')} de la línea sin tropas`);
             for (const n of tally.sent) parts.push(`manda un ejército a ${n}`);
+            parts.push(...tally.notes);
             if (parts.length && this.ops.has(op.id)) this.log(`${op.name}: ${parts.join(', ')}.`);
         }
         return tally;
+    }
+
+    // --- Línea de defensa: aguanta, se repliega o vuelve a la línea dibujada ---
+    // Qué haría la línea este turno, sin hacerlo (sirve también para enseñarlo en las manuales):
+    // { state, cells: línea activa, ev: lineEval de la actual, cand: la línea nueva si se repliega, stuck: sin nada mejor detrás }.
+    defenseDecide(op) {
+        const id = op.owner, members = this.opMembers(op), ev = this.lineEval(op, op.cells, members);
+        const drawn = op.drawn ?? op.cells, line = new Set(op.cells), moving = members.some(a => !line.has(a.cell));
+        if (!members.length) return { state: 'aguanta', cells: op.cells, ev };
+        const atDrawn = drawn.length === op.cells.length && drawn.every((c, i) => c === op.cells[i]);
+        if (!atDrawn && !ev.breach && drawn.every(c => this.owner[c] === id || this.atWar(id, this.owner[c]))) {
+            const evD = this.lineEval(op, drawn, members);
+            if (evD.rel === null || evD.rel >= LINE_RETURN) return { state: 'restablece', cells: drawn, ev, evD };
+        }
+        if (ev.breach || (ev.rel !== null && ev.rel < LINE_HOLD)) {
+            const rules = this.rules(id), slow = Math.min(...members.map(a => speedOf(a.units, rules))), cap = this.nations[id].capitalCell;
+            const cand = this.bestLine(id, { ref: op.cells, forces: members, enemy: ev.enemy, dir: this.lineDir(id, drawn), limit: LINE_STEP_TURNS * slow * MOVE,
+                base: drawn, baseLimit: LINE_MAX_TURNS * slow * MOVE, keep: this.owner[cap] === id ? cap : -1 });
+            if (cand && !cand.same) return { state: 'repliega', cells: cand.cells, ev, cand };
+            return { state: op.state === 'repliega' && moving ? 'repliega' : 'aguanta', cells: op.cells, ev, stuck: true };
+        }
+        return { state: (op.state === 'repliega' || op.state === 'restablece') && moving ? op.state : 'aguanta', cells: op.cells, ev };
+    }
+    // Nombre corto de una línea para el parte: su lugar central y su terreno («colinas y río»).
+    lineLabel(owner, cells) {
+        const dir = this.lineDir(owner, cells), count = new Map();
+        for (const c of cells) if (CELL_TERRAIN[c] !== 'plain') count.set(CELL_TERRAIN[c], (count.get(CELL_TERRAIN[c]) ?? 0) + 1);
+        const top = [...count].sort((x, y) => y[1] - x[1])[0], parts = [top ? CONFIG.TERRAIN[top[0]].name.toLowerCase() : 'llanura'];
+        if (cells.some(c => this.riverFront(c, dir) > 1)) parts.push('río');
+        return `${this.placeName(cells[Math.floor(cells.length / 2)])} (${parts.join(' y ')})`;
+    }
+    // Cumple una línea de defensa este turno con sus ejércitos libres.
+    defenseStep(op, free, tally, live) {
+        const id = op.owner, rules = this.rules(id);
+        const held = c => { const x = this.armyAt[c]; return x && this.armies.get(x).owner === id; };
+        const counter = (cells, anyFrom) => {
+            const line = new Set(cells);
+            for (const a of free) {
+                if (!live(a) || a.op !== op.id || (!anyFrom && !line.has(a.cell))) continue;
+                const r = this.reach(id, a.cell, this.mp(a), a.used === 0);
+                for (const [target, from] of r.attacks) {
+                    if (!line.has(target) || (!anyFrom && from !== a.cell)) continue;
+                    if (this.expectedRatio(id, a.units, from, this.armyOn(target), target) >= op.ratio) { this.attack(a, from, target, r); tally.attacked++; break; }
+                }
+            }
+        };
+        // Contraataque desde la línea contra sus casillas ocupadas, con ventaja y sin estar en inferioridad.
+        const ev0 = this.lineEval(op);
+        if (op.state !== 'repliega' && (ev0.rel === null || ev0.rel >= LINE_HOLD)) counter(op.cells, false);
+        const dec = this.defenseDecide(op), dir = this.lineDir(id, op.drawn ?? op.cells);
+        const ratioText = ev => ev.rel === null ? '' : `relación ${decimal(ev.rel)} a 1`;
+        op.rel = dec.ev.rel;
+        if (dec.state === 'repliega' && dec.cand) {
+            op.cells = [...dec.cells];
+            this.orderVersion++;
+            const why = [dec.ev.breach ? 'brecha en la línea' : '', ratioText(dec.ev)].filter(Boolean).join(' y ');
+            tally.notes.push(`${why}; se repliega a ${this.lineLabel(id, op.cells)}${dec.cand.rel !== null ? `, ${decimal(dec.cand.rel)} a 1 prevista` : ''}`);
+        } else if (dec.state === 'restablece' && op.cells !== op.drawn && op.cells.join() !== op.drawn.join()) {
+            op.cells = [...op.drawn];
+            this.orderVersion++;
+            tally.notes.push(`${dec.evD.rel === null ? 'sin enemigos a la vista' : ratioText(dec.evD)}; vuelve a la línea dibujada`);
+            // Vuelven a la operación las guarniciones y los cortados que quedan en la línea o detrás (la última unidad de una ciudad se queda).
+            for (const a of this.armies.values()) {
+                if (a.owner !== id || a.from !== op.id || this.lineSide(op.cells, dir, a.cell) > 0) continue;
+                a.from = 0;
+                if (CITY_OF[a.cell] >= 0 && countUnits(a.units) <= 1) continue;
+                a.op = op.id;
+                if (a.order?.kind === 'hold') a.order = null;
+                if (!a.order && a.direct !== this.turn) free.push(a);
+            }
+        } else if (dec.stuck && op.stuckTurn !== this.turn) {
+            op.stuckTurn = this.turn;
+            tally.notes.push(`${ratioText(dec.ev) || 'brecha en la línea'}; ninguna posición detrás es mejor: hacen falta refuerzos`);
+        }
+        op.state = dec.state;
+        const line = new Set(op.cells), danger = new Map(op.cells.map(c => [c, this.threat(id, c)]));
+        const stay = (a, why) => {
+            a.op = 0; a.from = op.id;
+            this.setOrder(a, { kind: 'hold' });
+            why.push(this.placeName(a.cell));
+            if (op.fortify && CITY_OF[a.cell] >= 0 && !this.fort[a.cell] && !this.fortWork.has(a.cell) && this.nations[id].gold >= rules.fortCost)
+                this.buildFort(id, { cells: [a.cell], path: [a.cell], cost: rules.fortCost, cls: 'fort' });
+        };
+        const garrisons = [], cut = [];
+        if (op.state === 'repliega') {
+            // Ciudades que quedan delante: quien sea su única guarnición se queda; de las demás sale todo menos una unidad (detach).
+            for (const a of free) {
+                if (!live(a) || a.op !== op.id || line.has(a.cell)) continue;
+                if (CITY_OF[a.cell] >= 0 && this.owner[a.cell] === id && countUnits(a.units) <= 1 && this.lineSide(op.cells, dir, a.cell) > 0) stay(a, garrisons);
+            }
+            // Cortados: rodeados, o sin camino por tierra propia hasta la línea en LINE_STEP_TURNS turnos.
+            const fastest = Math.max(...UNIT_KEYS.map(k => rules.types[k].speed));
+            const costs = this.marchCosts(id, op.cells.filter(c => this.owner[c] === id), LINE_STEP_TURNS * fastest * MOVE);
+            for (const a0 of free) {
+                if (!live(a0) || a0.op !== op.id || line.has(a0.cell)) continue;
+                if (this.hostileSides(id, a0.cell) < CONFIG.FLANKED_SIDES && (costs.get(a0.cell) ?? Infinity) <= LINE_STEP_TURNS * speedOf(a0.units, rules) * MOVE) continue;
+                let a = a0;
+                const r = this.reach(id, a.cell, this.mp(a), a.used === 0);
+                if (this.hostileSides(id, a.cell) >= CONFIG.FLANKED_SIDES) {
+                    // Rodeado: rompe el cerco por donde lo acerque a la línea, con una previsión de al menos 1.
+                    let best = null, bd = Infinity;
+                    for (const [target, from] of r.attacks) {
+                        if (this.expectedRatio(id, a.units, from, this.armyOn(target), target) < 1) continue;
+                        const d = Math.min(...op.cells.map(c => (G.cx[c] - G.cx[target]) ** 2 + (G.cy[c] - G.cy[target]) ** 2));
+                        if (d < bd) { bd = d; best = { target, from }; }
+                    }
+                    if (best) { this.attack(a, best.from, best.target, r); tally.attacked++; continue; }
+                }
+                // Si no, a la ciudad, la montaña o la colina propia más cercana que alcance, y aguanta allí.
+                const value = c => this.owner[c] !== id ? 0 : CITY_OF[c] >= 0 ? 3 : CELL_TERRAIN[c] === 'mountain' ? 2 : CELL_TERRAIN[c] === 'hills' ? 1 : 0;
+                let best = a.cell, bv = value(a.cell), bc = 0;
+                for (const v of this.destinations(r)) {
+                    if (this.armyAt[v] || !isLand(v)) continue;
+                    const val = value(v), cost = this.entry(r, v)?.cost ?? Infinity;
+                    if (val > bv || (val === bv && val > 0 && cost < bc)) { best = v; bv = val; bc = cost; }
+                }
+                if (best !== a.cell) a = this.moveArmy(a, best, r);
+                if (this.armies.has(a.id) && a.owner === id) stay(a, cut);
+            }
+        }
+        // Cubrir la línea: primero las casillas más amenazadas, con el ejército libre más cercano.
+        const idle = free.filter(a => live(a) && a.op === op.id && !line.has(a.cell));
+        const leave = (pick, a) => { if (a !== pick && op.state === 'repliega' && this.lineSide(op.cells, dir, pick.cell) > 0) stay(pick, garrisons); };
+        if (op.state === 'restablece') counter(op.cells, true);   // retoma la línea dibujada con la ventaja de la operación
+        const empty = op.cells.filter(c => !held(c) && (this.owner[c] === id || this.atWar(id, this.owner[c]))).sort((x, y) => danger.get(y) - danger.get(x));
+        for (const c of empty) {
+            let pick = null, pd = Infinity;
+            for (const a of idle) { const d = (G.cx[a.cell] - G.cx[c]) ** 2 + (G.cy[a.cell] - G.cy[c]) ** 2; if (d < pd) { pd = d; pick = a; } }
+            if (!pick) break;
+            idle.splice(idle.indexOf(pick), 1);
+            if (!live(pick)) continue;
+            const a = this.detach(pick), r = this.reach(id, a.cell, this.mp(a), a.used === 0);
+            if (this.advance(a, c, r, false) !== 'blocked') { tally.moved++; leave(pick, a); } else this.reattach(a);
+        }
+        // Los que sobran refuerzan la casilla más amenazada de la línea (se juntan con quien la guarde).
+        const hot = [...op.cells].sort((x, y) => danger.get(y) - danger.get(x))[0];
+        for (const a0 of idle) {
+            if (!live(a0) || hot === undefined) continue;
+            const a = this.detach(a0), r = this.reach(id, a.cell, this.mp(a), a.used === 0);
+            if (this.advance(a, hot, r, true) !== 'blocked') { tally.moved++; leave(a0, a); } else this.reattach(a);
+        }
+        if (garrisons.length) tally.notes.push(`deja guarnición en ${[...new Set(garrisons)].join(', ')}`);
+        if (cut.length) tally.notes.push(`${plural(cut.length, 'ejército cortado aguanta', 'ejércitos cortados aguantan')} en ${[...new Set(cut)].join(', ')}`);
+        if (op.fortify) {
+            for (const c of [...op.cells].sort((x, y) => danger.get(y) - danger.get(x))) {
+                if (tally.fortified >= 2 || this.nations[id].gold < rules.fortCost) break;
+                if (!held(c) || this.owner[c] !== id || this.fort[c] || this.fortWork.has(c)) continue;
+                this.buildFort(id, { cells: [c], path: [c], cost: rules.fortCost, cls: 'fort' });
+                tally.fortified++;
+            }
+        }
     }
 
     // --- Plantillas y refuerzos de las operaciones ---
