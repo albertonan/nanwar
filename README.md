@@ -17,10 +17,12 @@ Es una aplicación web instalable (PWA) que funciona sin conexión:
 
 La app instalada comprueba sola si hay una versión nueva (al abrirse, al volver a primer plano y cada 15 minutos) y, si la hay, se actualiza y continúa la partida en curso.
 
-El mapa tiene dos vistas, que se cambian en cualquier momento con el botón «Relieve» o la tecla V (se recuerda en cada dispositivo):
+El botón «Mapa» (tecla M) reúne la vista y las capas, y se recuerda en cada dispositivo. Hay dos vistas, que también se cambian con la tecla V:
 
 - **Sencilla:** colores planos por país, casillas y fichas OTAN.
 - **Realista:** el relieve, los bosques, los ríos y las ciudades reales pintados a mano alzada, casillas casi invisibles y ejércitos en miniatura que avanzan por su camino. Al alejarte se ve como un mapa político.
+
+Y dos capas que se encienden o apagan: **Logística** (tecla L), tu territorio sin suministro en naranja, y **Operaciones y órdenes**, las flechas, líneas y zonas de tus operaciones y los caminos de tus ejércitos.
 
 De lejos solo se ven las capitales y, de los ejércitos, los tuyos, los de tus enemigos en guerra y los que se están moviendo; al acercarte aparecen ciudades, yacimientos y el resto de tropas, y en la vista realista los árboles y las olas.
 

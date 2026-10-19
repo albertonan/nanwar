@@ -180,6 +180,13 @@
             padding: 7px 10px; border-radius: 6px; font-size: 13px; line-height: 1.45; max-width: 290px; z-index: 4;
         }
         #legend { position: absolute; right: 14px; bottom: 14px; font-size: 12.5px; padding: 6px 10px; }
+        #map-menu { position: absolute; right: 14px; top: 14px; width: 290px; padding: 12px 14px 14px; z-index: 4; display: grid; gap: 8px; }
+        #map-menu header { display: flex; justify-content: space-between; align-items: center; }
+        #map-menu .layer { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: start; padding: 8px 10px; border-radius: 8px; background: var(--raised); cursor: pointer; }
+        #map-menu .layer input { margin: 3px 0 0; accent-color: var(--signal); grid-row: span 2; }
+        #map-menu .layer b { font-weight: 600; font-size: 14px; }
+        #map-menu .layer small { color: var(--muted); font-size: 12.5px; }
+        #map-menu .layer kbd { margin-left: 6px; }
         #legend summary { cursor: pointer; color: var(--muted); }
         #legend ul { list-style: none; margin: 8px 0 2px; padding: 0; display: grid; gap: 4px; }
         #legend i.line { display: inline-block; width: 22px; vertical-align: middle; margin-right: 6px; }
@@ -410,6 +417,7 @@
             #confirm > span { flex: 1 1 100%; }
             #confirm .btn { flex: 1; padding: 10px; }
             #legend, #tooltip { display: none !important; }
+            #map-menu { left: 8px; right: 8px; top: 8px; width: auto; }
             .recruit .btn { font-size: 12.5px; }
             dialog .float { padding: 14px; }
             .slot { grid-template-columns: 1fr auto; }
@@ -456,6 +464,7 @@
             <aside id="card" class="float" hidden></aside>
             <div id="confirm" class="float" hidden></div>
             <div id="replay" class="float" hidden></div>
+            <div id="map-menu" class="float" hidden></div>
             <div id="hint"></div>
             <details id="legend" class="float"></details>
             <div id="tooltip" hidden></div>
@@ -3709,6 +3718,7 @@ const ICONS = {
     supply: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M2 6h11v10H2zM13 9h4.5l3.5 3.5V16h-8"/><circle cx="6" cy="18" r="2"/><circle cx="17" cy="18" r="2"/></svg>',
     relief: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M2 20 9 7l4 6 3-4 6 11z"/><path d="M7.5 9.8 9 11l1.6-1.4"/></svg>',
     op: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 19c2-6 6-9.5 11-10.5V5l7 6-7 6v-3.5c-4 .5-7.5 2.5-11 5.5z"/></svg>',
+    layers: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3 2 8l10 5 10-5z"/><path d="m2 12.5 10 5 10-5M2 17l10 5 10-5"/></svg>',
     line: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M2 16h3v-5h4v5h4v-5h4v5h5"/></svg>',
     zone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3.2 2.4"><ellipse cx="12" cy="12" rx="9.5" ry="7"/></svg>'
 };
@@ -3829,7 +3839,7 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const PREFS_KEY = 'nanwar.prefs';
 const SPEEDS = { lenta: 1200, normal: 500, rapida: 150 };
 function readPrefs() {
-    const def = { watch: 'directo', speed: 'normal', view: 'realista' };
+    const def = { watch: 'directo', speed: 'normal', view: 'realista', supply: false, ops: true };
     try { return { ...def, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; } catch { return def; }
 }
 function writePrefs(p) { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch { /* sin almacenamiento */ } }
@@ -3856,6 +3866,7 @@ class MapView {
         this.builtRoads = -1;
         this.builtForts = -1;
         this.showSupply = false;
+        this.showOps = true;
         this.highlight = null;   // { moves:Set, attacks:Set }
         this.preview = null;     // obra en curso de trazar
         this.selectedCell = -1;
@@ -4309,7 +4320,7 @@ class MapView {
             ctx.beginPath(); ctx.arc(ex, ey, r * 0.2, 0, Math.PI * 2); ctx.fillStyle = INK; ctx.fill();
         }
 
-        if (g.player !== null && !g.over) { this.drawOps(hexPx, font); this.drawOrders(hexPx, font); }
+        if (g.player !== null && !g.over) { this.drawOps(hexPx, font); if (this.showOps) this.drawOrders(hexPx, font); }
 
         // Ejércitos: fichas OTAN en la vista sencilla, miniaturas en la realista. Mientras se mueven, siguen su camino.
         const tokens = [];
@@ -4322,7 +4333,7 @@ class MapView {
             const [sx, sy] = this.toScreen(wx, wy);
             if (!visible(sx, sy)) continue;
             if (far && !pose?.moving && a.owner !== g.player && !g.atWar(g.player, a.owner)) continue;
-            if (far && a.owner === g.player && a.op && g.ops.has(a.op) && !pose?.moving) continue;   // de lejos, una ficha por operación
+            if (far && this.showOps && a.owner === g.player && a.op && g.ops.has(a.op) && !pose?.moving) continue;   // de lejos, una ficha por operación
             if (!seen(wx, wy, a.cell)) continue;
             const mine = a.owner === g.player;
             const view = g.armyView(g.player, a);
@@ -4394,8 +4405,8 @@ class MapView {
     drawOps(hexPx, font) {
         const g = this.game, ctx = this.ctx, ui = this.ui;
         const scr = c => this.toScreen(G.cx[c], G.cy[c]);
-        const list = g.opsOf(g.player).map(op => ({ op, kind: op.kind, cells: op.cells, color: opColor(op), name: op.name, dim: op.paused }));
-        for (const op of g.knownEnemyOps(g.player)) list.push({ kind: 'ofensiva', cells: op.cells, color: '#e05a47', name: `${op.name} (${g.nm(op.owner)})`, enemy: true });
+        const list = !this.showOps ? [] : g.opsOf(g.player).map(op => ({ op, kind: op.kind, cells: op.cells, color: opColor(op), name: op.name, dim: op.paused }));
+        if (this.showOps) for (const op of g.knownEnemyOps(g.player)) list.push({ kind: 'ofensiva', cells: op.cells, color: '#e05a47', name: `${op.name} (${g.nm(op.owner)})`, enemy: true });
         const d = ui?.opDraft;
         if (d?.cells.length) list.push({ kind: d.kind, cells: d.cells, color: '#ffffff', name: d.redraw ? 'Nuevo trazado' : 'Nueva operación', draft: true });
         ctx.lineCap = 'round'; ctx.lineJoin = 'round';
@@ -4625,6 +4636,9 @@ class GameUI {
         this.view.onRealisticReady = () => this.render();
         this.view.onRealisticFailed = () => { this.prefs.view = 'sencilla'; this.view.setMode('sencilla'); this.renderTools(); };
         this.view.setMode(this.prefs.view);
+        this.view.showSupply = !!this.prefs.supply;
+        this.view.showOps = this.prefs.ops !== false;
+        this.mapMenu = false;        // panel «Mapa»: vista y capas
         this.multi = new Set();      // provincias seleccionadas con la herramienta Ciudades
         this.ordering = null;        // { kind }: orden a la espera de que se elija el destino en el mapa
         this.opDraft = null;         // { kind, cells, redraw }: operación que se está dibujando con la herramienta Operación
@@ -5078,6 +5092,7 @@ class GameUI {
     }
 
     cancel() {
+        if (this.mapMenu) { this.mapMenu = false; this.render(); return; }
         if (this.ordering) { this.ordering = null; this.render(); return; }
         if (this.proposal) { this.endProposal(); return; }
         if (this.tool === 'op' && this.opDraft?.cells.length) { this.opDraft.cells.pop(); this.render(); return; }
@@ -5266,8 +5281,11 @@ class GameUI {
             case 'highway': this.toggleHighway(); return;
             case 'open-drawer': this.drawerOpen = true; break;
             case 'tool': this.setTool(d.tool === this.tool && d.tool !== 'command' ? 'command' : d.tool); return;
-            case 'supply': this.view.showSupply = !this.view.showSupply; break;
+            case 'supply': this.setLayer('supply', !this.view.showSupply); return;
+            case 'layer-ops': this.setLayer('ops', !this.view.showOps); return;
             case 'view-mode': this.toggleViewMode(); return;
+            case 'view-set': if (d.value !== this.prefs.view) this.toggleViewMode(); return;
+            case 'map-menu': this.mapMenu = !this.mapMenu; break;
             case 'close-card': this.select(-1); return;
             case 'step': {
                 const a = this.selectedArmy();
@@ -5436,7 +5454,30 @@ class GameUI {
         writePrefs(this.prefs);
         this.view.setMode(this.prefs.view);
         this.renderTools();
+        this.renderMapMenu();
         this.renderHint();
+    }
+    // Capas del mapa (se recuerdan en este dispositivo): logística y operaciones con sus órdenes.
+    setLayer(key, on) {
+        this.prefs[key] = on;
+        writePrefs(this.prefs);
+        if (key === 'supply') this.view.showSupply = on; else this.view.showOps = on;
+        this.render();
+    }
+    // Panel «Mapa»: la vista (sencilla o realista) y las capas, todo en un sitio.
+    renderMapMenu() {
+        const el = $('#map-menu'), playing = this.game.player !== null && !this.game.over;
+        el.hidden = !this.mapMenu;
+        if (!this.mapMenu) return;
+        const layer = (action, on, name, desc, key) => `<label class="layer"><input type="checkbox" data-action="${action}" ${on ? 'checked' : ''} ${playing ? '' : 'disabled'}>
+            <b>${name}${key ? `<kbd>${key}</kbd>` : ''}</b><small>${desc}</small></label>`;
+        el.innerHTML = `<header><h3 style="margin:0">Mapa</h3><button class="btn ghost" data-action="map-menu" aria-label="Cerrar" title="Cerrar (M o Esc)">✕</button></header>
+            <span class="small muted">Vista <kbd>V</kbd></span>
+            <div class="seg">${[['sencilla', 'Sencilla'], ['realista', 'Realista']].map(([v, l]) => `<button data-action="view-set" data-value="${v}" class="${this.prefs.view === v ? 'on' : ''}" aria-pressed="${this.prefs.view === v}">${l}</button>`).join('')}</div>
+            <p class="note" style="margin:0">${this.prefs.view === 'realista' ? 'Relieve, bosques, ríos y ciudades reales pintados, y ejércitos en miniatura.' : 'Colores planos por país, casillas y fichas OTAN.'}</p>
+            <span class="small muted">Capas</span>
+            ${layer('supply', this.view.showSupply, 'Logística', 'Tu territorio sin suministro, en naranja: allí los ejércitos solo avanzan una casilla por turno.', 'L')}
+            ${layer('layer-ops', this.view.showOps, 'Operaciones y órdenes', 'Flechas de ofensiva, líneas de defensa, zonas de reserva y los caminos de las órdenes de tus ejércitos.', '')}`;
     }
     renderReplay(id, n, total) {
         const g = this.game, el = $('#replay');
@@ -5507,12 +5548,14 @@ class GameUI {
         const g = this.game;
         if (e.key === 'Escape') { this.cancel(); return; }
         if (e.key === 'v' || e.key === 'V') { this.toggleViewMode(); return; }
+        if ((e.key === 'm' || e.key === 'M') && (this.game.player === null || this.game.over)) { this.mapMenu = !this.mapMenu; this.render(); return; }
         if (g.player === null || g.over) return;
         const tool = TOOLS.find(t => t.key === e.key);
         if (tool) { this.setTool(tool.id); return; }
         if (e.key === 'i' || e.key === 'I') { this.openResearch(); return; }
         if (e.key === 'a' || e.key === 'A') { this.toggleHighway(); return; }
-        if (e.key === 'l' || e.key === 'L') { this.view.showSupply = !this.view.showSupply; this.render(); }
+        if (e.key === 'l' || e.key === 'L') this.setLayer('supply', !this.view.showSupply);
+        else if (e.key === 'm' || e.key === 'M') { this.mapMenu = !this.mapMenu; this.render(); }
         else if (e.key === 'n' || e.key === 'N') this.nextArmy();
         else if (e.key === 'o' || e.key === 'O') this.runOrders();
         else if (e.key === 'Enter') { e.preventDefault(); $('#end-turn').click(); }
@@ -5531,6 +5574,7 @@ class GameUI {
         this.renderDrawer();
         this.renderHint();
         this.renderConfirm();
+        this.renderMapMenu();
         this.renderOverlay();
         this.hintOverride = null;
     }
@@ -5585,10 +5629,8 @@ class GameUI {
         $('#tools').innerHTML = TOOLS.map(t => `
             <button class="tool ${this.tool === t.id ? 'on' : ''}" data-action="tool" data-tool="${t.id}" title="${typeof t.title === 'function' ? t.title(r) : t.title}" ${playing ? '' : 'disabled'}>
                 ${t.id === 'road' && this.highway ? ICONS.highway : t.icon}${t.label}<kbd>${t.key}</kbd></button>${t.id === 'road' ? highway() : ''}`).join('') + `<hr>
-            <button class="tool ${this.view.showSupply ? 'on' : ''}" data-action="supply" title="Mostrar en naranja tu territorio sin suministro" ${playing ? '' : 'disabled'}>
-                ${ICONS.supply}Logística<kbd>L</kbd></button>
-            <button class="tool ${this.prefs.view === 'realista' ? 'on' : ''}" data-action="view-mode" title="Vista realista: relieve, bosques y ríos reales, ejércitos en miniatura (V)">
-                ${ICONS.relief}Relieve<kbd>V</kbd></button>
+            <button class="tool ${this.mapMenu ? 'on' : ''}" data-action="map-menu" aria-expanded="${this.mapMenu}" title="Vista del mapa y capas: sencilla o realista, logística, operaciones (M)">
+                ${ICONS.layers}Mapa<kbd>M</kbd></button>
             <button class="tool mobile-only" data-action="open-drawer" ${playing ? '' : 'disabled'}>${ICONS.globe}Países</button>`;
     }
 

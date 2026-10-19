@@ -744,6 +744,32 @@ const CHECKS = [
         g.executeOp(zone);
         T.eq(g.armyOn(city)?.units, { infantry: 0, tank: 1, artillery: 0 }, 'un tanque se queda');
         return true;
+    }],
+    ['Mapa · vista y capas en un solo panel, recordadas en el dispositivo', () => {
+        const g = T.uiStart('es');
+        const key = k => document.dispatchEvent(new KeyboardEvent('keydown', { key: k }));
+        T.ok(!document.querySelector('[data-action="supply"].tool') && !document.querySelector('.tool[data-action="view-mode"]'), 'sin botones sueltos de logística y relieve');
+        document.querySelector('.tool[data-action="map-menu"]').click();
+        T.ok(!document.querySelector('#map-menu').hidden, 'el botón Mapa abre el panel');
+        const view = ui.prefs.view, other = view === 'realista' ? 'sencilla' : 'realista';
+        document.querySelector(`#map-menu [data-action="view-set"][data-value="${other}"]`).click();
+        T.eq(ui.prefs.view, other, 'cambia la vista');
+        document.querySelector('#map-menu [data-action="supply"]').click();
+        T.eq([ui.view.showSupply, readPrefs().supply], [true, true], 'logística encendida y recordada');
+        document.querySelector('#map-menu [data-action="layer-ops"]').click();
+        T.eq([ui.view.showOps, readPrefs().ops], [false, false], 'operaciones ocultas y recordadas');
+        ui.view.draw();
+        key('l');
+        T.eq(ui.view.showSupply, false, 'la tecla L sigue valiendo');
+        key('Escape');
+        T.ok(document.querySelector('#map-menu').hidden, 'Esc lo cierra');
+        key('m');
+        T.ok(!document.querySelector('#map-menu').hidden, 'M lo abre');
+        document.querySelector('#map-menu [data-action="layer-ops"]').click();
+        document.querySelector(`#map-menu [data-action="view-set"][data-value="${view}"]`).click();
+        key('m');
+        T.ok(document.querySelector('#map-menu').hidden && ui.view.showOps, 'todo como estaba');
+        return true;
     }]
 ];
 
