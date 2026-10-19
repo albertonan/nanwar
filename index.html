@@ -71,7 +71,7 @@
         .stack { display: grid; gap: 6px; }
 
         /* Estructura */
-        #app { position: fixed; inset: 0; display: grid; grid-template-rows: auto 1fr; }
+        #app { position: fixed; inset: 0; display: grid; grid-template-rows: auto 1fr; grid-template-columns: minmax(0, 1fr); }
         main { display: grid; grid-template-columns: 74px minmax(0, 1fr) auto; min-height: 0; }
 
         #topbar {
@@ -380,6 +380,7 @@
             #topbar .brand { min-width: 0; flex: 1; overflow: hidden; }
             #topbar .brand h1 { font-size: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
             #topbar .spacer, #btn-next, kbd { display: none; }
+            #btn-orders { white-space: nowrap; }
             .figure b { font-size: 16px; }
             #end-turn { padding: 8px 12px; font-size: 14px; }
             main { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
@@ -423,6 +424,12 @@
             .rs-filter button { flex: none; }
             .rs-card { position: sticky; top: auto; bottom: -14px; max-height: 46vh; overflow-y: auto; box-shadow: 0 -10px 24px rgba(0, 0, 0, 0.45); }
             .rs-card .tip { display: none; }
+        }
+        /* Móvil estrecho: la cabecera en dos filas (cifras arriba; órdenes, partida y fin de turno debajo) */
+        @media (max-width: 520px) {
+            #topbar { flex-wrap: wrap; gap: 6px 10px; padding-bottom: 6px; }
+            #topbar .brand { flex: 1 1 80px; }
+            #btn-orders, #topbar > [data-action="open-game"], #end-turn { flex: 1 1 auto; }
         }
     </style>
 </head>
@@ -5042,7 +5049,7 @@ class GameUI {
                 <div class="row" style="margin-top:10px">
                     <button class="btn primary" data-action="op-create" ${this.opDraftReady() && !full ? '' : 'disabled'}>${redraw ? 'Guardar el trazado' : 'Crear la operación'}</button>
                     <button class="btn ghost" data-action="op-undo" ${d.cells.length ? '' : 'disabled'}>Deshacer</button></div>
-                <p class="note">${redraw ? 'La operación conserva sus ejércitos y sus ajustes.' : 'Al crearla se le asignan los ejércitos sin operación que estén cerca del punto de partida. Luego puedes añadir o quitar en la pestaña Mando.'} Clic derecho o Esc quita el último punto.</p>
+                <p class="note">${redraw ? 'La operación conserva sus ejércitos y sus ajustes.' : 'Al crearla se le asignan los ejércitos sin operación que estén cerca del punto de partida. Luego puedes añadir o quitar en la pestaña Mando.'}${this.touch ? '' : ' Clic derecho o Esc quita el último punto.'}</p>
             </section>`;
     }
 
@@ -6020,7 +6027,7 @@ class GameUI {
         }
         if (!plan || g.player === null) {
             // Con el dedo, mientras se construye, un botón visible para terminar (no hay clic derecho ni Esc).
-            el.hidden = !(this.touch && this.tool !== 'command' && this.tool !== 'cities' && g.player !== null);
+            el.hidden = !(this.touch && ['road', 'fort'].includes(this.tool) && g.player !== null);
             if (!el.hidden) el.innerHTML = `<span class="small">${this.anchor < 0 ? 'Toca una casilla tuya para empezar' : 'Toca dónde termina la obra'}</span>
                 <button class="btn" data-action="stop-build">Terminar obras</button>`;
             return;
@@ -6045,9 +6052,10 @@ class GameUI {
         else if (this.proposal) text = 'Líneas blancas: lo que harían tus operaciones asistidas. Confirma, termina sin ellas o vuelve al turno.';
         else if (this.tool === 'op') text = `${OP_KINDS[this.opDraft.kind].name}: ${OP_KINDS[this.opDraft.kind].how}`;
         else if (this.ordering) text = this.ordering.kind === 'follow' ? 'Haz clic en el ejército tuyo al que debe seguir. Esc para cancelar.'
-            : `Haz clic en el destino: ${this.ordering.kind === 'attack' ? 'irá hasta allí y atacará lo que haya cuando tenga ventaja' : 'irá hasta allí aunque tarde varios turnos'}. Esc para cancelar.`;
-        else if (this.reachInfo) text = `${this.view.isRealistic() ? 'Zona clara: mover' : 'Verde: mover'}. Rojo: atacar. Mayúsculas + clic más lejos: marchar en varios turnos. Esc para cancelar.`;
-        else text = 'Clic en un ejército tuyo para darle órdenes (con Mayúsculas + clic, marcha hasta allí en varios turnos), o en una provincia para ver qué puedes hacer.';
+            : `Haz clic en el destino: ${this.ordering.kind === 'attack' ? 'irá hasta allí y atacará lo que haya cuando tenga ventaja' : 'irá hasta allí aunque tarde varios turnos'}.${this.touch ? '' : ' Esc para cancelar.'}`;
+        else if (this.reachInfo) text = `${this.view.isRealistic() ? 'Zona clara: mover' : 'Verde: mover'}. Rojo: atacar.${this.touch ? ' Más lejos: «Marchar a…» en la ficha.' : ' Mayúsculas + clic más lejos: marchar en varios turnos. Esc para cancelar.'}`;
+        else text = this.touch ? 'Toca un ejército tuyo para darle órdenes, o una provincia para ver qué puedes hacer.'
+            : 'Clic en un ejército tuyo para darle órdenes (con Mayúsculas + clic, marcha hasta allí en varios turnos), o en una provincia para ver qué puedes hacer.';
         el.textContent = text;
         el.hidden = !text;
         el.classList.toggle('beside-card', !$('#card').hidden);
