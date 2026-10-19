@@ -1101,6 +1101,40 @@ const CHECKS = [
         T.eq([g.opMembers(o1).length, g.opMembers(o2).length], [1, 1], 'uno para cada una');
         return true;
     }],
+    ['L6 · ficha, mapa y propuesta de una línea replegada', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        const s = T.sector(g, es, fr);
+        const op = g.createOp(es, 'defensa', s.line);
+        for (const c of s.line) g.assignArmy(T.army(g, es, c, 2), op.id);
+        for (let k = 0; k < 4; k++) T.army(g, fr, s.front(k), 0, 4);
+        g.executeOps(es, [op.id]);
+        T.eq(op.state, 'repliega', 'replegada');
+        ui.tab = 'mando'; ui.drawerOpen = true; ui.focusOp = op.id; ui.render();
+        const detail = document.querySelector('.op-detail').textContent;
+        T.ok(detail.includes('Se repliega') && (detail.includes(' a 1 (por debajo') || detail.includes('Sin enemigos a la vista')), 'la ficha dice el estado y la relación');
+        T.ok(document.querySelector('.op-row').textContent.includes('Se repliega'), 'y la lista también');
+        ui.view.draw();
+        op.auto = 'manual'; op.cells = [...op.drawn]; op.state = 'aguanta';
+        ui.render();
+        T.ok(document.querySelector('.op-detail').textContent.includes('Se replegaría'), 'manual: dice adónde se replegaría');
+        ui.view.draw();
+        const off = g.createOp(es, 'ofensiva', [s.line[0], T.nearestCity(g, es, fr, s.line[0])], { noCap: true });
+        ui.focusOp = off.id; ui.render();
+        T.ok(document.querySelector('.op-detail').textContent.includes('esperando reclutas') || document.querySelector('.op-detail').textContent.includes('No hay ejércitos libres') || document.querySelector('.op-detail').textContent.includes('todas sus tropas'), 'la ofensiva sin ejércitos dice por qué');
+        const pt = T.nation('pt');
+        g.declareWar(es, pt);
+        g.endOp(off);
+        ui.focusOp = 0; ui.render();
+        const btn = document.querySelector(`[data-preview="${pt}"]`);
+        T.ok(btn, 'botón de línea propuesta');
+        btn.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        T.ok(ui.opPreview && ui.opPreview.length > 0, 'al pasar por encima se ve en el mapa');
+        ui.view.draw();
+        btn.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
+        T.eq(ui.opPreview, null, 'y se quita al salir');
+        return true;
+    }],
     ['Mapa · vista y capas en un solo panel, recordadas en el dispositivo', () => {
         const g = T.uiStart('es');
         const key = k => document.dispatchEvent(new KeyboardEvent('keydown', { key: k }));

@@ -2043,7 +2043,7 @@ class GameEngine {
             let behind = 0;
             for (const c of cities) { const side = this.lineSide(cells, dir, c); if (side > 0) front.push(c); else if (side < 0) behind++; }
             return { cells, rel, ok: rel === null || rel >= 1, cover: cells.length <= forces.length, mean, front,
-                score: mean + 0.05 * (behind - front.length) - 0.05 * depth, same: cells.length === ref.length && cells.every((c, i) => c === ref[i]) };
+                score: mean + 0.05 * (behind - front.length) - 0.15 * depth, same: cells.length === ref.length && cells.every((c, i) => c === ref[i]) };
         };
         const found = [judge(ref, 0)];
         if (dir && zone.size) {
@@ -2254,7 +2254,7 @@ class GameEngine {
             if (tally.fortified) parts.push(plural(tally.fortified, 'casilla fortificada', 'casillas fortificadas'));
             if (op.kind === 'defensa' && op.uncovered) parts.push(`${plural(op.uncovered, 'casilla', 'casillas')} de la línea sin tropas`);
             for (const n of tally.sent) parts.push(`manda un ejército a ${n}`);
-            parts.push(...tally.notes);
+            parts.unshift(...tally.notes);
             if (parts.length && this.ops.has(op.id)) this.log(`${op.name}: ${parts.join(', ')}.`);
         }
         return tally;
@@ -4364,6 +4364,7 @@ const OP_KINDS = {
     defensa: { name: 'Defensa', icon: ICONS.line, how: 'Haz clic a lo largo de tu territorio para trazar la línea. Sus ejércitos ocupan las casillas más amenazadas primero, contraatacan y, si quieres, fortifican.' },
     reserva: { name: 'Reserva', icon: ICONS.zone, how: 'Haz clic en la zona de reunión. Sus ejércitos esperan allí y acuden a las operaciones que pidan ayuda.' }
 };
+const OP_LINE_STATES = { aguanta: 'Aguanta', repliega: 'Se repliega', restablece: 'Vuelve a la línea dibujada' };
 const OP_STANCES = [[1.8, 'Cauta', 'Solo ataca con clara ventaja (1,8 a 1)'], [1.3, 'Equilibrada', 'Ataca con 1,3 a 1, como la IA'], [1, 'Agresiva', 'Ataca con igualdad de fuerzas: avanza rápido y sangra']];
 const OP_AUTO = [['manual', 'Manual', 'Solo dibuja y calcula: no mueve nada'], ['asistida', 'Asistida', 'Al terminar el turno te enseña lo que haría y confirmas'], ['auto', 'Automática', 'La cumple sola al terminar tu turno']];
 
@@ -4961,6 +4962,14 @@ class MapView {
         const scr = c => this.toScreen(G.cx[c], G.cy[c]);
         const list = !this.showOps ? [] : g.opsOf(g.player).map(op => ({ op, kind: op.kind, cells: op.cells, color: opColor(op), name: op.name, dim: op.paused }));
         if (this.showOps) for (const op of g.knownEnemyOps(g.player)) list.push({ kind: 'ofensiva', cells: op.cells, color: '#e05a47', name: `${op.name} (${g.nm(op.owner)})`, enemy: true });
+        // Líneas replegadas: la dibujada, tenue, y la flecha de repliegue; en las manuales, el repliegue que harían.
+        if (this.showOps) for (const op of g.opsOf(g.player)) {
+            if (op.kind !== 'defensa' || op.paused) continue;
+            const hint = op.auto === 'manual' ? ui?.defenseHint(op) : null;
+            if (hint?.state === 'repliega') list.push({ kind: 'repliegue', from: op.cells, cells: hint.cells, color: opColor(op), hint: true });
+            else if (op.drawn && op.drawn.join() !== op.cells.join()) list.push({ kind: 'repliegue', from: op.drawn, cells: op.cells, color: opColor(op) });
+        }
+        if (ui?.opPreview?.length) list.push({ kind: 'defensa', cells: ui.opPreview, color: '#ffffff', name: 'Línea propuesta', draft: true });
         const d = ui?.opDraft;
         if (d?.cells.length) list.push({ kind: d.kind, cells: d.cells, color: '#ffffff', name: d.redraw ? 'Nuevo trazado' : 'Nueva operación', draft: true });
         ctx.lineCap = 'round'; ctx.lineJoin = 'round';
@@ -5004,6 +5013,26 @@ class MapView {
                 ctx.strokeStyle = 'rgba(21,26,18,0.85)'; ctx.lineWidth = 4; ctx.stroke(); ctx.strokeStyle = it.color; ctx.lineWidth = 2; ctx.stroke();
                 const m = pts[Math.floor(pts.length / 2)];
                 labels.push({ x: m[0], y: m[1] - Math.max(16, hexPx * 1.4), text: it.name, color: it.color });
+            } else if (it.kind === 'repliegue') {
+                // La línea de la que sale, discontinua y tenue (o la que tomaría, si es una sugerencia), y la flecha de
+                // repliegue de APP-6: eje discontinuo hacia atrás con la letra W.
+                const line = it.hint ? it.cells : it.from, lp = line.map(scr);
+                ctx.globalAlpha = 0.55;
+                ctx.beginPath(); lp.forEach(([x, y], i) => (i && G.dirTo(line[i - 1], line[i]) >= 0 ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+                ctx.setLineDash([5, 5]); ctx.strokeStyle = 'rgba(21,26,18,0.8)'; ctx.lineWidth = 4; ctx.stroke(); ctx.strokeStyle = it.color; ctx.lineWidth = 2; ctx.stroke();
+                // Del centro de una línea al de la otra, sin llegar a tapar las fichas de la nueva.
+                const [ax, ay] = scr(it.from[Math.floor(it.from.length / 2)]), [cx, cy] = scr(it.cells[Math.floor(it.cells.length / 2)]);
+                const bx = ax + (cx - ax) * 0.8, by = ay + (cy - ay) * 0.8, len = Math.hypot(bx - ax, by - ay);
+                if (len > 8) {
+                    const ux = (bx - ax) / len, uy = (by - ay) / len, hw = Math.max(5, Math.min(10, hexPx * 0.6));
+                    ctx.globalAlpha = it.hint ? 0.6 : 0.9;
+                    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx - ux * hw, by - uy * hw);
+                    ctx.strokeStyle = 'rgba(21,26,18,0.8)'; ctx.lineWidth = 4; ctx.stroke(); ctx.strokeStyle = it.color; ctx.lineWidth = 2; ctx.stroke(); ctx.setLineDash([]);
+                    ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx - ux * hw * 1.6 - uy * hw, by - uy * hw * 1.6 + ux * hw); ctx.lineTo(bx - ux * hw * 1.6 + uy * hw, by - uy * hw * 1.6 - ux * hw); ctx.closePath();
+                    ctx.fillStyle = it.color; ctx.fill(); ctx.strokeStyle = 'rgba(21,26,18,0.8)'; ctx.lineWidth = 1.5; ctx.stroke();
+                    labels.push({ x: ax + (bx - ax) * 0.3 - uy * 14, y: ay + (by - ay) * 0.3 + ux * 14, text: it.hint ? 'W?' : 'W', color: it.color });
+                }
+                ctx.setLineDash([]);
             } else if (it.kind === 'reserva' && pts.length) {
                 const [x, y] = pts[0], rr = Math.max(18, hexPx * 3.2);
                 ctx.beginPath(); ctx.ellipse(x, y, rr * 1.2, rr * 0.9, 0, 0, Math.PI * 2);
@@ -5201,8 +5230,21 @@ class GameUI {
         this.orderRatio = 1.3;       // ventaja mínima para atacar de las órdenes nuevas
         this.replaying = false;
 
+        this.opPreview = null;       // casillas de la línea propuesta bajo el ratón, para verla en el mapa
         this.bindMap();
         document.addEventListener('click', e => this.onAction(e));
+        document.addEventListener('mouseover', e => {
+            const b = e.target.closest?.('[data-preview]');
+            if (!b || !this.game) return;
+            const plan = this.game.frontPlan(this.game.player, +b.dataset.preview);
+            this.opPreview = plan ? plan.line : null;
+            this.view?.draw();
+        });
+        document.addEventListener('mouseout', e => {
+            if (!e.target.closest?.('[data-preview]') || !this.opPreview) return;
+            this.opPreview = null;
+            this.view?.draw();
+        });
         document.addEventListener('input', e => this.onInput(e));
         document.addEventListener('change', e => this.onChange(e));
         document.addEventListener('keydown', e => this.onKey(e));
@@ -6799,8 +6841,21 @@ class GameUI {
         if (op.paused) return ['En pausa', ''];
         if (op.kind === 'reserva') return [plural(n, 'ejército', 'ejércitos'), ''];
         if (!n) return ['Sin ejércitos', 'warn'];
-        if (op.kind === 'defensa') { const k = g.opNeed(op); return k ? [`Faltan ${k}`, 'warn'] : ['Línea cubierta', 'ok']; }
+        if (op.kind === 'defensa') {
+            if (op.state === 'repliega') return ['Se repliega', 'warn'];
+            if (op.state === 'restablece') return ['Vuelve a su línea', 'ok'];
+            const k = g.opNeed(op); return k ? [`Faltan ${k}`, 'warn'] : ['Línea cubierta', 'ok'];
+        }
         return op.waiting ? ['Espera ventaja', 'warn'] : [op.auto === 'manual' ? 'Manual' : 'Avanzando', 'ok'];
+    }
+    // Qué haría una línea manual (sin hacerlo), guardado por turno y versión de la partida para no recalcularlo al dibujar.
+    defenseHint(op) {
+        const g = this.game, key = `${op.id}:${g.turn}:${g.version}:${g.armyVersion}:${g.orderVersion}:${op.cells.join()}`;
+        if ((this._hints ??= new Map()).has(key)) return this._hints.get(key);
+        if (this._hints.size > 50) this._hints.clear();
+        const h = g.defenseDecide(op);
+        this._hints.set(key, h);
+        return h;
     }
     // Por qué pide atención una operación, en una frase para el parte de operaciones.
     opWhy(op) {
@@ -6834,6 +6889,17 @@ class GameUI {
                 front = ratio === null ? '<p class="small muted">Aún no toca al enemigo: no hay relación de fuerzas que calcular.</p>'
                     : `<div class="meter op-meter"><i style="width:${pct(ratio)}%;background:${ratio >= op.ratio ? 'var(--go)' : 'var(--signal)'}"></i><b style="left:${pct(op.ratio)}%"></b></div>
                        <p class="small">Relación de fuerzas en el frente: <b>${decimal(ratio)} a 1</b> contra ${plural(foes.size, 'ejército enemigo', 'ejércitos enemigos')} (la raya es la ventaja que pide: ${decimal(op.ratio)}).</p>`;
+            }
+            if (op.kind === 'ofensiva' && !members.length) front += `<p class="small warn-text">${esc(g.opWaitNote(op))}</p>`;
+            if (op.kind === 'defensa') {
+                // Estado de la línea y relación de fuerzas en su franja; las rayas: 1 (por debajo se repliega) y 1,5 (vuelve).
+                const hint = op.auto === 'manual' ? this.defenseHint(op) : null, rel = hint ? hint.ev.rel : op.rel ?? g.lineEval(op).rel;
+                const pct = x => Math.max(3, Math.min(100, x / 3 * 100));
+                front = `<p class="small" style="margin-top:6px">Estado: <b>${OP_LINE_STATES[op.state] ?? 'Aguanta'}</b>${op.drawn && op.drawn.join() !== op.cells.join() ? ` · replegada a ${esc(g.lineLabel(p0, op.cells))}; la línea dibujada se guarda y vuelve a ella cuando tenga 1,5 a 1` : ''}.</p>
+                    ${hint?.state === 'repliega' ? `<p class="small warn-text">Se replegaría a ${esc(g.lineLabel(p0, hint.cells))}: está en manual y no se mueve sola.</p>` : ''}
+                    ${rel === null ? '<p class="small muted">Sin enemigos a la vista en su franja.</p>'
+                    : `<div class="meter op-meter"><i style="width:${pct(rel)}%;background:${rel >= LINE_HOLD ? 'var(--go)' : 'var(--signal)'}"></i><b style="left:${pct(LINE_HOLD)}%"></b><b style="left:${pct(LINE_RETURN)}%"></b></div>
+                       <p class="small">Relación de fuerzas en su franja: <b>${decimal(rel)} a 1</b> (por debajo de ${decimal(LINE_HOLD)} se repliega; con ${decimal(LINE_RETURN)} en la línea dibujada, vuelve).</p>`}`;
             }
             const where = op.kind === 'ofensiva' ? `Objetivo: ${esc(g.placeName(op.cells[op.cells.length - 1]))}` : op.kind === 'defensa' ? `${plural(op.cells.length, 'casilla', 'casillas')} de línea` : `Zona de reunión: ${esc(g.placeName(op.cells[0]))}`;
             detail = `<div class="bloc mine op-detail" style="border-left-color:${opColor(op)}">
