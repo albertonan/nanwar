@@ -1988,6 +1988,95 @@ class GameEngine {
         const own = members.reduce((s, a) => s + unitPower(a.units, 'def', rules) * (line.has(a.cell) ? this.defBonus(id, a.cell) : mean), 0);
         return { own, enemy, rel: enemy > 0 ? own / enemy : null, breach, mean };
     }
+    // Río delante de una casilla (hacia el enemigo): defiende ×RIVER_DEFENSE a quien la guarda.
+    riverFront(cell, dir) {
+        if (!dir) return 1;
+        for (let d = 0; d < 6; d++) {
+            const j = G.nb[cell * 6 + d];
+            if (j >= 0 && RIVER[cell * 6 + d] && (G.cx[j] - G.cx[cell]) * dir[0] + (G.cy[j] - G.cy[cell]) * dir[1] > 0) return CONFIG.RIVER_DEFENSE;
+        }
+        return 1;
+    }
+    // Mejor línea para `owner` en `ref` o detrás de ella. opts: { ref: casillas, forces: ejércitos, enemy: ataque enemigo,
+    // dir: hacia el enemigo, limit: hasta dónde buscar detrás (subpuntos de marcha, o casillas si `steps`), keep: casilla
+    // que no puede quedar delante (la capital), base y baseLimit: casillas desde las que se mide el límite total }.
+    // Candidatas: la propia `ref` y caminos de un extremo al otro a ⅓, ⅔ y toda la profundidad, por casillas propias,
+    // que cuestan menos cuanto más defienden. Gana, por este orden: superioridad, poder cubrirla y defensa del terreno
+    // con las ciudades que protege. Devuelve { cells, rel, ok, cover, mean, front: ciudades delante, same } o null.
+    bestLine(owner, opts) {
+        const { ref, forces = [], enemy = 0, dir, limit, steps = false, keep = -1, base = null, baseLimit = Infinity } = opts;
+        if (!ref?.length) return null;
+        const rules = this.rules(owner), own = forces.reduce((s, a) => s + unitPower(a.units, 'def', rules), 0), unit = steps ? 1 : MOVE;
+        const usable = c => isLand(c) && this.owner[c] === owner && !(this.armyAt[c] && this.atWar(owner, this.armies.get(this.armyAt[c]).owner));
+        const spread = (from, max, behindOnly) => {
+            const dist = new Map(), heap = new MinHeap();
+            for (const c of from) if (usable(c)) { dist.set(c, 0); heap.push(0, c); }
+            while (heap.size) {
+                const [k, v] = heap.pop();
+                if (k > dist.get(v)) continue;
+                for (let d = 0; d < 6; d++) {
+                    const u = G.nb[v * 6 + d];
+                    if (u < 0 || !usable(u) || (behindOnly && this.lineSide(ref, dir, u) > 0)) continue;
+                    const c = k + (steps ? 1 : this.stepCost(owner, u, (d + 3) % 6, false));
+                    if (c <= max && c < (dist.get(u) ?? Infinity)) { dist.set(u, c); heap.push(c, u); }
+                }
+            }
+            return dist;
+        };
+        const zone = spread(ref, limit, true);
+        if (base && Number.isFinite(baseLimit)) { const total = spread(base, baseLimit, false); for (const c of [...zone.keys()]) if (!total.has(c)) zone.delete(c); }
+        const cities = new Set();
+        for (const c of zone.keys()) for (const x of this.nearCells(c, 2).keys()) if (CITY_OF[x] >= 0 && this.owner[x] === owner) cities.add(x);
+        const judge = (cells, depth) => {
+            if (!cells.length || !cells.every(usable)) return null;
+            if (keep >= 0 && this.lineSide(cells, dir, keep) > 0 && (zone.has(keep) || cities.has(keep))) return null;
+            const mean = cells.reduce((s, c) => s + this.defBonus(owner, c) * this.riverFront(c, dir), 0) / cells.length;
+            const rel = enemy > 0 ? own * mean / enemy : null, front = [];
+            let behind = 0;
+            for (const c of cities) { const side = this.lineSide(cells, dir, c); if (side > 0) front.push(c); else if (side < 0) behind++; }
+            return { cells, rel, ok: rel === null || rel >= 1, cover: cells.length <= forces.length, mean, front,
+                score: mean + 0.05 * (behind - front.length) - 0.05 * depth, same: cells.length === ref.length && cells.every((c, i) => c === ref[i]) };
+        };
+        const found = [judge(ref, 0)];
+        if (dir && zone.size) {
+            const tx = -dir[1], ty = dir[0], ends = [ref[0], ref[ref.length - 1]];
+            for (const f of [1 / 3, 2 / 3, 1]) {
+                const D = f * limit;
+                const anchor = e => {
+                    let best = -1, bs = Infinity;
+                    for (const [c, k] of zone) {
+                        const s = Math.abs(((G.cx[c] - G.cx[e]) * tx + (G.cy[c] - G.cy[e]) * ty) / G.W) + Math.abs(k - D) / unit;
+                        if (s < bs) { bs = s; best = c; }
+                    }
+                    return best;
+                };
+                const a0 = anchor(ends[0]), a1 = anchor(ends[1]);
+                if (a0 < 0 || a1 < 0) continue;
+                // Camino de a0 a a1 por la zona: cada casilla cuesta la inversa de su defensa, más si se aparta de la profundidad D.
+                const cost = new Map([[a0, 0]]), prev = new Map(), heap = new MinHeap();
+                heap.push(0, a0);
+                while (heap.size) {
+                    const [k, v] = heap.pop();
+                    if (v === a1) break;
+                    if (k > cost.get(v)) continue;
+                    for (let d = 0; d < 6; d++) {
+                        const u = G.nb[v * 6 + d];
+                        if (u < 0 || !zone.has(u)) continue;
+                        const w = 1 / (this.defBonus(owner, u) * this.riverFront(u, dir)) + 0.15 * Math.abs(zone.get(u) - D) / unit;
+                        if (k + w < (cost.get(u) ?? Infinity)) { cost.set(u, k + w); prev.set(u, v); heap.push(k + w, u); }
+                    }
+                }
+                if (!cost.has(a1)) continue;
+                const cells = [a1];
+                while (cells[cells.length - 1] !== a0) cells.push(prev.get(cells[cells.length - 1]));
+                found.push(judge(cells.reverse(), f));
+            }
+        }
+        const list = found.filter(Boolean);
+        if (!list.length) return null;
+        list.sort((x, y) => (y.ok - x.ok) || (y.cover - x.cover) || (y.score - x.score));
+        return list[0];
+    }
     createOp(owner, kind, cells, opts = {}) {
         if (!['ofensiva', 'defensa', 'reserva'].includes(kind) || (!opts.noCap && this.opsOf(owner).length >= this.commandCap(owner))) return null;
         cells = cells.filter(c => Number.isInteger(c) && c >= 0 && c < G.N && isLand(c));

@@ -851,6 +851,40 @@ const CHECKS = [
         T.eq([oo.drawn, oo.state, old.armies.get(a.id).from], [oo.cells, 'aguanta', 0], 'partida antigua: drawn = cells, aguanta');
         return true;
     }],
+    ['L2 · la búsqueda prefiere las colinas o la montaña de detrás a la llanura de la frontera', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        const s = T.sector(g, es, fr);
+        const forces = s.back.slice(0, 4).map(c => T.army(g, es, c, 3));
+        for (let k = 0; k < 4; k++) T.army(g, fr, s.front(k), 0, 4);
+        const dir = g.lineDir(es, s.line), enemy = 4 * 4 * CONFIG.TYPES.tank.atk;
+        const res = g.bestLine(es, { ref: s.line, forces, enemy, dir, limit: 2 * 4 * MOVE });
+        const flat = s.line.reduce((t, c) => t + g.defBonus(es, c), 0) / s.line.length;
+        T.ok(res && !res.same, 'propone otra línea');
+        T.ok(res.mean > flat, `defiende más (${res.mean.toFixed(2)} > ${flat.toFixed(2)})`);
+        T.ok(res.cells.every(c => g.owner[c] === es), 'por territorio propio');
+        T.ok(res.cells.every((c, i) => i === 0 || G.dirTo(res.cells[i - 1], c) >= 0), 'continua, sin huecos');
+        T.ok(res.cells.every(c => g.lineSide(s.line, dir, c) <= 0), 'detrás de la frontera');
+        T.eq(res.cover, res.cells.length <= forces.length, 'dice si se puede cubrir');
+        return true;
+    }],
+    ['L2 · líneas de una o dos casillas y la capital nunca por delante', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        const s = T.sector(g, es, fr);
+        const dir = g.lineDir(es, s.line), forces = [T.army(g, es, s.back[0], 2)];
+        for (const ref of [[s.center], s.line.slice(0, 2)]) {
+            const res = g.bestLine(es, { ref, forces, enemy: 100, dir: g.lineDir(es, ref), limit: 2 * 4 * MOVE });
+            T.ok(res && res.cells.length >= 1, `línea de ${ref.length}: ${res?.cells.length} casillas`);
+        }
+        const keep = s.back[0];
+        const res = g.bestLine(es, { ref: s.line, forces, enemy: 100, dir, limit: 2 * 4 * MOVE, keep });
+        T.ok(g.lineSide(res.cells, dir, keep) <= 0, 'la casilla que no se puede dejar queda en la línea o detrás');
+        T.eq(g.bestLine(es, { ref: [], forces, enemy: 0, dir, limit: 10 }), null, 'sin trazado no hay línea');
+        return true;
+    }],
     ['Mapa · vista y capas en un solo panel, recordadas en el dispositivo', () => {
         const g = T.uiStart('es');
         const key = k => document.dispatchEvent(new KeyboardEvent('keydown', { key: k }));
