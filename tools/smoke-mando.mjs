@@ -753,6 +753,20 @@ const CHECKS = [
         document.querySelector('[data-action="assist-back"]').click();
         return true;
     }],
+    ['Revisión · el parte de operaciones dice qué pide cada una y no se apila turno tras turno', async () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        ui.prefs.watch = 'directo';
+        g.declareWar(es, fr);
+        const [a0] = T.border(g, es, fr), [a1] = T.border(g, es, fr, 6);
+        const op = g.createOp(es, 'defensa', g.planFort(es, a0, a1).path, { name: 'Línea de prueba' });
+        g.assignArmy(T.army(g, es, op.cells[0], 2), op.id);
+        for (let i = 0; i < 2; i++) await ui.endTurnFlow();
+        const partes = ui.flashes.filter(f => f.key === 'parte');
+        T.eq(partes.length, 1, 'un solo parte');
+        T.ok(/Línea de prueba<\/b>: \d+ de sus \d+ casillas de línea est(á|án) sin tropas/.test(partes[0].html), `dice qué le falta: ${partes[0].html}`);
+        T.eq([partes[0].label, partes[0].data], ['Ver la operación', op.id], 'el botón abre esa operación');
+        return true;
+    }],
     ['Revisión · sin infantería, deja de guarnición la primera unidad que tenga', () => {
         const g = T.game(), es = T.nation('es');
         g.start(es);

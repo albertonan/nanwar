@@ -5347,7 +5347,7 @@ class GameUI {
                 break;
             }
             case 'goal': g.toggleGoal(g.player, +d.pid); break;
-            case 'open-command': this.tab = 'mando'; this.drawerOpen = true; break;
+            case 'open-command': this.tab = 'mando'; this.drawerOpen = true; if (+d.id && g.ops.has(+d.id)) this.focusOp = +d.id; break;
             case 'tpl-step': { const u = this.tplDraft.units; u[d.unit] = Math.max(0, Math.min(60, u[d.unit] + +d.delta)); this.tplOpen = true; break; }
             case 'tpl-save': if (g.playerSaveTemplate(this.tplDraft.name, this.tplDraft.units)) this.tplDraft = null; this.tplOpen = true; break;
             case 'tpl-del': g.playerDeleteTemplate(+d.index); this.tplOpen = true; break;
@@ -5534,7 +5534,10 @@ class GameUI {
         const myOps = g.opsOf(g.player);
         if (myOps.length) {
             const st = myOps.map(op => this.opState(op)), warn = st.filter(([, c]) => c === 'warn').length;
-            this.notify(`Parte de operaciones: ${plural(myOps.length, 'operación', 'operaciones')}${warn ? `, <b>${warn} ${warn === 1 ? 'pide' : 'piden'} atención</b> (${myOps.filter((op, i) => st[i][1] === 'warn').map(op => esc(op.name)).slice(0, 3).join(', ')})` : ', todas en marcha'}.`, 'open-command', 'Ver el mando');
+            const bad = myOps.filter((op, i) => st[i][1] === 'warn');
+            const why = bad.slice(0, 3).map(op => `<br><b>${esc(op.name)}</b>: ${this.opWhy(op)}.`).join('') + (bad.length > 3 ? `<br>Y ${plural(bad.length - 3, 'otra', 'otras')}.` : '');
+            this.notify(`Parte de operaciones: ${plural(myOps.length, 'operación', 'operaciones')}${warn ? `, <b>${warn} ${warn === 1 ? 'pide' : 'piden'} atención</b>.${why}` : ', todas en marcha.'}`,
+                'open-command', bad.length === 1 ? 'Ver la operación' : 'Ver el mando', { key: 'parte', id: bad.length === 1 ? bad[0].id : 0 });
         }
         for (const t of g.nations[g.player].tech.done) if (!knew.has(t)) this.notify(`${uiIcon('check')} Investigación terminada: <b>${TECH_BY_ID.get(t).name}</b>.`, 'open-research', 'Ver investigación');
         writeSave('auto', g);
@@ -6004,9 +6007,12 @@ class GameUI {
     }
 
     // Aviso pasajero (unos segundos) con un botón opcional.
-    notify(html, action, label) {
-        const note = { html, action, label, id: (this.flashId = (this.flashId ?? 0) + 1) };
-        (this.flashes ??= []).push(note);
+    // Aviso flotante durante 6 segundos. Con `opts.key`, sustituye al aviso anterior de la misma clave (el parte de
+    // operaciones de un turno al del siguiente); `opts.id` va como data-id en el botón.
+    notify(html, action, label, opts = {}) {
+        const note = { html, action, label, key: opts.key, data: opts.id, id: (this.flashId = (this.flashId ?? 0) + 1) };
+        this.flashes = (this.flashes ?? []).filter(x => !opts.key || x.key !== opts.key);
+        this.flashes.push(note);
         setTimeout(() => { this.flashes = this.flashes.filter(x => x !== note); this.renderToasts(); }, 6000);
         this.renderToasts();
     }
@@ -6148,7 +6154,7 @@ class GameUI {
     renderToasts() {
         const g = this.game;
         $('#toasts').innerHTML = (this.flashes ?? []).map(f => `<div class="toast float done"><p>${f.html}</p>
-            ${f.action ? `<div class="row"><button class="btn" data-action="${f.action}">${f.label}</button></div>` : ''}</div>`).join('') + g.proposals.map((pr, i) => {
+            ${f.action ? `<div class="row"><button class="btn" data-action="${f.action}"${f.data ? ` data-id="${f.data}"` : ''}>${f.label}</button></div>` : ''}</div>`).join('') + g.proposals.map((pr, i) => {
             const who = `<b>${g.nm(pr.from)}</b>`;
             let text, yes = 'Aceptar', no = 'Rechazar';
             if (pr.kind === 'paz') text = `${who} te propone la paz.`;
@@ -6345,6 +6351,14 @@ class GameUI {
         if (!n) return ['Sin ejércitos', 'warn'];
         if (op.kind === 'defensa') { const k = g.opNeed(op); return k ? [`Faltan ${k}`, 'warn'] : ['Línea cubierta', 'ok']; }
         return op.waiting ? ['Espera ventaja', 'warn'] : [op.auto === 'manual' ? 'Manual' : 'Avanzando', 'ok'];
+    }
+    // Por qué pide atención una operación, en una frase para el parte de operaciones.
+    opWhy(op) {
+        const g = this.game, n = g.opMembers(op).length;
+        if (!n) return op.kind === 'ofensiva' ? `no tiene ejércitos; añade los libres a ${OP_GATHER_TURNS} turnos de marcha o asígnaselos desde su ficha`
+            : 'no tiene ejércitos; asígnale alguno desde su ficha o desde la pestaña Mando';
+        if (op.kind === 'defensa') { const k = g.opNeed(op); return `${k} de sus ${plural(op.cells.length, 'casilla', 'casillas')} de línea ${k === 1 ? 'está' : 'están'} sin tropas; le ${k === 1 ? 'falta 1 ejército' : `faltan ${k} ejércitos`}, o acorta la línea`; }
+        return `${plural(op.waiting, 'ejército espera', 'ejércitos esperan')} una ventaja de ${decimal(op.ratio)} a 1 que no tiene${op.waiting === 1 ? '' : 'n'}; dale más fuerzas o una postura más agresiva`;
     }
     // Pestaña Mando: operaciones del jugador y la abierta, con sus ejércitos y ajustes.
     renderCommand() {
