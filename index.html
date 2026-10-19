@@ -611,6 +611,7 @@ const TEMPLATES = {
 };
 const OP_GOLD = [0, 50, 100, 200, 400];   // oro por turno que se puede dar a una operación para refuerzos
 const OP_GATHER_TURNS = 3;   // una ofensiva reúne los ejércitos libres a este número de turnos de marcha o menos
+const LINE_BAND = 6;         // franja de una línea de defensa: casillas a esta distancia o menos de su trazado
 // Directiva nacional: la postura fija la ventaja con la que atacan las ofensivas nuevas y un reparto de la renta.
 const POSTURES = {
     defensa: { name: 'Defensa total', ratio: 1.8, budget: { recruit: 45, research: 10, forts: 35, roads: 5 }, desc: 'Ofensivas nuevas en «cauta» (1,8 a 1). Mucho oro para fortificar.' },
@@ -1009,11 +1010,12 @@ class GameEngine {
             armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used]),
             nextArmyId: this.nextArmyId,
             ops: [...this.ops.values()].map(o => ({ id: o.id, owner: o.owner, kind: o.kind, name: o.name, cells: o.cells, ratio: o.ratio, auto: o.auto,
-                paused: o.paused, fortify: o.fortify, since: o.since, waiting: o.waiting, front: o.front ?? -1, gold: o.gold, extra: o.extra ?? 0, poolTurn: o.poolTurn ?? 0, template: o.template, pool: o.pool, formed: o.formed,
+                paused: o.paused, fortify: o.fortify, since: o.since, waiting: o.waiting, front: o.front ?? -1, drawn: o.drawn, state: o.state, rel: o.rel, gold: o.gold, extra: o.extra ?? 0, poolTurn: o.poolTurn ?? 0, template: o.template, pool: o.pool, formed: o.formed,
                 form: o.form ? { name: o.form.name, units: o.form.units, zone: o.form.zone, recruited: o.form.recruited, pending: o.form.pending } : null })),
             armyForms: [...this.armies.values()].filter(a => a.form).map(a => [a.id, a.form]),
             nextOpId: this.nextOpId,
             armyOps: [...this.armies.values()].filter(a => a.op).map(a => [a.id, a.op]),
+            armyFrom: [...this.armies.values()].filter(a => a.from).map(a => [a.id, a.from]),
             orders: [...this.armies.values()].filter(a => a.order).map(a => [a.id, a.order.kind, a.order.dest, a.order.target, a.order.ratio, a.order.flee ? 1 : 0, a.order.since, a.order.stuck]),
             blocs: this.blocs.map(b => ({ id: b.id, name: b.name, founder: b.founder, secret: b.secret, since: b.since, members: [...b.members] })),
             nextBlocId: this.nextBlocId
@@ -1132,7 +1134,7 @@ class GameEngine {
         for (const x of list(data.armies)) {
             const id = int(x?.[0], 1, 1e9, 1), cell = cellIdx(x?.[2]);
             if (!isLand(cell) || g.armyAt[cell] || g.armies.has(id)) continue;
-            g.armies.set(id, { id, owner: nat(x?.[1]), cell, units: { infantry: int(x?.[3], 0, 1e6, 0), tank: int(x?.[4], 0, 1e6, 0), artillery: int(x?.[5], 0, 1e6, 0) }, used: Math.min(999, int(x?.[6], 0, 999, 0) * (x?.[6] >= 999 ? 1 : moveScale)) });
+            g.armies.set(id, { id, owner: nat(x?.[1]), cell, units: { infantry: int(x?.[3], 0, 1e6, 0), tank: int(x?.[4], 0, 1e6, 0), artillery: int(x?.[5], 0, 1e6, 0) }, used: Math.min(999, int(x?.[6], 0, 999, 0) * (x?.[6] >= 999 ? 1 : moveScale)), from: 0 });
             g.armyAt[cell] = id;
         }
         g.nextArmyId = Math.max(int(data.nextArmyId, 1, 1e9, 1), ...[...g.armies.keys()].map(x => x + 1), 1);
@@ -1153,7 +1155,14 @@ class GameEngine {
                 ratio: [0, 1, 1.3, 1.8].includes(Number(o.ratio)) ? Number(o.ratio) : 1.3, auto: ['manual', 'asistida', 'auto'].find(k => k === o.auto) ?? 'manual',
                 paused: !!o.paused, fortify: !!o.fortify, since: int(o.since, 0, 1e6, g.turn), waiting: int(o.waiting, 0, 1e4, 0), uncovered: 0,
                 front: natOrNone(o.front ?? -1), extra: int(o.extra, 0, 1e7, 0), poolTurn: int(o.poolTurn, 0, 1e6, 0), gold: OP_GOLD.includes(Number(o.gold)) ? Number(o.gold) : 0, template: str(o.template, 12) || 'auto', pool: int(o.pool, 0, 1e7, 0), formed: int(o.formed, 0, 1e4, 0), form: null });
-            const f = o.form, op = g.ops.get(id), units = u => ({ infantry: int(u?.infantry, 0, 99, 0), tank: int(u?.tank, 0, 99, 0), artillery: int(u?.artillery, 0, 99, 0) });
+            const op = g.ops.get(id);
+            if (kind === 'defensa') {
+                const drawn = [...new Set(list(o.drawn).slice(0, 400).map(c => int(c, -1, G.N - 1, -1)).filter(c => c >= 0 && isLand(c)))];
+                op.drawn = drawn.length ? drawn : [...op.cells];
+                op.state = ['aguanta', 'repliega', 'restablece'].find(k => k === o.state) ?? 'aguanta';
+                op.rel = Number.isFinite(o.rel) ? Math.max(0, Math.min(1e3, o.rel)) : null;
+            } else { op.drawn = null; op.state = 'aguanta'; op.rel = null; }
+            const f = o.form, units = u => ({ infantry: int(u?.infantry, 0, 99, 0), tank: int(u?.tank, 0, 99, 0), artillery: int(u?.artillery, 0, 99, 0) });
             const zone = int(f?.zone, -1, G.N - 1, -1);
             if (f && zone >= 0 && isLand(zone)) op.form = { name: str(f.name, 40), units: units(f.units), zone, recruited: units(f.recruited),
                 pending: list(f.pending).slice(0, 200).map(x => [int(x?.[0], -1, G.N - 1, -1), units(x?.[1])]).filter(([c]) => c >= 0 && CITY_OF[c] >= 0) };
@@ -1166,6 +1175,10 @@ class GameEngine {
         for (const x of list(data.armyOps)) {
             const a = g.armies.get(int(x?.[0], 1, 1e9, 0)), op = g.ops.get(int(x?.[1], 1, 1e6, 0));
             if (a && op && op.owner === a.owner) a.op = op.id;
+        }
+        for (const x of list(data.armyFrom)) {
+            const a = g.armies.get(int(x?.[0], 1, 1e9, 0)), op = g.ops.get(int(x?.[1], 1, 1e6, 0));
+            if (a && op && op.owner === a.owner && op.kind === 'defensa') a.from = op.id;
         }
         // Órdenes: solo de ejércitos que existen y con destinos que se pueden cumplir (si no, se descartan).
         for (const x of list(data.orders)) {
@@ -1579,7 +1592,7 @@ class GameEngine {
 
     // --- Ejércitos ---
     newArmy(owner, cell, units, used) {
-        const a = { id: this.nextArmyId++, owner, cell, units: copyUnits(units), used };
+        const a = { id: this.nextArmyId++, owner, cell, units: copyUnits(units), used, from: 0 };
         this.armies.set(a.id, a);
         return a;
     }
@@ -1905,6 +1918,76 @@ class GameEngine {
         }
         return t;
     }
+    // --- Franja de una línea de defensa: de qué lado está el enemigo, quién aprieta y si la han roto ---
+    // Defensa que da una casilla a su dueño: terreno, ciudad, capital y fortificación propia, con el tope del combate.
+    defBonus(owner, cell) {
+        let m = terrainOf(cell).def * (CITY_OF[cell] >= 0 ? CONFIG.CITY_DEFENSE : 1) * (CAPITAL_OF[cell] >= 0 ? CONFIG.CAPITAL_DEFENSE : 1);
+        const rf = this.fort[cell] === 1 && this.owner[cell] === owner ? this.rules(owner) : null;
+        if (rf) m *= rf.fortDefense;
+        return Math.min(m, rf ? rf.fortCap : CONFIG.MAX_DEFENSE_BONUS);
+    }
+    // Ataque o defensa de un ejército tal como lo ve `viewer` (con niebla, lo peor de su escalón, como expectedRatio).
+    seenPower(viewer, a, kind) {
+        const r = this.rules(a.owner);
+        if (this.intel(viewer, a.owner, a.cell).exact) return unitPower(a.units, kind, r);
+        const n = countUnits(a.units);
+        return unitPower({ infantry: n <= 3 ? 3 : n <= 9 ? 9 : n <= 24 ? 24 : 40, tank: 0, artillery: 0 }, kind, r);
+    }
+    // Hacia dónde queda el enemigo de una línea: del centro de sus casillas al de la tierra enemiga a 6 casillas o menos.
+    // null si no hay enemigo cerca. Se guarda por trazado y turno.
+    lineDir(owner, cells) {
+        const key = `${this.turn}:${this.version}:${owner}:${cells.length}:${cells[0]}:${cells[cells.length - 1]}`;
+        if ((this._dirs ??= new Map()).has(key)) return this._dirs.get(key);
+        let lx = 0, ly = 0, ex = 0, ey = 0, n = 0;
+        const seen = new Set();
+        for (const c of cells) {
+            lx += G.cx[c]; ly += G.cy[c];
+            for (const x of this.nearCells(c, 6).keys()) if (!seen.has(x) && isLand(x)) { seen.add(x); if (this.atWar(owner, this.owner[x])) { ex += G.cx[x]; ey += G.cy[x]; n++; } }
+        }
+        let dir = null;
+        if (n) {
+            const dx = ex / n - lx / cells.length, dy = ey / n - ly / cells.length, L = Math.hypot(dx, dy);
+            if (L > 0) dir = [dx / L, dy / L];
+        }
+        if (this._dirs.size > 400) this._dirs.clear();
+        this._dirs.set(key, dir);
+        return dir;
+    }
+    // De qué lado de la línea queda una casilla: 1 delante (hacia el enemigo), -1 detrás, 0 en ella o a un costado.
+    lineSide(cells, dir, x) {
+        if (!dir) return 0;
+        let best = cells[0], bd = Infinity;
+        for (const c of cells) { const d = (G.cx[c] - G.cx[x]) ** 2 + (G.cy[c] - G.cy[x]) ** 2; if (d < bd) { bd = d; best = c; } }
+        const vx = G.cx[x] - G.cx[best], vy = G.cy[x] - G.cy[best], L = Math.hypot(vx, vy);
+        if (L < G.W * 0.5) return 0;
+        const s = (vx * dir[0] + vy * dir[1]) / L;
+        return s > 0.5 ? 1 : s < -0.5 ? -1 : 0;
+    }
+    // Franja de una línea: casillas de tierra a LINE_BAND o menos de su trazado actual o del dibujado.
+    lineBand(op, cells = op.cells) {
+        const all = [...new Set([...(op.drawn ?? []), ...cells])], band = new Set();
+        for (const c of all) for (const x of this.nearCells(c, LINE_BAND).keys()) if (isLand(x)) band.add(x);
+        return band;
+    }
+    // Cómo está una línea: fuerza propia (defensa de sus ejércitos por la defensa de su casilla, o la media de la línea si
+    // no están en ella), fuerza enemiga (ataque de los ejércitos enemigos que se ven a 3 casillas o menos) y brecha
+    // (el enemigo tiene o pisa una casilla de la línea, o ha entrado detrás de ella en tierra que era tuya, dentro de su franja).
+    lineEval(op, cells = op.cells, members = this.opMembers(op)) {
+        const id = op.owner, line = new Set(cells), dir = this.lineDir(id, op.drawn ?? cells);
+        const foeOn = c => { const e = this.armyOn(c); return e && this.atWar(id, e.owner) && this.sees(id, c) ? e : null; };
+        let enemy = 0, breach = false;
+        const near = new Set();
+        for (const c of cells) for (const x of this.nearCells(c, 3).keys()) near.add(x);
+        for (const c of near) { const e = foeOn(c); if (e) enemy += this.seenPower(id, e, 'atk'); }
+        for (const c of cells) if (this.atWar(id, this.owner[c]) || foeOn(c)) { breach = true; break; }
+        if (!breach && dir) for (const c of this.lineBand(op, cells)) {
+            if (line.has(c) || this.legal[c] !== id || !(this.atWar(id, this.owner[c]) || foeOn(c))) continue;
+            if (this.lineSide(cells, dir, c) < 0) { breach = true; break; }
+        }
+        const mean = cells.reduce((s, c) => s + this.defBonus(id, c), 0) / Math.max(1, cells.length), rules = this.rules(id);
+        const own = members.reduce((s, a) => s + unitPower(a.units, 'def', rules) * (line.has(a.cell) ? this.defBonus(id, a.cell) : mean), 0);
+        return { own, enemy, rel: enemy > 0 ? own / enemy : null, breach, mean };
+    }
     createOp(owner, kind, cells, opts = {}) {
         if (!['ofensiva', 'defensa', 'reserva'].includes(kind) || (!opts.noCap && this.opsOf(owner).length >= this.commandCap(owner))) return null;
         cells = cells.filter(c => Number.isInteger(c) && c >= 0 && c < G.N && isLand(c));
@@ -1919,7 +2002,7 @@ class GameEngine {
         for (let i = 2; !opts.name && taken.has(name); i++) name = `${base} ${i}`;
         const op = { id: this.nextOpId++, owner, kind, name, cells: kind === 'ofensiva' ? cells : [...new Set(cells)],
             ratio: opts.ratio ?? (kind === 'defensa' ? 1.8 : POSTURES[this.nations[owner].command.posture].ratio), auto: opts.auto ?? 'auto', paused: false, fortify: !!opts.fortify,
-            since: this.turn, waiting: 0, uncovered: 0, gold: OP_GOLD.includes(opts.gold) ? opts.gold : 0, template: opts.template ?? 'auto', pool: 0, formed: 0, form: null };
+            since: this.turn, waiting: 0, uncovered: 0, drawn: kind === 'defensa' ? [...new Set(cells)] : null, state: 'aguanta', rel: null, gold: OP_GOLD.includes(opts.gold) ? opts.gold : 0, template: opts.template ?? 'auto', pool: 0, formed: 0, form: null };
         this.ops.set(op.id, op);
         this.orderVersion++;
         return op;
@@ -1975,7 +2058,7 @@ class GameEngine {
     }
     endOp(op, why = '') {
         if (!this.ops.has(op.id)) return;
-        for (const a of this.armies.values()) { if (a.op === op.id) a.op = 0; if (a.form === op.id) a.form = 0; }
+        for (const a of this.armies.values()) { if (a.op === op.id) a.op = 0; if (a.form === op.id) a.form = 0; if (a.from === op.id) a.from = 0; }
         this.ops.delete(op.id);
         this.orderVersion++;
         if (op.owner === this.player) this.log(`${op.name}: ${why || 'operación terminada'}. Sus ejércitos quedan sin operación.`);
@@ -1990,7 +2073,7 @@ class GameEngine {
     // Un ejército que pasa a otro país llega sin orden ni operación.
     changeOwner(a, owner) {
         a.owner = owner;
-        a.order = null; a.op = 0; a.form = 0;
+        a.order = null; a.op = 0; a.form = 0; a.from = 0;
         this.orderVersion++;
     }
     // Al salir de una ciudad suya, un ejército deja una infantería de guarnición fuera de la operación (como la IA).
@@ -3298,6 +3381,7 @@ class GameEngine {
         this.ops.delete(probe.id);
         this.nextOpId--;
         op.cells = probe.cells;
+        if (op.kind === 'defensa') { op.drawn = [...probe.cells]; op.state = 'aguanta'; }
         op.waiting = 0;
         this.orderVersion++;
         this.log(`${op.name}: nuevo trazado.`);

@@ -61,6 +61,35 @@ const setup = () => {
         },
         // Pasa turnos solo para `owner`: cumple sus órdenes y le devuelve el movimiento.
         turns(g, owner, n) { for (let i = 0; i < n; i++) { g.executeOrders(owner); g.turn++; g.nations[owner].recruited.clear(); for (const a of g.armies.values()) if (a.owner === owner) a.used = 0; } },
+        // Frente artificial: alrededor de una casilla de `a` (una ciudad si `city`) con colinas o montaña detrás, lo que
+        // queda más allá en una dirección pasa a `b`. Devuelve { line: la frontera de `a` como línea continua, center, back:
+        // casillas ásperas de detrás, front(k): casillas de `b` junto a la línea }. Sin ejércitos ni ciudades por medio.
+        sector(g, a, b, { city = false, skip = 0 } = {}) {
+            const rough = c => ['hills', 'mountain'].includes(CELL_TERRAIN[c]);
+            for (const h of G.land) {
+                if (g.owner[h] !== a || (city ? CITY_OF[h] < 0 || CAPITAL_OF[h] >= 0 : CITY_OF[h] >= 0 || CELL_TERRAIN[h] !== 'plain')) continue;
+                const area = [...g.nearCells(h, 6).keys()].filter(isLand);
+                for (let d = 0; d < 6; d++) {
+                    const n = G.nb[h * 6 + d];
+                    if (n < 0) continue;
+                    const L = Math.hypot(G.cx[n] - G.cx[h], G.cy[n] - G.cy[h]), ux = (G.cx[n] - G.cx[h]) / L, uy = (G.cy[n] - G.cy[h]) / L;
+                    const proj = c => ((G.cx[c] - G.cx[h]) * ux + (G.cy[c] - G.cy[h]) * uy) / G.W, perp = c => ((G.cx[c] - G.cx[h]) * -uy + (G.cy[c] - G.cy[h]) * ux) / G.W;
+                    const back = area.filter(c => proj(c) <= -1.5 && proj(c) >= -5 && Math.abs(perp(c)) <= 3 && rough(c) && g.owner[c] === a && !g.armyAt[c]);
+                    if (back.length < 4) continue;
+                    const edge = area.filter(c => proj(c) < 0.8 && proj(c) > -0.6 && Math.abs(perp(c)) <= 2.6);
+                    if (edge.length < 3 || edge.some(c => c !== h && (g.owner[c] !== a || g.armyAt[c] || CITY_OF[c] >= 0 || CELL_TERRAIN[c] !== 'plain'))) continue;
+                    const foe = area.filter(c => proj(c) >= 0.8);
+                    if (foe.some(c => CAPITAL_OF[c] >= 0) || skip-- > 0) continue;
+                    for (const c of foe) { const x = g.armyOn(c); if (x) g.removeArmy(x); g.owner[c] = b; g.legal[c] = b; }
+                    g.version++;
+                    const ends = edge.sort((x, y) => perp(x) - perp(y));
+                    const line = g.planFort(a, ends[0], ends[ends.length - 1]).path;
+                    const front = k => [...new Set(line.flatMap(c => [...G.nb.slice(c * 6, c * 6 + 6)]))].filter(j => j >= 0 && isLand(j) && g.owner[j] === b && !g.armyAt[j])[k];
+                    return { line, center: h, back, front, proj, perp };
+                }
+            }
+            throw new Error('no hay sitio para el frente');
+        },
         // Empieza una partida en la interfaz con el país dado y devuelve su motor.
         uiStart(key, fog = false) {
             for (const d of document.querySelectorAll('dialog[open]')) d.close();
@@ -776,6 +805,50 @@ const CHECKS = [
         g.assignArmy(g.armyOn(city), zone.id);
         g.executeOp(zone);
         T.eq(g.armyOn(city)?.units, { infantry: 0, tank: 1, artillery: 0 }, 'un tanque se queda');
+        return true;
+    }],
+    ['L1 · la franja y la relación de una línea', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        const s = T.sector(g, es, fr);
+        const op = g.createOp(es, 'defensa', s.line);
+        T.eq([op.drawn, op.state], [s.line, 'aguanta'], 'línea dibujada y estado inicial');
+        for (const c of s.line.slice(0, 2)) g.assignArmy(T.army(g, es, c, 2), op.id);
+        let ev = g.lineEval(op);
+        T.eq([ev.rel, ev.breach], [null, false], 'sin enemigos a la vista no hay relación ni brecha');
+        for (let k = 0; k < 3; k++) T.army(g, fr, s.front(k), 0, 3);
+        ev = g.lineEval(op);
+        T.ok(ev.rel !== null && ev.rel < 1 && ev.enemy > 0 && ev.own > 0, `inferioridad ante 3 tanques (${ev.rel})`);
+        const far = G.land.find(c => g.owner[c] === es && T.free(g, c) && !g.nearCells(s.center, 12).has(c));
+        T.army(g, fr, far, 5);
+        T.eq(g.lineEval(op).breach, false, 'un enemigo en otra parte del país no es una brecha de esta línea');
+        const behind = s.back.find(c => !g.armyAt[c]);
+        T.army(g, fr, behind, 1);
+        T.eq(g.lineEval(op).breach, true, 'un enemigo detrás de la línea, en su franja, es una brecha');
+        g.removeArmy(g.armyOn(behind));
+        const lost = s.line[s.line.length - 1];
+        g.owner[lost] = fr; g.version++;
+        T.eq(g.lineEval(op).breach, true, 'una casilla de la línea en manos del enemigo es una brecha');
+        T.ok(g.defBonus(es, s.back.find(c => CELL_TERRAIN[c] === 'mountain') ?? s.back[0]) > g.defBonus(es, s.line[0]), 'el terreno áspero defiende más que la llanura');
+        return true;
+    }],
+    ['L1 · drawn, state y from se guardan y se cargan', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        const s = T.sector(g, es, fr);
+        const op = g.createOp(es, 'defensa', s.line);
+        op.cells = s.line.slice(1); op.state = 'repliega'; op.rel = 0.6;
+        const a = T.army(g, es, s.back[0], 2);
+        a.from = op.id;
+        const data = JSON.parse(JSON.stringify(g.serialize()));
+        const h = GameEngine.load(data), o = h.ops.get(op.id);
+        T.eq([o.drawn, o.cells, o.state, h.armies.get(a.id).from], [s.line, s.line.slice(1), 'repliega', op.id], 'vuelven igual');
+        for (const x of data.ops) { delete x.drawn; delete x.state; }
+        delete data.armyFrom;
+        const old = GameEngine.load(data), oo = old.ops.get(op.id);
+        T.eq([oo.drawn, oo.state, old.armies.get(a.id).from], [oo.cells, 'aguanta', 0], 'partida antigua: drawn = cells, aguanta');
         return true;
     }],
     ['Mapa · vista y capas en un solo panel, recordadas en el dispositivo', () => {
