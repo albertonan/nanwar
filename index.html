@@ -37,6 +37,7 @@
         }
         * { box-sizing: border-box; }
         [hidden] { display: none !important; }
+        .narrow, .sheet-grip { display: none; }
         html, body { height: 100%; margin: 0; }
         body {
             background: var(--sea); color: var(--text);
@@ -401,16 +402,30 @@
                 grid-row: 2; flex-direction: row; justify-content: space-around; gap: 0; padding: 4px max(4px, env(safe-area-inset-right)) max(4px, calc(env(safe-area-inset-bottom) - 16px)) max(4px, env(safe-area-inset-left));
                 border-right: 0; border-top: 2px solid var(--ink);
             }
-            .tool { flex: 1; padding: 6px 0 4px; font-size: 11.5px; }
-            .tool svg { width: 23px; height: 23px; }
+            .tool { flex: 1; padding: 3px 0 2px; gap: 1px; font-size: 10.5px; }
+            .tool svg { width: 20px; height: 20px; }
+            .tool kbd { display: none; }
             #tools hr { display: none; }
             .mobile-only { display: flex !important; }
-            #drawer { position: fixed; inset: 0; width: auto !important; z-index: 20; padding-top: env(safe-area-inset-top); }
+            /* Ficha y panel como hoja inferior de tres tamaños (asa arriba): el mapa sigue a la vista encima. */
+            #drawer {
+                position: fixed; left: 0; right: 0; bottom: 0; height: 46%; width: auto !important; z-index: 20;
+                border-left: 0; border-top: 2px solid var(--ink); border-radius: 14px 14px 0 0; box-shadow: 0 -10px 24px rgba(0, 0, 0, 0.45);
+                padding-bottom: env(safe-area-inset-bottom);
+            }
             #drawer.closed { display: none; }
             #card {
-                left: 0; right: 0; bottom: 0; width: auto; max-height: 52%;
+                left: 0; right: 0; bottom: 0; width: auto; max-height: 40%;
                 border-left: 0; border-top: 6px solid var(--owner, var(--signal)); border-radius: 14px 14px 0 0;
             }
+            body[data-sheet="mini"] #card { max-height: 76px; overflow: hidden; }
+            body[data-sheet="grande"] #card { max-height: calc(100% - 6px); }
+            body[data-sheet="mini"] #drawer { height: 92px; }
+            body[data-sheet="grande"] #drawer { height: calc(100% - 64px - env(safe-area-inset-top)); }
+            .sheet-grip { display: block; position: sticky; top: 0; z-index: 3; height: 18px; margin-bottom: -4px; background: var(--panel); cursor: grab; touch-action: none; }
+            .sheet-grip i { display: block; width: 44px; height: 5px; margin: 7px auto 0; border-radius: 3px; background: var(--muted); opacity: 0.75; }
+            #drawer .sheet-grip { flex: none; border-radius: 14px 14px 0 0; }
+            #drawer .tabs button { padding-top: 8px; padding-bottom: 8px; }
             #setup { left: 0; right: 0; top: auto; bottom: 0; width: auto; max-height: 64%; border-radius: 14px 14px 0 0; padding: 14px 14px 18px; }
             #setup h2 { font-size: 24px; }
             #hint, #hint.beside-card {
@@ -439,11 +454,21 @@
             .rs-card { position: sticky; top: auto; bottom: -14px; max-height: 46vh; overflow-y: auto; box-shadow: 0 -10px 24px rgba(0, 0, 0, 0.45); }
             .rs-card .tip { display: none; }
         }
-        /* Móvil estrecho: la cabecera en dos filas (cifras arriba; órdenes, partida y fin de turno debajo) */
+        /* Móvil estrecho: la cabecera en una sola fila (la bandera sin el nombre, cifras pequeñas y botones cortos) */
         @media (max-width: 520px) {
-            #topbar { flex-wrap: wrap; gap: 6px 10px; padding-bottom: 6px; }
-            #topbar .brand { flex: 1 1 80px; }
-            #btn-orders, #topbar > [data-action="open-game"], #end-turn { flex: 1 1 auto; }
+            #topbar { flex-wrap: nowrap; gap: 8px; min-height: 46px; padding-bottom: 4px; }
+            #topbar .brand { flex: 0 0 auto; }
+            #topbar .brand h1 { display: none; }
+            .figure span { font-size: 10px; }
+            .figure b { font-size: 14px; }
+            .figure b small { font-size: 11px; }
+            .figure.research { max-width: 74px; padding: 2px 6px; }
+            .figure.research b { font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+            #topbar > .btn { flex: 0 0 auto; padding: 7px 10px; font-size: 13.5px; }
+            #topbar > [data-action="open-game"] { margin-left: auto; padding: 7px 11px; font-size: 16px; }
+            #end-turn { padding: 7px 12px; }
+            .wide { display: none; }
+            .narrow { display: inline; }
         }
     </style>
 </head>
@@ -458,8 +483,8 @@
         <button class="btn ghost" data-action="next-army" id="btn-next" title="Seleccionar el siguiente ejército que aún puede moverse">Siguiente ejército <kbd>N</kbd></button>
         <button class="btn" data-action="run-orders" id="btn-orders" hidden title="Cumplir ya las órdenes de varios turnos de tus ejércitos (O). Al terminar el turno se cumplen solas.">Ejecutar órdenes</button>
         <button class="btn" id="btn-install" data-action="install" hidden title="Instalar NanWar como aplicación">Instalar</button>
-        <button class="btn" data-action="open-game">Partida</button>
-        <button class="btn primary" id="end-turn" data-action="end-turn" disabled>Terminar turno <kbd>Intro</kbd></button>
+        <button class="btn" data-action="open-game" aria-label="Partida"><span class="wide">Partida</span><span class="narrow" aria-hidden="true">☰</span></button>
+        <button class="btn primary" id="end-turn" data-action="end-turn" disabled>Terminar<span class="wide"> turno</span> <kbd>Intro</kbd></button>
     </header>
     <main>
         <nav id="tools" aria-label="Herramientas"></nav>
@@ -4397,7 +4422,7 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const PREFS_KEY = 'nanwar.prefs';
 const SPEEDS = { lenta: 1200, normal: 500, rapida: 150 };
 function readPrefs() {
-    const def = { watch: 'directo', speed: 'normal', view: 'realista', supply: false, ops: true };
+    const def = { watch: 'directo', speed: 'normal', view: 'realista', supply: false, ops: true, sheet: 'media' };
     try { return { ...def, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; } catch { return def; }
 }
 function writePrefs(p) { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch { /* sin almacenamiento */ } }
@@ -5241,6 +5266,17 @@ class GameUI {
         this.replaying = false;
 
         this.opPreview = null;       // casillas de la línea propuesta bajo el ratón, para verla en el mapa
+        document.body.dataset.sheet = ['mini', 'media', 'grande'].includes(this.prefs?.sheet) ? this.prefs.sheet : 'media';
+        // Asa de la hoja inferior (móvil): tocarla pasa de mínima a media, a grande y otra vez a mínima; arrastrarla
+        // hacia arriba o hacia abajo la agranda o la achica.
+        let grip = null;
+        document.addEventListener('pointerdown', e => { if (e.target.closest?.('[data-sheet-grip]')) { grip = e.clientY; e.preventDefault(); } });
+        document.addEventListener('pointerup', e => {
+            if (grip === null) return;
+            const dy = e.clientY - grip, sizes = ['mini', 'media', 'grande'], i = sizes.indexOf(document.body.dataset.sheet);
+            grip = null;
+            this.setSheet(Math.abs(dy) < 12 ? sizes[(i + 1) % 3] : sizes[Math.max(0, Math.min(2, i + (dy < 0 ? 1 : -1)))]);
+        });
         this.bindMap();
         document.addEventListener('click', e => this.onAction(e));
         document.addEventListener('mouseover', e => {
@@ -6180,6 +6216,17 @@ class GameUI {
         else if (e.key === 'Enter') { e.preventDefault(); $('#end-turn').click(); }
     }
 
+    // Tamaño de la hoja inferior del móvil (ficha y panel): 'mini', 'media' o 'grande'. Se recuerda en el dispositivo.
+    setSheet(size) {
+        document.body.dataset.sheet = size;
+        this.prefs.sheet = size;
+        writePrefs(this.prefs);
+    }
+    addGrip(el) {
+        if (el && !el.hidden && !el.querySelector(':scope > .sheet-grip'))
+            el.insertAdjacentHTML('afterbegin', '<div class="sheet-grip" data-sheet-grip role="button" aria-label="Agrandar o achicar el panel" title="Toca o arrastra para cambiar el tamaño"><i></i></div>');
+    }
+
     // --- Pintado ---
     render() {
         $('#tooltip').hidden = true;
@@ -6189,6 +6236,7 @@ class GameUI {
         this.renderTools();
         this.renderSetup();
         this.renderCard();
+        this.addGrip($('#card'));
         this.renderToasts();
         this.renderDrawer();
         this.renderHint();
@@ -6222,7 +6270,7 @@ class GameUI {
         $('#btn-next').hidden = p0 === null;
         const pending = p0 === null || g.over ? 0 : g.pendingOrders(p0);
         $('#btn-orders').hidden = !pending;
-        $('#btn-orders').innerHTML = `Ejecutar órdenes <span class="count">${pending}</span> <kbd>O</kbd>`;
+        $('#btn-orders').innerHTML = `<span class="wide">Ejecutar órdenes</span><span class="narrow">Órdenes</span> <span class="count">${pending}</span> <kbd>O</kbd>`;
         $('#btn-install').hidden = !this.installPrompt;
         this.renderResearchFigure();
         this.renderLegend();
@@ -6756,7 +6804,7 @@ class GameUI {
         const unread = g.logs.length - this.seenLog;
         if (this.tab === 'registro' && this.drawerOpen) this.seenLog = g.logs.length;
         const tabs = [['paises', 'Países'], ['mando', 'Mando'], ['alianzas', 'Alianzas'], ['registro', 'Registro']];
-        el.innerHTML = `<div class="tabs">
+        el.innerHTML = `<div class="sheet-grip" data-sheet-grip role="button" aria-label="Agrandar o achicar el panel"><i></i></div><div class="tabs">
             ${tabs.map(([id, label]) => `<button data-action="tab" data-tab="${id}" class="${this.tab === id ? 'on' : ''}">${label}${id === 'registro' && unread > 0 && this.tab !== 'registro' ? `<span class="count">${unread}</span>` : ''}</button>`).join('')}
             <button class="toggle" data-action="drawer" title="${this.drawerOpen ? 'Ocultar el panel' : 'Mostrar el panel'}" aria-label="${this.drawerOpen ? 'Cerrar' : 'Abrir'}">${isMobile() ? '✕' : this.drawerOpen ? '›' : '‹'}</button></div>
             <div class="drawer-body" id="drawer-body"></div>`;

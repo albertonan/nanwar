@@ -101,6 +101,25 @@ try {
     await phone.waitForFunction(() => ui.view.realistic.state === 'ready', null, { timeout: 60000 });
     await phone.evaluate(() => new Promise(r => { ui.view.scale = 1; ui.view.centerOn(game.nations[game.player].capitalCell, 14); ui.view.draw(); setTimeout(r, 1500); }));
     await phone.screenshot({ path: join(out, '9-movil.png') });
+    // El mapa se tiene que ver: cabecera en una fila, barra baja, ficha y panel como hoja que deja mapa encima.
+    const room = await phone.evaluate(() => {
+        const h = sel => document.querySelector(sel).getBoundingClientRect().height;
+        const a = [...game.armies.values()].find(x => x.owner === game.player);
+        ui.select(a.cell); ui.render();
+        const out = { top: h('#topbar'), tools: h('#tools'), stage: h('#stage'), card: h('#card') };
+        ui.setSheet('mini'); out.mini = h('#card');
+        ui.setSheet('grande'); out.grande = h('#card');
+        ui.setSheet('media'); ui.select(-1); ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        out.drawer = h('#drawer'); out.vh = innerHeight;
+        ui.drawerOpen = false; ui.render();
+        return out;
+    });
+    console.log(`móvil: ${JSON.stringify(room)}`);
+    if (room.top > 60) failures.push(`móvil: la cabecera ocupa ${room.top} px (más de una fila)`);
+    if (room.tools > 64) failures.push(`móvil: la barra de herramientas ocupa ${room.tools} px`);
+    if (room.card > room.stage * 0.42) failures.push(`móvil: la ficha tapa ${Math.round(room.card / room.stage * 100)} % del mapa`);
+    if (room.mini > 90 || room.grande < room.stage * 0.8) failures.push(`móvil: tamaños de la hoja mal (${room.mini}, ${room.grande})`);
+    if (room.drawer > room.vh * 0.5) failures.push(`móvil: el panel tapa ${Math.round(room.drawer / room.vh * 100)} % de la pantalla`);
     console.log(`capturas en ${out}`);
 } finally {
     await browser.close();
