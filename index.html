@@ -580,10 +580,10 @@ class MinHeap {
 const emptyUnits = () => ({ infantry: 0, tank: 0, artillery: 0 });
 const copyUnits = u => ({ ...u });
 const countUnits = u => UNIT_KEYS.reduce((s, k) => s + u[k], 0);
-const unitPower = (u, stat) => UNIT_KEYS.reduce((s, k) => s + u[k] * CONFIG.TYPES[k][stat], 0);
+const unitPower = (u, stat, rules = null) => UNIT_KEYS.reduce((s, k) => s + u[k] * (rules ? rules.types[k][stat] : CONFIG.TYPES[k][stat]), 0);
 const unitText = u => UNIT_KEYS.filter(k => u[k] > 0).map(k => `${u[k]}${CONFIG.TYPES[k].short}`).join(' ');
 const unitWords = u => UNIT_KEYS.filter(k => u[k] > 0).map(k => `${u[k]} ${CONFIG.TYPES[k].name.toLowerCase()}`).join(', ');
-const speedOf = u => Math.min(...UNIT_KEYS.filter(k => u[k] > 0).map(k => CONFIG.TYPES[k].speed), 99);
+const speedOf = (u, rules = null) => Math.min(...UNIT_KEYS.filter(k => u[k] > 0).map(k => (rules ? rules.types[k].speed : CONFIG.TYPES[k].speed)), 99);
 const sameUnits = (a, b) => UNIT_KEYS.every(k => a[k] === b[k]);
 const fmtMp = sub => String(Math.round(sub / MOVE * 10) / 10).replace('.', ',');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -855,6 +855,7 @@ class GameEngine {
             overlord: natOrNone(n?.overlord ?? -1),
             tech: techOf(n?.tech)
         }));
+        g.techVersion++;   // lo calculado hasta aquí no conocía la investigación
         for (const row of g.relations) for (const r of row) if (r) Object.assign(r, { state: 'paz', since: 0, truceUntil: 0 });
         for (const x of list(data.relations)) {
             const a = nat(x?.[0]), b = nat(x?.[1]);
@@ -973,7 +974,7 @@ class GameEngine {
         return false;
     }
     economy(id) {
-        const key = `${this.version}:${this.roadVersion}:${this.blocVersion}:${this.devVersion}`;
+        const key = `${this.version}:${this.roadVersion}:${this.blocVersion}:${this.devVersion}:${this.techVersion}`;
         const cached = this.econCache[id];
         if (cached && cached.key === key) return cached;
         const seen = this.reachedRoadCells(id);
@@ -991,7 +992,8 @@ class GameEngine {
         // Un yacimiento siempre rinde su oro y abastece a su provincia. Si una carretera pasa por su casilla, abastece
         // también a las provincias cuya ciudad está en ese mismo tramo de red (territorio propio o aliado).
         const owned = RESOURCES.filter(r => this.owner[r.cell] === id);
-        for (const r of owned) res += r.value * (this.legal[r.cell] === id ? 1 : CONFIG.DISPUTED_INCOME);
+        const rules = this.rules(id);
+        for (const r of owned) res += r.value * (this.legal[r.cell] === id ? 1 : CONFIG.DISPUTED_INCOME) * rules.resIncome;
         const comp = this.roadComponents(id);
         const access = new Map();   // provincia → yacimientos que la abastecen
         for (const p of PROVINCES) {
@@ -1008,7 +1010,7 @@ class GameEngine {
             const list = access.get(G.prov[i]);
             if (!list) continue;
             const v = CELL_VALUE[i] * (this.legal[i] === id ? 1 : CONFIG.DISPUTED_INCOME) * (1 + this.dev[G.prov[i]] / 1000);
-            industry += v * Math.min(CONFIG.RESOURCE_INDUSTRY_MAX, CONFIG.RESOURCE_INDUSTRY * list.length);
+            industry += v * Math.min(rules.resIndustryMax, rules.resIndustry * list.length);
         }
         const resources = owned;
         const looseResources = owned.filter(r => comp[r.cell] < 0);   // sin carretera: solo abastecen a su provincia
@@ -1071,10 +1073,10 @@ class GameEngine {
     // Alcance del suministro: casillas propias o aliadas cerca de la red de carreteras unida a la capital o de una ciudad propia.
     // Devuelve, por casilla, el alcance que le queda (−1 = sin suministro).
     supplyMap(id) {
-        const key = `${this.version}:${this.roadVersion}:${this.blocVersion}`;
+        const key = `${this.version}:${this.roadVersion}:${this.blocVersion}:${this.techVersion}`;
         const cached = this.supplyCache[id];
         if (cached && cached.key === key) return cached.map;
-        const net = this.economy(id).seen, R = CONFIG.SUPPLY_ROAD_RANGE;
+        const net = this.economy(id).seen, R = this.rules(id).supplyRoad;
         const range = new Int8Array(G.N).fill(-1);
         const buckets = Array.from({ length: R + 1 }, () => []);
         const seed = (cell, r) => { if (range[cell] < r) { range[cell] = r; buckets[r].push(cell); } };
@@ -1099,7 +1101,7 @@ class GameEngine {
     inSupply(id, cell) { return this.supplyMap(id)[cell] >= 0; }
     powers() {
         const p = new Array(this.nations.length).fill(0);
-        for (const a of this.armies.values()) p[a.owner] += unitPower(a.units, 'atk') + unitPower(a.units, 'def');
+        for (const a of this.armies.values()) { const r = this.rules(a.owner); p[a.owner] += unitPower(a.units, 'atk', r) + unitPower(a.units, 'def', r); }
         return p;
     }
     landCounts() {
@@ -1124,18 +1126,18 @@ class GameEngine {
     }
 
     // --- Obras públicas ---
-    roadEdgeCost(u, d, cls) {
+    roadEdgeCost(u, d, cls, mult = 1) {
         const cur = this.road[u * 6 + d];
         if (cur >= cls) return 0.01;   // tramo ya construido: casi gratis, pero se prefiere el trazado corto
         const v = G.nb[u * 6 + d];
         const t = Math.max(terrainOf(u).cost, terrainOf(v).cost) + RIVER[u * 6 + d];   // un puente cuesta como un tramo más
         const base = cls === 1 ? CONFIG.ROAD_COST : (cur === 1 ? CONFIG.HIGHWAY_COST : CONFIG.ROAD_COST + CONFIG.HIGHWAY_COST);
-        return base * t;
+        return base * t * mult;
     }
     // Trazado más barato por territorio propio desde `from` hasta la primera casilla que cumpla `isTarget`.
     planRoad(id, from, isTarget, cls) {
         if (this.owner[from] !== id) return null;
-        const dist = new Map([[from, 0]]), prev = new Map(), heap = new MinHeap();
+        const dist = new Map([[from, 0]]), prev = new Map(), heap = new MinHeap(), mult = this.rules(id).roadCost;
         heap.push(0, from);
         let goal = -1;
         while (heap.size) {
@@ -1145,7 +1147,7 @@ class GameEngine {
             for (let d = 0; d < 6; d++) {
                 const v = G.nb[u * 6 + d];
                 if (v < 0 || !isLand(v) || this.owner[v] !== id) continue;
-                const nd = d0 + this.roadEdgeCost(u, d, cls);
+                const nd = d0 + this.roadEdgeCost(u, d, cls, mult);
                 if (nd < (dist.get(v) ?? Infinity)) { dist.set(v, nd); prev.set(v, u); heap.push(nd, v); }
             }
         }
@@ -1179,12 +1181,12 @@ class GameEngine {
         for (let c = to; c !== -1; c = prev.get(c)) path.push(c);
         path.reverse();
         const cells = path.filter(c => !this.fort[c] && !this.fortWork.has(c));
-        return { path, cells, cost: cells.length * CONFIG.FORT_COST, cls: 'fort' };
+        return { path, cells, cost: cells.length * this.rules(id).fortCost, cls: 'fort' };
     }
     buildFort(id, plan) {
         const n = this.nations[id];
         if (!plan || !plan.cells.length || plan.cost > n.gold) return 0;
-        for (const c of plan.cells) this.fortWork.set(c, { owner: id, left: CONFIG.FORT_TURNS });
+        for (const c of plan.cells) this.fortWork.set(c, { owner: id, left: this.rules(id).fortTurns });
         n.gold -= plan.cost;
         this.fortVersion++;
         return plan.cells.length;
@@ -1249,14 +1251,16 @@ class GameEngine {
     }
     // Penalización por estar rodeado: multiplicador de ataque y defensa (1 si no lo está).
     flankFactor(owner, cell) {
+        const r = this.rules(owner);
+        if (r.fortFlankImmune && this.fort[cell] === 1 && this.owner[cell] === owner) return 1;   // casamatas
         const n = this.hostileSides(owner, cell);
-        return n >= CONFIG.SURROUNDED_SIDES ? CONFIG.SURROUNDED_FACTOR : n >= CONFIG.FLANKED_SIDES ? CONFIG.FLANKED_FACTOR : 1;
+        return n >= CONFIG.SURROUNDED_SIDES ? r.surrounded : n >= CONFIG.FLANKED_SIDES ? r.flanked : 1;
     }
     moveBudget(owner, cell, units, used) {
         if (!this.inSupply(owner, cell)) return Math.max(0, 1 - used);
         const sides = this.hostileSides(owner, cell);
         if (sides >= CONFIG.SURROUNDED_SIDES) return Math.max(0, 1 - used);   // cercado: solo el paso mínimo
-        const full = speedOf(units) * MOVE * (sides >= CONFIG.FLANKED_SIDES ? 0.5 : 1);
+        const full = speedOf(units, this.rules(owner)) * MOVE * (sides >= CONFIG.FLANKED_SIDES ? 0.5 : 1);
         return Math.max(0, Math.floor(full) - used);
     }
     mp(a) { return this.moveBudget(a.owner, a.cell, a.units, a.used); }
@@ -1331,11 +1335,8 @@ class GameEngine {
                     const o = this.owner[v];
                     const hostile = this.atWar(a, o);
                     if (!(o === a || hostile || this.allied(a, o))) continue;
-                    const roadCls = uSea ? 0 : this.road[u * 6 + d];
-                    const step = roadCls ? CONFIG.ROAD_MOVE[roadCls]
-                        : MOVE * terrainOf(v).cost + (!uSea && RIVER[u * 6 + d] ? CONFIG.RIVER_CROSSING : 0);
-                    const walled = hostile && this.fort[v] === 1;   // muro enemigo: un punto más y detiene la marcha
-                    const nc = c + step + (hostile ? MOVE / 2 : 0) + (walled ? MOVE : 0);
+                    const walled = hostile && this.fort[v] === 1;   // muro enemigo: cuesta más y detiene la marcha
+                    const nc = c + this.stepCost(a, u, d, hostile);
                     if (nc > mp) {
                         if (fresh && mp > 0 && u === start && !uSea && !exp.has(v) && !term.has(v)) term.set(v, { cost: mp, prev: u, landing: false });
                         continue;
@@ -1387,6 +1388,17 @@ class GameEngine {
         if (this.motion.length > 400) this.motion.splice(0, this.motion.length - 400);
     }
 
+    // Subpuntos que le cuesta a un ejército de `owner` pasar de la casilla u (de tierra o de mar) a su vecina de tierra
+    // en la dirección d: terreno o carretera según sus reglas, río, entrada en territorio enemigo y muro del enemigo
+    // (que cuesta según las reglas de quien lo construyó).
+    stepCost(owner, u, d, hostile) {
+        const v = G.nb[u * 6 + d], r = this.rules(owner), uSea = !isLand(u);
+        const roadCls = uSea ? 0 : this.road[u * 6 + d];
+        const step = roadCls ? r.roadMove[roadCls] : MOVE * r.terrainCost[CELL_TERRAIN[v]] + (!uSea && RIVER[u * 6 + d] ? r.riverCrossing : 0);
+        const walled = hostile && this.fort[v] === 1;
+        return step + (hostile ? MOVE / 2 : 0) + (walled ? this.rules(this.owner[v]).wallCost : 0);
+    }
+
     attack(army, from, target, r) {
         // Un destacamento que ataca desde su propia casilla aún no está registrado en ella: battle() lo asienta al final.
         if (from !== army.cell) army = this.moveArmy(army, from, r);
@@ -1397,18 +1409,19 @@ class GameEngine {
 
     // Factores de un combate, sin azar: sirven para resolverlo, preverlo y explicarlo.
     combatFactors(attOwner, attUnits, fromCell, def, cell) {
-        const terrain = terrainOf(cell), d = G.dirTo(fromCell, cell);
+        const terrain = terrainOf(cell), d = G.dirTo(fromCell, cell), ra = this.rules(attOwner), rd = this.rules(def.owner);
         const parts = [];
         if (terrain.def > 1) parts.push([terrain.name.toLowerCase(), terrain.def]);
-        if (d >= 0 && RIVER[fromCell * 6 + d]) parts.push(['río', CONFIG.RIVER_DEFENSE]);
+        if (d >= 0 && RIVER[fromCell * 6 + d] && !ra.ignoreRiver) parts.push(['río', CONFIG.RIVER_DEFENSE]);
         if (CITY_OF[cell] >= 0) parts.push(['ciudad', CONFIG.CITY_DEFENSE]);
         if (CAPITAL_OF[cell] >= 0) parts.push(['capital', CONFIG.CAPITAL_DEFENSE]);
-        if (this.fort[cell] === 1) parts.push(['fortificación', CONFIG.FORT_DEFENSE]);
+        if (this.fort[cell] === 1) parts.push(['fortificación', rd.fortDefense]);
         const raw = parts.reduce((m, [, x]) => m * x, 1);
-        const bonus = Math.min(raw, CONFIG.MAX_DEFENSE_BONUS);
+        const cap = this.fort[cell] === 1 ? rd.fortCap : CONFIG.MAX_DEFENSE_BONUS;
+        const bonus = Math.min(raw, cap);
         const attFlank = this.flankFactor(attOwner, fromCell), defFlank = this.flankFactor(def.owner, cell);
-        const baseAtk = unitPower(attUnits, 'atk'), baseDef = unitPower(def.units, 'def');
-        return { baseAtk, baseDef, parts, bonus, capped: raw > bonus, attFlank, defFlank,
+        const baseAtk = unitPower(attUnits, 'atk', ra), baseDef = unitPower(def.units, 'def', rd);
+        return { baseAtk, baseDef, parts, bonus, cap, capped: raw > bonus, attFlank, defFlank,
             atk: baseAtk * attFlank, dfn: Math.max(0.5, baseDef * bonus * defFlank) };
     }
     // Probabilidad de que gane el atacante (cada lado tira un ±20 % de azar).
@@ -1430,7 +1443,7 @@ class GameEngine {
         const dfn = fx.dfn * roll();
         const attWins = atk > dfn;
         const [w, l] = attWins ? [atk, dfn] : [dfn, atk];
-        const winnerLoss = 0.3 * l / w;
+        const winnerLoss = 0.3 * l / w * this.rules(attWins ? att.owner : def.owner).winnerLoss;
         const loserLoss = Math.min(1, 0.35 + 0.35 * (w / l - 1));
         const lostA = this.applyLosses(att.units, attWins ? winnerLoss : loserLoss, attWins);
         const lostD = this.applyLosses(def.units, attWins ? loserLoss : winnerLoss, !attWins);
@@ -1461,7 +1474,7 @@ class GameEngine {
     // Parte de combate para el registro, contado desde el lado del jugador.
     battleReport(a, d, p, fx, atk, dfn, attWins, nA0, nD0, nA1, nD1, retreatNote) {
         const num = x => String(Math.round(x * 100) / 100).replace('.', ',');
-        const factors = fx.parts.map(([n, x]) => ` ×${num(x)} ${n}`).join('') + (fx.capped ? ` (tope ×${CONFIG.MAX_DEFENSE_BONUS})` : '') + (fx.defFlank < 1 ? ` ×${num(fx.defFlank)} rodeado` : '');
+        const factors = fx.parts.map(([n, x]) => ` ×${num(x)} ${n}`).join('') + (fx.capped ? ` (tope ×${num(fx.cap)})` : '') + (fx.defFlank < 1 ? ` ×${num(fx.defFlank)} rodeado` : '');
         const atkTxt = `${Math.round(fx.baseAtk)}${fx.attFlank < 1 ? ` ×${num(fx.attFlank)} rodeado` : ''}`;
         const defTxt = `${Math.round(fx.baseDef)}${factors}${factors ? ` = ${Math.round(fx.dfn)}` : ''}`;
         const luck = `con el azar, ${Math.round(atk)} contra ${Math.round(dfn)}`;
@@ -1515,7 +1528,7 @@ class GameEngine {
         if (byForce && prev >= 0 && this.owner[cell] === a && this.legal[cell] !== a) {
             this.sieges.set(cell, { by: a, prev, held: 0 });
             if (this.involvesPlayer(a, prev, this.legal[cell])) {
-                this.log(`${this.nm(a)} asedia ${p.cityName} (${p.name}): debe mantener sus tropas allí ${CONFIG.SIEGE_TURNS} turnos para tomarla.`);
+                this.log(`${this.nm(a)} asedia ${p.cityName} (${p.name}): debe mantener sus tropas allí ${this.rules(a).siegeTurns} turnos para tomarla.`);
             }
             return;
         }
@@ -1766,8 +1779,9 @@ class GameEngine {
         const byType = {};
         for (const r of list) byType[r.type] = (byType[r.type] ?? 0) + 1;
         let disc = 0;
-        for (const [k, v] of Object.entries(CONFIG.RESOURCE_DISCOUNT[type])) disc += v * (byType[k] ?? 0);
-        return Math.round(CONFIG.TYPES[type].cost * (1 - Math.min(CONFIG.MAX_DISCOUNT, disc)));
+        const r = this.rules(id);
+        for (const [k, v] of Object.entries(CONFIG.RESOURCE_DISCOUNT[type])) disc += v * (byType[k] ?? 0) * r.discountMult;
+        return Math.round(CONFIG.TYPES[type].cost * (1 - Math.min(r.maxDiscount, disc)));
     }
     // Cupo de reclutamiento por turno de una provincia: crece con su población, su desarrollo, sus conexiones y los
     // yacimientos que la abastecen, y es mayor en la capital.
@@ -1777,10 +1791,16 @@ class GameEngine {
         const dev = Math.floor(this.dev[p.id] / 250);
         if (dev) parts.push(['desarrollo', dev]);
         if (e.connected.has(p.id)) parts.push(['carretera a la capital', 1]);
-        if ([0, 1, 2, 3, 4, 5].some(d => this.road[p.city * 6 + d] === 2)) parts.push(['autopista', 1]);
+        const r = this.rules(nation);
+        if (r.recruitAll) parts.push(['investigación', r.recruitAll]);
+        if ([0, 1, 2, 3, 4, 5].some(d => this.road[p.city * 6 + d] === 2)) parts.push(['autopista', r.highwayRecruit]);
         const mines = Math.floor((e.access.get(p.id)?.length ?? 0) / 2);
         if (mines) parts.push(['yacimientos', mines]);
-        if (CAPITAL_OF[p.city] === nation) parts.push(['capital', 2]);
+        if (CAPITAL_OF[p.city] === nation) parts.push(['capital', r.capitalRecruit]);
+        if (r.recruitMult > 1) {
+            const sum = parts.reduce((s, [, n]) => s + n, 0);
+            parts.push(['movilización general', Math.floor(sum * r.recruitMult) - sum]);
+        }
         return parts;
     }
     recruitCap(nation, p) { return this.recruitBreakdown(nation, p).reduce((s, [, n]) => s + n, 0); }
@@ -1826,7 +1846,7 @@ class GameEngine {
             if (this.owner[cell] !== id) { this.sieges.delete(cell); continue; }
             const ar = this.armyOn(cell);
             if (!ar || ar.owner !== id) { s.held = 0; continue; }   // sin tropas encima, el asedio no avanza
-            if (++s.held >= CONFIG.SIEGE_TURNS) { this.sieges.delete(cell); this.completeCity(cell, id, s.prev, true); }
+            if (++s.held >= this.rules(id).siegeTurns) { this.sieges.delete(cell); this.completeCity(cell, id, s.prev, true); }
             if (this.over) return 0;
         }
         const econ = this.economy(id);
@@ -2330,20 +2350,20 @@ class GameEngine {
         if (!targets.length) return;
         const dist = this.field(id, targets);
         const mine = [...this.armies.values()].filter(a => a.owner === id && this.mp(a) > 0)
-            .sort((x, y) => unitPower(y.units, 'atk') - unitPower(x.units, 'atk'));
+            .sort((x, y) => unitPower(y.units, 'atk', this.rules(id)) - unitPower(x.units, 'atk', this.rules(id)));
         for (const army0 of mine) {
             if (this.over) return;
             if (!this.armies.has(army0.id) || army0.owner !== id || this.mp(army0) <= 0) continue;
             if (this.sieges.get(army0.cell)?.by === id) continue;   // mantiene el asedio
             let army = army0;
             const onCity = CITY_OF[army.cell] >= 0;
-            if (onCity && unitPower(army.units, 'atk') <= 10) continue;               // guarnición
+            if (onCity && unitPower(army.units, 'atk', this.rules(id)) <= 10) continue;               // guarnición
             if (onCity && army.units.infantry >= 1 && countUnits(army.units) > 1) {   // deja una infantería de guarnición
                 const send = copyUnits(army.units); send.infantry--;
                 army = this.split(army, send);
             }
             const r = this.reach(id, army.cell, this.mp(army), army.used === 0);
-            const atk = unitPower(army.units, 'atk') * this.flankFactor(id, army.cell);
+            const atk = unitPower(army.units, 'atk', this.rules(id)) * this.flankFactor(id, army.cell);
             const trapped = this.hostileSides(id, army.cell);
             let best = null, bestScore = 0;
             for (const [target, from] of r.attacks) {
@@ -2372,7 +2392,8 @@ class GameEngine {
     // En guerra fortifica la ciudad propia más valiosa que tenga territorio enemigo a 3 casillas o menos.
     aiForts(id) {
         const enemies = this.enemiesOf(id), n = this.nations[id];
-        if (!enemies.length || n.gold < CONFIG.FORT_COST * 4 || this.rng() > 0.35) return;
+        const fortCost = this.rules(id).fortCost;
+        if (!enemies.length || n.gold < fortCost * 4 || this.rng() > 0.35) return;
         const nearEnemy = cell => {
             const seen = new Set([cell]);
             let front = [cell];
@@ -2393,8 +2414,8 @@ class GameEngine {
         const city = this.citiesOf(id).filter(p => free(p.city) && nearEnemy(p.city)).sort((x, y) => y.value - x.value)[0];
         if (!city) return;
         const ring = [city.city, ...[0, 1, 2, 3, 4, 5].map(d => G.nb[city.city * 6 + d])].filter(free);
-        const cells = ring.slice(0, Math.floor(n.gold * 0.4 / CONFIG.FORT_COST));
-        if (cells.length) this.buildFort(id, { cells, cost: cells.length * CONFIG.FORT_COST });
+        const cells = ring.slice(0, Math.floor(n.gold * 0.4 / fortCost));
+        if (cells.length) this.buildFort(id, { cells, cost: cells.length * fortCost });
     }
 
     // Une a la red de carreteras la ciudad o el yacimiento más valioso que aún no lo esté (una obra por turno;
@@ -3170,7 +3191,7 @@ class GameUI {
             const chance = g.winChance(fx.atk, fx.dfn), r = fx.atk / fx.dfn, n = countUnits(this.send);
             const winLeft = Math.round(n * (1 - Math.min(1, 0.3 / r))), loseLeft = Math.round(n * (1 - Math.min(1, 0.35 + 0.35 * (1 / r - 1))));
             const num = x => String(Math.round(x * 100) / 100).replace('.', ',');
-            const factors = fx.parts.map(([nm, x]) => `${nm} ×${num(x)}`).concat(fx.capped ? [`tope ×${CONFIG.MAX_DEFENSE_BONUS}`] : [], fx.defFlank < 1 ? [`rodeado ×${num(fx.defFlank)}`] : []).join(', ');
+            const factors = fx.parts.map(([nm, x]) => `${nm} ×${num(x)}`).concat(fx.capped ? [`tope ×${num(fx.cap)}`] : [], fx.defFlank < 1 ? [`rodeado ×${num(fx.defFlank)}`] : []).join(', ');
             const color = chance >= 0.7 ? '#a8e38a' : chance >= 0.35 ? '#ffd166' : '#ff8a78';
             lines.push(`<b style="color:${color}">Clic para atacar: ${Math.round(chance * 100)} % de victoria</b>`);
             lines.push(`Tu ataque ${Math.round(fx.atk)}${fx.attFlank < 1 ? ' (rodeado)' : ''} contra su defensa ${Math.round(fx.dfn)}${factors ? ` (${factors})` : ''}`);
@@ -3715,7 +3736,7 @@ class GameUI {
 
         // Ejército
         if (a && a.owner === p0 && this.tool === 'command') {
-            const full = speedOf(this.send) * MOVE, left = g.moveBudget(a.owner, a.cell, this.send, a.used);
+            const full = speedOf(this.send, g.rules(a.owner)) * MOVE, left = g.moveBudget(a.owner, a.cell, this.send, a.used);
             const supplied = g.inSupply(p0, a.cell);
             const rows = UNIT_KEYS.filter(k => a.units[k] > 0).map(k => `
                 <div class="unit-row">${unitIcon(k, g.nations[o].color)}
@@ -3731,7 +3752,7 @@ class GameUI {
                 ${partial ? '<div class="row"><span class="small muted">Mueves solo una parte: el resto se queda.</span><button class="btn ghost" data-action="send-all">Todas</button></div>' : ''}
                 <div class="meter"><i style="width:${!supplied ? (left > 0 ? 100 : 0) : full ? Math.round(100 * left / full) : 0}%"></i></div>
                 <p class="small">${left <= 0 ? 'Ya no puede moverse este turno.'
-                    : supplied ? `Le quedan ${fmtMp(left)} de ${fmtMp(speedOf(this.send) * MOVE)} puntos de movimiento.`
+                    : supplied ? `Le quedan ${fmtMp(left)} de ${fmtMp(speedOf(this.send, g.rules(a.owner)) * MOVE)} puntos de movimiento.`
                     : 'Puede avanzar una casilla este turno.'}</p>
                 ${(() => { const sides = g.hostileSides(p0, a.cell); if (sides < CONFIG.FLANKED_SIDES) return '';
                     const cercado = sides >= CONFIG.SURROUNDED_SIDES;
@@ -3742,7 +3763,7 @@ class GameUI {
         } else if (a && g.sees(p0, cell)) {
             sections.push(`<section class="sec"><h3>Ejército de ${g.nm(a.owner)}</h3>
                 <div class="units">${UNIT_KEYS.filter(k => a.units[k] > 0).map(k => `<div class="unit-row">${unitIcon(k, g.nations[a.owner].color)}<div>${a.units[k]} ${CONFIG.TYPES[k].name.toLowerCase()}</div><span></span></div>`).join('')}</div>
-                <p class="small muted">Ataque ${unitPower(a.units, 'atk')}, defensa ${unitPower(a.units, 'def')}${g.fort[cell] ? `, ×${CONFIG.FORT_DEFENSE} por la fortificación` : ''}.</p></section>`);
+                <p class="small muted">Ataque ${unitPower(a.units, 'atk', g.rules(a.owner))}, defensa ${unitPower(a.units, 'def', g.rules(a.owner))}${g.fort[cell] ? `, ×${String(g.rules(g.owner[cell]).fortDefense).replace('.', ',')} por la fortificación` : ''}.</p></section>`);
         }
 
         // Reclutar

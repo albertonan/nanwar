@@ -25,7 +25,32 @@ const setup = () => {
         game(seed = 7) { const g = new GameEngine(seed); g.configure({ aggression: 'normal', alliances: 'ninguna', victory: 1, fog: false }); return g; },
         nation: key => E.countries.findIndex(c => c.key === key),
         eq(a, b, msg) { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${msg}: ${JSON.stringify(a)} ≠ ${JSON.stringify(b)}`); },
-        ok(c, msg) { if (!c) throw new Error(msg); }
+        ok(c, msg) { if (!c) throw new Error(msg); },
+        // Da por investigadas estas investigaciones.
+        learn(g, id, ...ids) { for (const t of ids) g.nations[id].tech.done.add(t); g.techVersion++; },
+        free: (g, c) => isLand(c) && !g.armyAt[c] && CITY_OF[c] < 0,
+        // Casilla llana de `owner`, sin ciudad, con sus seis vecinas de tierra libres; y una vecina sin río por medio.
+        plainPair(g, owner) {
+            for (const c of G.land) {
+                if (g.owner[c] !== owner || CELL_TERRAIN[c] !== 'plain' || !T.free(g, c)) continue;
+                const nbs = [0, 1, 2, 3, 4, 5].map(d => G.nb[c * 6 + d]);
+                if (!nbs.every(j => j >= 0 && T.free(g, j))) continue;
+                const d = [0, 1, 2, 3, 4, 5].find(k => !RIVER[c * 6 + k]);
+                if (d !== undefined) return [G.nb[c * 6 + d], c];
+            }
+            throw new Error('no hay casilla llana libre');
+        },
+        // Rodea con `k` ejércitos de `enemy` una casilla de `owner` (la dada o una libre).
+        surround(g, owner, enemy, k, cell) {
+            const c = cell ?? T.plainPair(g, owner)[1];
+            for (let d = 0; d < k; d++) { const j = G.nb[c * 6 + d]; g.settle(g.newArmy(enemy, j, { infantry: 1, tank: 0, artillery: 0 }, 0)); }
+            return c;
+        },
+        // Primer paso u → dirección d entre casillas de tierra que cumple la condición.
+        edge(g, pred) {
+            for (const u of G.land) for (let d = 0; d < 6; d++) { const v = G.nb[u * 6 + d]; if (v >= 0 && isLand(v) && pred(u, v, d)) return [u, d]; }
+            throw new Error('no hay tramo así');
+        }
     };
 };
 
@@ -135,6 +160,171 @@ const CHECKS = [
         T.eq(bad.nations[es].tech.current, [], 'descarta lo que no está en progreso');
         delete data.nations[es].tech;
         T.eq(GameEngine.load(data).nations[es].tech.done.size, 0, 'partida antigua');
+        return true;
+    }],
+
+    ['F2 · tropas: ataque, defensa y velocidad según el dueño', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const [from, cell] = T.plainPair(g, fr);
+        const def = { owner: fr, units: { infantry: 1, tank: 0, artillery: 0 } }, att = { infantry: 2, tank: 1, artillery: 1 };
+        T.eq(g.combatFactors(es, att, from, def, cell).baseAtk, 2 * 5 + 20 + 40, 'ataque sin investigar');
+        T.learn(g, es, 'infanteria1', 'blindados1', 'blindados2', 'artilleria1');
+        T.eq(g.combatFactors(es, att, from, def, cell).baseAtk, 2 * 6 + 24 + 46, 'ataque investigado');
+        T.learn(g, fr, 'infanteria1', 'infanteria2');
+        T.eq(g.combatFactors(es, att, from, def, cell).baseDef, 8, 'defensa del defensor con sus reglas');
+        const city = g.nations[es].capitalCell;
+        const inf = { infantry: 1, tank: 0, artillery: 0 };
+        T.eq(g.moveBudget(es, city, inf, 0), 4 * MOVE, 'velocidad base');
+        T.learn(g, es, 'infanteria2', 'infanteria3');
+        T.eq(g.moveBudget(es, city, inf, 0), 5 * MOVE, 'infantería mecanizada');
+        T.eq(g.powers()[es] > 0, true, 'poder calculado');
+        return true;
+    }],
+    ['F2 · doctrina: rodeado, asedio y bajas', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const cell = T.surround(g, es, fr, 3);
+        T.eq(g.flankFactor(es, cell), 0.75, 'rodeado sin investigar');
+        T.learn(g, es, 'doctrina1');
+        T.eq(g.flankFactor(es, cell), 0.85, 'rodeado con Mando y control');
+        T.learn(g, es, 'doctrina2');
+        T.eq(g.rules(es).siegeTurns, 2, 'asedio');
+        // Sanidad militar: la misma batalla, con la misma suerte, cuesta menos al vencedor.
+        const lost = withTech => {
+            const h = T.game(11); h.start(es); h.declareWar(es, fr);
+            if (withTech) T.learn(h, es, 'doctrina1', 'doctrina2', 'doctrina3');
+            const [from, to] = T.plainPair(h, fr);
+            for (const c of [from, to]) { const x = h.armyOn(c); if (x) h.removeArmy(x); }
+            h.owner[from] = es;
+            const a = h.newArmy(es, from, { infantry: 40, tank: 0, artillery: 0 }, 0); h.settle(a);
+            const d = h.newArmy(fr, to, { infantry: 10, tank: 0, artillery: 0 }, 0); h.settle(d);
+            h.battle(a, d, to);
+            return 40 - countUnits(a.units);
+        };
+        const [plainLoss, medLoss] = [lost(false), lost(true)];
+        T.ok(medLoss < plainLoss, `bajas del vencedor ${medLoss} < ${plainLoss}`);
+        return true;
+    }],
+    ['F2 · movilización: cupo de reclutas', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        const cap = PROVINCES.find(p => p.city === g.nations[es].capitalCell), other = PROVINCES.find(p => p.country === es && p !== cap);
+        const b0 = g.recruitCap(es, cap), o0 = g.recruitCap(es, other);
+        T.learn(g, es, 'movilizacion1');
+        T.eq([g.recruitCap(es, cap), g.recruitCap(es, other)], [b0 + 1, o0 + 1], 'servicio militar');
+        T.ok(g.recruitBreakdown(es, other).some(([w, n]) => w === 'investigación' && n === 1), 'línea en el desglose');
+        T.learn(g, es, 'movilizacion2');
+        T.eq(g.recruitCap(es, cap), b0 + 1 + 2, 'academias: capital +4');
+        T.learn(g, es, 'movilizacion3');
+        T.eq(g.recruitCap(es, cap), Math.floor((b0 + 3) * 1.5), 'movilización general ×1,5');
+        T.eq(g.recruitCap(es, other), Math.floor((o0 + 1) * 1.5), 'otra provincia ×1,5');
+        return true;
+    }],
+    ['F2 · ciencia: turnos, coste y segundo laboratorio', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        g.nations[es].gold = 1e6;
+        T.learn(g, es, 'ciencia1');
+        T.eq(['infanteria1', 'infanteria2', 'infanteria3'].map(t => g.techTurns(es, t)), [5, 8, 11], 'Universidades');
+        const c = g.researchCost(es, 'blindados1');
+        T.learn(g, es, 'ciencia2');
+        T.ok(c > 0, 'coste');
+        T.eq(g.researchCost(es, 'blindados1'), Math.round(Math.max(80, g.income(es) * 4) * 1.2 * 0.7), 'Institutos: −30 %');
+        T.learn(g, es, 'ciencia3');
+        g.startResearch(es, 'blindados1'); g.startResearch(es, 'infanteria1');
+        T.eq(g.nations[es].tech.current, ['blindados1', 'infanteria1'], 'dos a la vez');
+        return true;
+    }],
+    ['F2 · industria: renta y descuentos de los yacimientos', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        const id = g.nations.map(n => n.id).sort((a, b) => g.economy(b).res - g.economy(a).res)[0];
+        const e0 = g.economy(id);
+        T.ok(e0.res > 0, 'hay un país con yacimientos');
+        const pid = [...e0.access.keys()][0];
+        const tank0 = g.unitCost(id, 'tank', pid);
+        T.learn(g, id, 'industria1');
+        const e1 = g.economy(id);
+        T.ok(e1.industry >= e0.industry && (e0.industry === 0 || e1.industry > e0.industry), `industria ${e0.industry} → ${e1.industry}`);
+        T.learn(g, id, 'industria2');
+        T.ok(g.unitCost(id, 'tank', pid) <= tank0, 'tanque igual o más barato');
+        T.learn(g, id, 'industria3');
+        T.ok(Math.abs(g.economy(id).res - Math.round(e0.res * 1.5)) <= 1, `renta de yacimientos ×1,5: ${e0.res} → ${g.economy(id).res}`);
+        return true;
+    }],
+    ['F2 · infraestructura: precio, tramos más rápidos y suministro', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        const cap = g.nations[es].capitalCell;
+        const target = PROVINCES.find(p => p.country === es && p.city !== cap).city;
+        const p0 = g.planRoad(es, cap, c => c === target, 1);
+        T.learn(g, es, 'infraestructura1');
+        const p1 = g.planRoad(es, cap, c => c === target, 1);
+        T.ok(Math.abs(p1.cost - p0.cost * 0.7) <= 1, `carretera −30 %: ${p0.cost} → ${p1.cost}`);
+        const d = [0, 1, 2, 3, 4, 5].find(k => { const j = G.nb[cap * 6 + k]; return j >= 0 && isLand(j) && g.owner[j] === es; });
+        T.eq(g.stepCost(es, cap, d, false) > 0, true, 'paso sin carretera');
+        g.road[cap * 6 + d] = 1; g.road[G.nb[cap * 6 + d] * 6 + (d + 3) % 6] = 1; g.roadVersion++;
+        T.eq(g.stepCost(es, cap, d, false), 6, 'carretera ½');
+        T.learn(g, es, 'infraestructura2');
+        T.eq(g.stepCost(es, cap, d, false), 4, 'carretera ⅓');
+        g.road[cap * 6 + d] = 2; g.road[G.nb[cap * 6 + d] * 6 + (d + 3) % 6] = 2; g.roadVersion++;
+        T.eq(g.stepCost(es, cap, d, false), 4, 'autopista ⅓');
+        const supplied = () => g.supplyMap(es).filter(x => x >= 0).length;
+        const s0 = supplied();
+        T.learn(g, es, 'infraestructura3');
+        T.eq(g.stepCost(es, cap, d, false), 3, 'autopista ¼');
+        T.ok(supplied() > s0, `más casillas abastecidas: ${s0} → ${supplied()}`);
+        return true;
+    }],
+    ['F2 · movilidad: montaña, bosque y ríos', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        const step = kind => T.edge(g, (u, v, d) => CELL_TERRAIN[v] === kind && !RIVER[u * 6 + d] && !g.road[u * 6 + d]);
+        const [mu, md] = step('mountain'), [fu, fd] = step('forest');
+        T.eq(g.stepCost(es, mu, md, false), 3 * MOVE, 'montaña');
+        T.eq(g.stepCost(es, fu, fd, false), 2 * MOVE, 'bosque');
+        T.learn(g, es, 'movilidad1');
+        T.eq(g.stepCost(es, mu, md, false), 2 * MOVE, 'tropas de montaña');
+        T.learn(g, es, 'movilidad2');
+        T.eq(g.stepCost(es, fu, fd, false), 1.5 * MOVE, 'tropas de bosque');
+        const [ru, rd] = T.edge(g, (u, v, d) => RIVER[u * 6 + d] && CELL_TERRAIN[v] === 'plain' && !g.road[u * 6 + d]);
+        T.eq(g.stepCost(es, ru, rd, false), MOVE + 6, 'río sin puente');
+        T.eq(g.stepCost(fr, ru, rd, false), MOVE + 6, 'Francia sigue pagando el río');
+        T.learn(g, es, 'movilidad3');
+        T.eq(g.stepCost(es, ru, rd, false), MOVE, 'pontoneros');
+        g.declareWar(es, fr);
+        const def = { owner: fr, units: { infantry: 1, tank: 0, artillery: 0 } }, v = G.nb[ru * 6 + rd];
+        T.ok(!g.combatFactors(es, { infantry: 1, tank: 0, artillery: 0 }, ru, def, v).parts.some(([n]) => n === 'río'), 'sin defensa de río frente a pontoneros');
+        T.ok(g.combatFactors(fr, { infantry: 1, tank: 0, artillery: 0 }, ru, { owner: es, units: def.units }, v).parts.some(([n]) => n === 'río'), 'los demás sí la sufren');
+        return true;
+    }],
+    ['F2 · fortificación: defensa, obra, tope, muro, rodeado y precio', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const [from, cell] = T.plainPair(g, es);
+        g.fort[cell] = 1;
+        const def = { owner: es, units: { infantry: 1, tank: 0, artillery: 0 } }, att = { infantry: 1, tank: 0, artillery: 0 };
+        const fortPart = () => g.combatFactors(fr, att, from, def, cell).parts.find(([n]) => n === 'fortificación')[1];
+        T.eq(fortPart(), 1.75, 'sin investigar');
+        T.learn(g, es, 'fortificacion1');
+        T.eq(fortPart(), 2, 'hormigón');
+        const a = PROVINCES.find(p => p.country === es && p.city !== g.nations[es].capitalCell).city;
+        const plan = g.planFort(es, a, a);
+        g.nations[es].gold = 1e5;
+        g.buildFort(es, plan);
+        T.eq(g.fortWork.get(a).left, 2, 'obra de 2 turnos');
+        T.eq(g.combatFactors(fr, att, from, def, cell).cap, 3, 'tope ×3');
+        const wall0 = g.stepCost(fr, from, G.dirTo(from, cell), true);
+        T.learn(g, es, 'fortificacion2');
+        T.eq(g.combatFactors(fr, att, from, def, cell).cap, 3.5, 'búnkeres: tope ×3,5');
+        T.eq(g.stepCost(fr, from, G.dirTo(from, cell), true), wall0 + MOVE, 'cruzar el muro cuesta un punto más');
+        const ring = T.surround(g, es, fr, 3, cell);
+        T.eq(g.flankFactor(es, ring), 0.75, 'rodeado en el muro');
+        T.learn(g, es, 'fortificacion3');
+        T.eq(g.flankFactor(es, ring), 1, 'casamatas: sin penalización');
+        const b = PROVINCES.filter(p => p.country === es)[2].city;
+        T.eq(g.planFort(es, b, b).cost, 25, 'fortificar cuesta 25');
         return true;
     }]
 ];
