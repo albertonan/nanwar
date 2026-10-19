@@ -616,6 +616,7 @@ const LINE_HOLD = 1;         // por debajo de esta relación de fuerzas, la lín
 const LINE_RETURN = 1.5;     // con esta relación en la línea dibujada, vuelve a ella
 const LINE_STEP_TURNS = 2;   // cada repliegue busca a este número de turnos de marcha del ejército más lento
 const LINE_MAX_TURNS = 4;    // y, sumando todos, no se aleja más de la línea dibujada
+const OP_MIN_ARMIES = 3;     // ejércitos que pide una ofensiva para empezar
 // Directiva nacional: la postura fija la ventaja con la que atacan las ofensivas nuevas y un reparto de la renta.
 const POSTURES = {
     defensa: { name: 'Defensa total', ratio: 1.8, budget: { recruit: 45, research: 10, forts: 35, roads: 5 }, desc: 'Ofensivas nuevas en «cauta» (1,8 a 1). Mucho oro para fortificar.' },
@@ -1864,6 +1865,8 @@ class GameEngine {
         this.directive(id);
         // Los refuerzos de las operaciones (reclutar y mandar a su zona) no dependen de la automatización.
         this.stepReinforcements(id);
+        // Las operaciones que piden ayuda la reciben de las que tienen de sobra.
+        this.shareForces(id);
         // Luego las operaciones: las automáticas siempre; las asistidas, cuando se piden (botón o confirmación).
         this.executeOps(id, this.opsOf(id).filter(op => op.auto === 'auto' || (opts.assisted && op.auto === 'asistida')).map(op => op.id));
         if (id === this.player) {
@@ -2257,6 +2260,81 @@ class GameEngine {
         return tally;
     }
 
+    // --- Reparto de esfuerzos entre operaciones ---
+    // Ejércitos que una operación no cede: una línea, los que cubren sus casillas y le dan una relación de al menos
+    // LINE_HOLD (uno más de los que tiene si no llegan); una ofensiva en marcha, todos; la reserva y las pausadas, ninguno.
+    opMinimum(op) {
+        if (op.paused || op.kind === 'reserva') return 0;
+        const members = this.opMembers(op);
+        if (op.kind === 'ofensiva') return members.length;
+        const ev = this.lineEval(op, op.cells, members);
+        if (!ev.enemy) return op.cells.length;
+        const rules = this.rules(op.owner), line = new Set(op.cells);
+        const power = members.map(a => unitPower(a.units, 'def', rules) * (line.has(a.cell) ? this.defBonus(op.owner, a.cell) : ev.mean)).sort((x, y) => y - x);
+        let sum = 0, k = 0;
+        while (k < power.length && sum < ev.enemy * LINE_HOLD) sum += power[k++];
+        return Math.max(op.cells.length, sum >= ev.enemy * LINE_HOLD ? k : members.length + 1);
+    }
+    // Cuántos ejércitos más pide una operación: una línea, hasta su mínimo; una ofensiva, OP_MIN_ARMIES o los que esperan ventaja.
+    opWant(op) {
+        if (op.paused || op.kind === 'reserva') return 0;
+        const n = this.opMembers(op).length;
+        return op.kind === 'defensa' ? Math.max(0, this.opMinimum(op) - n) : Math.max(op.waiting ?? 0, OP_MIN_ARMIES - n);
+    }
+    // Reparte ejércitos entre las operaciones que piden, por rondas (uno a cada una, primero la de más prioridad × necesidad):
+    // de la reserva, del sobrante de las líneas y de las ofensivas en pausa, a OP_GATHER_TURNS turnos de marcha o menos.
+    // Con `free`, también los ejércitos libres (al crear una operación y en la IA). No toca las operaciones manuales,
+    // los ejércitos con orden propia ni los movidos a mano este turno.
+    shareForces(id, { free = id !== this.player } = {}) {
+        const ops = this.opsOf(id), rules = this.rules(id);
+        const takers = ops.filter(o => o.auto !== 'manual' && o.kind !== 'reserva' && !o.paused).map(op => ({ op, want: this.opWant(op) })).filter(t => t.want > 0)
+            .sort((x, y) => this.priorityOf(y.op) * (1 + y.want) - this.priorityOf(x.op) * (1 + x.want) || x.op.id - y.op.id);
+        if (!takers.length) return;
+        const offer = [];
+        if (free) for (const a of this.armies.values()) if (a.owner === id && !a.op && !a.order && !a.form && a.direct !== this.turn && this.armyOn(a.cell) === a && !(CITY_OF[a.cell] >= 0 && countUnits(a.units) <= 1)) offer.push({ a, from: null, rank: 0 });
+        for (const o of ops) {
+            if (o.auto === 'manual' || takers.some(t => t.op === o)) continue;
+            const members = this.opMembers(o).filter(a => !a.order && a.direct !== this.turn);
+            let spare = [];
+            if (o.kind === 'reserva' || o.paused) spare = members;
+            else if (o.kind === 'defensa') {
+                const k = members.length - this.opMinimum(o), line = new Set(o.cells);
+                if (k > 0) spare = members.sort((x, y) => line.has(x.cell) - line.has(y.cell) || this.threat(id, x.cell) - this.threat(id, y.cell)).slice(0, k);
+            }
+            for (const a of spare) offer.push({ a, from: o, rank: o.kind === 'reserva' ? 1 : o.kind === 'defensa' ? 2 : 3 });
+        }
+        if (!offer.length) return;
+        const fastest = Math.max(...UNIT_KEYS.map(k => rules.types[k].speed)), costs = new Map(), moved = new Map();
+        // Un ejército libre con otro enemigo a 2 casillas o menos ya guarda otro frente.
+        const otherFront = (a, front) => { for (const c of this.nearCells(a.cell, 2).keys()) { const e = this.armyOn(c); if (e && e.owner !== front && this.atWar(id, e.owner)) return true; } return false; };
+        for (let busy = true; busy;) {
+            busy = false;
+            for (const t of takers) {
+                if (t.want <= 0) continue;
+                if (!costs.has(t)) costs.set(t, this.marchCosts(id, t.op.kind === 'ofensiva' ? t.op.cells[0] : t.op.cells[Math.floor(t.op.cells.length / 2)], OP_GATHER_TURNS * MOVE * fastest));
+                const cost = costs.get(t), front = this.opFront(t.op);
+                let best = null, bk = Infinity;
+                for (const x of offer) {
+                    const c = x.used ? undefined : cost.get(x.a.cell);
+                    if (c === undefined || c > OP_GATHER_TURNS * MOVE * speedOf(x.a.units, rules) || (!x.from && otherFront(x.a, front))) continue;
+                    if (x.rank * 1e7 + c < bk) { bk = x.rank * 1e7 + c; best = x; }
+                }
+                if (!best) { t.want = 0; continue; }
+                best.used = true; t.want--; busy = true;
+                this.assignArmy(best.a, t.op.id);
+                if (best.from) { const k = `${best.from.id}>${t.op.id}`; moved.set(k, [best.from, t.op, (moved.get(k)?.[2] ?? 0) + 1]); }
+            }
+        }
+        if (id === this.player) for (const [from, to, n] of moved.values()) this.log(`${from.name} cede ${plural(n, 'ejército', 'ejércitos')} a ${to.name}.`);
+    }
+    // Por qué una ofensiva sin ejércitos no recibe ninguno, para su ficha.
+    opWaitNote(op) {
+        const lines = this.opsOf(op.owner).filter(o => o.kind === 'defensa' && !o.paused && this.opMembers(o).length && this.opMembers(o).length <= this.opMinimum(o));
+        const p = this.formProgress(op), coming = p ? p.moving + p.waiting + p.ready : 0;
+        const who = lines.length ? `${lines.map(o => o.name).join(', ')} ${lines.length === 1 ? 'necesita' : 'necesitan'} todas sus tropas` : 'No hay ejércitos libres cerca';
+        return `${who}; ${op.form ? `esperando reclutas (${coming} en camino)` : 'dale oro para reclutar o asígnale ejércitos'}.`;
+    }
+
     // --- Línea de defensa: aguanta, se repliega o vuelve a la línea dibujada ---
     // Qué haría la línea este turno, sin hacerlo (sirve también para enseñarlo en las manuales):
     // { state, cells: línea activa, ev: lineEval de la actual, cand: la línea nueva si se repliega, stuck: sin nada mejor detrás }.
@@ -2454,11 +2532,24 @@ class GameEngine {
         }
         return best >= 0 ? best : anchor;
     }
+    // Refuerzos de todas las operaciones de `id`: reclutan por rondas, una unidad cada una y las más prioritarias primero,
+    // para que ninguna acapare el oro ni el cupo de las ciudades mientras las demás esperan.
     stepReinforcements(id) {
-        for (const op of this.opsOf(id)) if (!op.paused && (op.gold || op.form || op.extra)) this.reinforce(op);
+        const ctx = new Map();
+        for (const op of this.opsOf(id)) if (!op.paused && (op.gold || op.form || op.extra)) { const c = this.reinforceBegin(op); if (c) ctx.set(op, c); }
+        const order = [...ctx.keys()].sort((x, y) => this.priorityOf(y) * (1 + this.opNeed(y)) - this.priorityOf(x) * (1 + this.opNeed(x)) || x.id - y.id);
+        for (let busy = true, guard = 0; busy && guard < 400; guard++) { busy = false; for (const op of order) if (this.recruitOne(op, ctx.get(op))) busy = true; }
+        for (const op of ctx.keys()) this.reinforceEnd(op);
     }
     reinforce(op) {
-        const id = op.owner, n = this.nations[id];
+        const c = this.reinforceBegin(op);
+        if (!c) return;
+        while (this.recruitOne(op, c));
+        this.reinforceEnd(op);
+    }
+    // Fondo del turno, formación nueva si toca y marcha de lo reclutado el turno anterior. Devuelve con qué reclutar, o null.
+    reinforceBegin(op) {
+        const id = op.owner;
         if (op.poolTurn !== this.turn) {   // una vez por turno
             op.poolTurn = this.turn;
             const tpl = this.opTemplate(op);
@@ -2467,7 +2558,7 @@ class GameEngine {
         }
         let f = op.form;
         if (!f) {
-            if (!op.gold && op.pool < this.templateCost(id, this.opTemplate(op).units) / 4) return;
+            if (!op.gold && op.pool < this.templateCost(id, this.opTemplate(op).units) / 4) return null;
             const tpl = this.opTemplate(op);
             f = op.form = { name: tpl.name, units: copyUnits(tpl.units), zone: this.formZone(op), recruited: emptyUnits(), pending: [] };
         }
@@ -2486,22 +2577,32 @@ class GameEngine {
             if (mover !== g && this.armies.has(mover.id) && mover.cell === city && this.armyAt[city] !== mover.id) { this.settle(mover); return true; }   // no ha podido salir: otra vez el turno que viene
             return false;
         });
-        // Reclutar lo que falta, empezando por el tipo más atrasado, en la ciudad con cupo más cercana a la zona.
-        const zx = G.cx[f.zone], zy = G.cy[f.zone], path = this.orderField(id, f.zone);
+        // Se recluta en la ciudad con cupo más cercana a la zona.
+        const zx = G.cx[f.zone], zy = G.cy[f.zone];
         const cities = PROVINCES.filter(p => this.owner[p.city] === id && this.legal[p.city] === id)
             .sort((x, y) => (G.cx[x.city] - zx) ** 2 + (G.cy[x.city] - zy) ** 2 - (G.cx[y.city] - zx) ** 2 - (G.cy[y.city] - zy) ** 2);
-        for (let guard = 0; guard < 200; guard++) {
-            const missing = UNIT_KEYS.filter(k => f.recruited[k] < f.units[k]).sort((x, y) => f.recruited[x] / f.units[x] - f.recruited[y] / f.units[y]);
-            if (!missing.length) break;
-            const type = missing[0], p = cities.find(c => c.city !== f.zone && this.canRecruitAt(id, c) && path.to(c.city) < Infinity);
-            if (!p) break;
-            const cost = this.unitCost(id, type, p.id);
-            if (op.pool < cost || n.gold < cost || !this.recruit(id, p, type)) break;
-            op.pool -= cost;
-            f.recruited[type]++;
-            const entry = f.pending.find(([c]) => c === p.city);
-            if (entry) entry[1][type]++; else { const u = emptyUnits(); u[type] = 1; f.pending.push([p.city, u]); }
-        }
+        return { cities, path: this.orderField(id, f.zone), done: false };
+    }
+    // Recluta una unidad de lo que falta a la formación, del tipo más atrasado. true si ha reclutado.
+    recruitOne(op, ctx) {
+        const id = op.owner, n = this.nations[id], f = op.form;
+        if (!f || !ctx || ctx.done) return false;
+        const missing = UNIT_KEYS.filter(k => f.recruited[k] < f.units[k]).sort((x, y) => f.recruited[x] / f.units[x] - f.recruited[y] / f.units[y]);
+        const p = missing.length ? ctx.cities.find(c => c.city !== f.zone && this.canRecruitAt(id, c) && ctx.path.to(c.city) < Infinity) : null;
+        // El tipo más atrasado que se pueda pagar (si la artillería no llega, una infantería).
+        const type = p && missing.find(k => { const c = this.unitCost(id, k, p.id); return op.pool >= c && n.gold >= c; });
+        if (!type || !this.recruit(id, p, type)) { ctx.done = true; return false; }
+        const cost = this.unitCost(id, type, p.id);
+        op.pool -= cost;
+        f.recruited[type]++;
+        const entry = f.pending.find(([c]) => c === p.city);
+        if (entry) entry[1][type]++; else { const u = emptyUnits(); u[type] = 1; f.pending.push([p.city, u]); }
+        return true;
+    }
+    // Quien perdió su marcha deja la formación; la formación completa entra en la operación.
+    reinforceEnd(op) {
+        const id = op.owner, f = op.form;
+        if (!f) return;
         // Quien perdió su marcha (sin paso tres turnos) deja la formación.
         for (const a of this.armies.values()) if (a.form === op.id && a.owner === id && !a.order && a.cell !== f.zone) a.form = 0;
         // Formación completa: el ejército de la zona entra en la operación.
@@ -3634,6 +3735,7 @@ class GameEngine {
         if (!op) return null;
         const got = this.nearbyFree(op, kind === 'reserva' ? 2 : 3);
         for (const a of got) this.assignArmy(a, op.id);
+        this.shareForces(this.player, { free: false });
         const from = new Set(got.map(a => G.prov[a.cell])).size;
         this.log(`Nueva operación: ${op.name}${got.length ? `, con ${plural(got.length, 'ejército', 'ejércitos')}${kind === 'ofensiva' && from > 1 ? ` de ${from} provincias` : ''}` : ''}.`);
         return op;

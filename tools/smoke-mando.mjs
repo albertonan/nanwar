@@ -1042,6 +1042,65 @@ const CHECKS = [
         T.ok(op && op.drawn.join() === plan.line.join(), 'la línea de la IA es la propuesta');
         return true;
     }],
+    ['R · una línea formándose y una ofensiva nueva reciben reclutas el mismo turno', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        const [a0] = T.border(g, es, fr), [a1] = T.border(g, es, fr, 4);
+        const line = g.createOp(es, 'defensa', g.planFort(es, a0, a1).path, { gold: 400, template: 'infanteria' });
+        line.pool = 2000;
+        g.nations[es].gold = 300;   // no le llega para toda la plantilla
+        g.stepReinforcements(es);
+        T.ok(line.form && countUnits(line.form.recruited) > 0 && countUnits(line.form.recruited) < countUnits(line.form.units), 'la línea empieza a formar');
+        g.turn++; g.nations[es].recruited.clear();
+        const off = g.createOp(es, 'ofensiva', [a0, T.nearestCity(g, es, fr, a0)], { gold: 400, template: 'infanteria' });
+        off.pool = 2000;
+        g.nations[es].gold = 4 * CONFIG.TYPES.artillery.cost;   // oro para cuatro reclutas caros
+        const before = countUnits(line.form.recruited);
+        g.stepReinforcements(es);
+        T.ok(off.form && countUnits(off.form.recruited) > 0, 'la ofensiva también recluta');
+        T.ok(countUnits(line.form.recruited) > before, 'y la línea sigue reclutando');
+        return true;
+    }],
+    ['R · la ofensiva recibe el sobrante de la línea sin bajarla de su mínimo; sin sobrante no le quita nada', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        const [a0] = T.border(g, es, fr), [a1] = T.border(g, es, fr, 2);
+        const path = g.planFort(es, a0, a1).path;
+        const line = g.createOp(es, 'defensa', path);
+        for (const c of path) g.assignArmy(T.army(g, es, c, 2), line.id);
+        const spots = [...g.nearCells(path[0], 3).keys()].filter(c => T.free(g, c) && g.owner[c] === es && !path.includes(c));
+        for (const c of spots.slice(0, 3)) g.assignArmy(T.army(g, es, c, 2), line.id);
+        const min = g.opMinimum(line), total = g.opMembers(line).length;
+        T.ok(total > min, `hay sobrante (${total} > ${min})`);
+        const off = g.createOp(es, 'ofensiva', [a0, T.nearestCity(g, es, fr, a0)]);
+        g.shareForces(es);
+        T.ok(g.opMembers(off).length >= 1, 'la ofensiva recibe ejércitos');
+        T.ok(g.opMembers(line).length >= min, 'la línea no baja de su mínimo');
+        T.ok(g.logs.some(l => l.msg.includes(`${line.name} cede`)), 'el parte lo dice');
+        const keep = g.opMembers(line).length;
+        const off2 = g.createOp(es, 'ofensiva', [a0, T.nearestCity(g, es, fr, a0)], { noCap: true });
+        g.shareForces(es);
+        T.ok(g.opMembers(line).length >= g.opMinimum(line) && g.opMembers(line).length <= keep, 'sin sobrante no le quita nada más');
+        if (!g.opMembers(off2).length) T.ok(g.opWaitNote(off2).includes('necesita todas sus tropas'), 'y la ficha lo dice');
+        return true;
+    }],
+    ['R · dos ofensivas que piden a la vez reciben las dos', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        const [a0] = T.border(g, es, fr), [b0] = T.border(g, es, fr, 3);
+        const zone = T.farCell(g, es, a0, 1, 3);
+        const res = g.createOp(es, 'reserva', [zone]);
+        const spots = [...g.nearCells(zone, 2).keys()].filter(c => T.free(g, c) && g.owner[c] === es);
+        for (const c of spots.slice(0, 2)) g.assignArmy(T.army(g, es, c, 3), res.id);
+        const o1 = g.createOp(es, 'ofensiva', [a0, T.nearestCity(g, es, fr, a0)]);
+        const o2 = g.createOp(es, 'ofensiva', [b0, T.nearestCity(g, es, fr, b0)]);
+        g.shareForces(es);
+        T.eq([g.opMembers(o1).length, g.opMembers(o2).length], [1, 1], 'uno para cada una');
+        return true;
+    }],
     ['Mapa · vista y capas en un solo panel, recordadas en el dispositivo', () => {
         const g = T.uiStart('es');
         const key = k => document.dispatchEvent(new KeyboardEvent('keydown', { key: k }));
