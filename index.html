@@ -250,6 +250,12 @@
         .op-member { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; font-size: 13.5px; }
         .op-member .btn { padding: 2px 8px; }
         .link { background: none; border: 0; padding: 0; color: var(--text); font: 600 13.5px var(--font); text-decoration: underline; text-decoration-color: var(--line); cursor: pointer; }
+        .tpl-box { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 8px; }
+        .tpl-box summary { cursor: pointer; font-weight: 600; padding: 4px 8px; }
+        .tpl-row { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 5px 8px; font-size: 13.5px; }
+        .tpl-row b { display: block; font-weight: 600; }
+        .tpl-row small { color: var(--muted); font-size: 12px; }
+        .tpl-edit { display: grid; gap: 6px; margin: 8px; padding: 10px; border-radius: 8px; background: var(--raised); }
         .op-meter { position: relative; margin-top: 10px; overflow: visible; }
         .op-meter i { border-radius: 4px; }
         .op-meter b { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--text); }
@@ -558,6 +564,18 @@ const ALLIANCE_SETUPS = { reales: "Reales: OTAN y OTSC", ninguna: "Ninguna: cada
 const VICTORY_SETUPS = { 0.5: `Dominar el 50 % ${MAP.of}`, 0.75: `Dominar el 75 % ${MAP.of}`, 1: "Eliminar a todas las naciones" };
 
 const UNIT_KEYS = Object.keys(CONFIG.TYPES);
+
+// Plantillas de ejército: recetas que reclutan las operaciones para reforzarse. El escalón OTAN sale del tamaño.
+const TEMPLATES = {
+    guarnicion: { name: 'Guarnición', units: { infantry: 3, tank: 0, artillery: 0 }, why: 'Defensa barata para ciudades de la retaguardia.' },
+    infanteria: { name: 'Brigada de infantería', units: { infantry: 10, tank: 0, artillery: 2 }, why: 'La defensa más barata por oro, con algo de fuego.' },
+    mecanizada: { name: 'Brigada mecanizada', units: { infantry: 8, tank: 4, artillery: 0 }, why: 'Equilibrada: aguanta y avanza a velocidad 4.' },
+    acorazada: { name: 'Brigada acorazada', units: { infantry: 4, tank: 8, artillery: 0 }, why: 'Ataque y defensa altos; la infantería la frena a velocidad 4.' },
+    punta: { name: 'Punta de lanza', units: { infantry: 0, tank: 10, artillery: 0 }, why: 'Solo tanques: velocidad 7, para cerrar pinzas en llano.' },
+    artilleria: { name: 'Grupo de artillería', units: { infantry: 2, tank: 0, artillery: 6 }, why: 'El mejor ataque por oro para romper defensas, pero frágil y lento (velocidad 3).' },
+    division: { name: 'División', units: { infantry: 20, tank: 8, artillery: 4 }, why: 'Tres brigadas juntas: el escalón XX.' }
+};
+const OP_GOLD = [0, 50, 100, 200, 400];   // oro por turno que se puede dar a una operación para refuerzos
 
 // --- Investigación ---
 // Coste: turnos de renta según el nivel (con un mínimo), un 10 % más caro por cada investigación ya terminada.
@@ -875,7 +893,7 @@ class GameEngine {
         this.nations = E.countries.map((c, id) => ({
             id, key: c.key, name: c.name, color: c.color,
             capitalCell: PROVINCES[c.capital].city, capitalName: PROVINCES[c.capital].cityName,
-            gold: 0, alive: true, recruited: new Map(), overlord: -1,
+            gold: 0, alive: true, recruited: new Map(), overlord: -1, templates: [],
             tech: { done: new Set(), progress: new Map(), current: [] }   // investigación: hechas, turnos invertidos, en curso
         }));
         const n = this.nations.length;
@@ -939,13 +957,15 @@ class GameEngine {
             forts: G.land.filter(i => this.fort[i]), fortWork: [...this.fortWork].map(([c, w]) => [c, w.owner, w.left]),
             spies: [...this.spies].map(([pid, s]) => [pid, s.since, s.revealedTurn]),
             sieges: [...this.sieges].map(([c, s]) => [c, s.by, s.prev, s.held]),
-            nations: this.nations.map(n => ({ gold: n.gold, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord,
+            nations: this.nations.map(n => ({ gold: n.gold, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord, templates: n.templates,
                 tech: { done: [...n.tech.done], progress: [...n.tech.progress], current: [...n.tech.current] } })),
             relations,
             armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used]),
             nextArmyId: this.nextArmyId,
             ops: [...this.ops.values()].map(o => ({ id: o.id, owner: o.owner, kind: o.kind, name: o.name, cells: o.cells, ratio: o.ratio, auto: o.auto,
-                paused: o.paused, fortify: o.fortify, since: o.since, waiting: o.waiting })),
+                paused: o.paused, fortify: o.fortify, since: o.since, waiting: o.waiting, gold: o.gold, template: o.template, pool: o.pool, formed: o.formed,
+                form: o.form ? { name: o.form.name, units: o.form.units, zone: o.form.zone, recruited: o.form.recruited, pending: o.form.pending } : null })),
+            armyForms: [...this.armies.values()].filter(a => a.form).map(a => [a.id, a.form]),
             nextOpId: this.nextOpId,
             armyOps: [...this.armies.values()].filter(a => a.op).map(a => [a.id, a.op]),
             orders: [...this.armies.values()].filter(a => a.order).map(a => [a.id, a.order.kind, a.order.dest, a.order.target, a.order.ratio, a.order.flee ? 1 : 0, a.order.since, a.order.stuck]),
@@ -1034,6 +1054,8 @@ class GameEngine {
             alive: !!n?.alive,
             recruited: new Map(list(n?.recruited).map(x => [provIdx(x?.[0]), int(x?.[1], 0, 1e6, 0)])),
             overlord: natOrNone(n?.overlord ?? -1),
+            templates: list(n?.templates).slice(0, 12).map(t => ({ name: str(t?.name, 40) || 'Plantilla', units: { infantry: int(t?.units?.infantry, 0, 99, 0), tank: int(t?.units?.tank, 0, 99, 0), artillery: int(t?.units?.artillery, 0, 99, 0) } }))
+                .filter(t => countUnits(t.units) > 0),
             tech: techOf(n?.tech)
         }));
         g.techVersion++;   // lo calculado hasta aquí no conocía la investigación
@@ -1069,9 +1091,18 @@ class GameEngine {
             if (!ok) continue;
             g.ops.set(id, { id, owner: nat(o.owner), kind, name: str(o.name, 60) || 'Operación', cells: kind === 'ofensiva' ? cells : [...new Set(cells)],
                 ratio: [0, 1, 1.3, 1.8].includes(Number(o.ratio)) ? Number(o.ratio) : 1.3, auto: ['manual', 'asistida', 'auto'].find(k => k === o.auto) ?? 'manual',
-                paused: !!o.paused, fortify: !!o.fortify, since: int(o.since, 0, 1e6, g.turn), waiting: int(o.waiting, 0, 1e4, 0), uncovered: 0 });
+                paused: !!o.paused, fortify: !!o.fortify, since: int(o.since, 0, 1e6, g.turn), waiting: int(o.waiting, 0, 1e4, 0), uncovered: 0,
+                gold: OP_GOLD.includes(Number(o.gold)) ? Number(o.gold) : 0, template: str(o.template, 12) || 'auto', pool: int(o.pool, 0, 1e7, 0), formed: int(o.formed, 0, 1e4, 0), form: null });
+            const f = o.form, op = g.ops.get(id), units = u => ({ infantry: int(u?.infantry, 0, 99, 0), tank: int(u?.tank, 0, 99, 0), artillery: int(u?.artillery, 0, 99, 0) });
+            const zone = int(f?.zone, -1, G.N - 1, -1);
+            if (f && zone >= 0 && isLand(zone)) op.form = { name: str(f.name, 40), units: units(f.units), zone, recruited: units(f.recruited),
+                pending: list(f.pending).slice(0, 200).map(x => [int(x?.[0], -1, G.N - 1, -1), units(x?.[1])]).filter(([c]) => c >= 0 && CITY_OF[c] >= 0) };
         }
         g.nextOpId = Math.max(int(data.nextOpId, 1, 1e6, 1), ...[...g.ops.keys()].map(x => x + 1), 1);
+        for (const x of list(data.armyForms)) {
+            const a = g.armies.get(int(x?.[0], 1, 1e9, 0)), op = g.ops.get(int(x?.[1], 1, 1e6, 0));
+            if (a && op && op.owner === a.owner && op.form) a.form = op.id;
+        }
         for (const x of list(data.armyOps)) {
             const a = g.armies.get(int(x?.[0], 1, 1e9, 0)), op = g.ops.get(int(x?.[1], 1, 1e6, 0));
             if (a && op && op.owner === a.owner) a.op = op.id;
@@ -1695,6 +1726,8 @@ class GameEngine {
             else if (res === 'fortified') out.fortified++;
             else if (res === 'cancelled') out.cancelled.push(name?.name ?? 'su objetivo');
         }
+        // Los refuerzos de las operaciones (reclutar y mandar a su zona) no dependen de la automatización.
+        this.stepReinforcements(id);
         // Luego las operaciones: las automáticas siempre; las asistidas, cuando se piden (botón o confirmación).
         this.executeOps(id, this.opsOf(id).filter(op => op.auto === 'auto' || (opts.assisted && op.auto === 'asistida')).map(op => op.id));
         if (id === this.player) {
@@ -1769,7 +1802,7 @@ class GameEngine {
         for (let i = 2; !opts.name && taken.has(name); i++) name = `${base} ${i}`;
         const op = { id: this.nextOpId++, owner, kind, name, cells: kind === 'ofensiva' ? cells : [...new Set(cells)],
             ratio: opts.ratio ?? (kind === 'defensa' ? 1.8 : 1.3), auto: opts.auto ?? 'auto', paused: false, fortify: !!opts.fortify,
-            since: this.turn, waiting: 0, uncovered: 0 };
+            since: this.turn, waiting: 0, uncovered: 0, gold: OP_GOLD.includes(opts.gold) ? opts.gold : 0, template: opts.template ?? 'auto', pool: 0, formed: 0, form: null };
         this.ops.set(op.id, op);
         this.orderVersion++;
         return op;
@@ -1778,11 +1811,12 @@ class GameEngine {
     nearbyFree(op, radius) {
         const anchors = op.kind === 'ofensiva' ? [op.cells[0]] : op.cells;
         const dist = this.field(op.owner, anchors);
-        return [...this.armies.values()].filter(a => a.owner === op.owner && !a.op && !a.order && this.armyOn(a.cell) === a && dist[a.cell] <= radius
+        return [...this.armies.values()].filter(a => a.owner === op.owner && !a.op && !a.order && !a.form && this.armyOn(a.cell) === a && dist[a.cell] <= radius
             && !(CITY_OF[a.cell] >= 0 && countUnits(a.units) <= 1));
     }
     assignArmy(a, opId) {
         if (!a) return;
+        a.form = 0;
         const op = opId ? this.ops.get(opId) : null;
         if (opId && (!op || op.owner !== a.owner)) return;
         a.op = op ? op.id : 0;
@@ -1791,7 +1825,7 @@ class GameEngine {
     }
     endOp(op, why = '') {
         if (!this.ops.has(op.id)) return;
-        for (const a of this.armies.values()) if (a.op === op.id) a.op = 0;
+        for (const a of this.armies.values()) { if (a.op === op.id) a.op = 0; if (a.form === op.id) a.form = 0; }
         this.ops.delete(op.id);
         this.orderVersion++;
         if (op.owner === this.player) this.log(`${op.name}: ${why || 'operación terminada'}. Sus ejércitos quedan sin operación.`);
@@ -1920,6 +1954,120 @@ class GameEngine {
             if (parts.length && this.ops.has(op.id)) this.log(`${op.name}: ${parts.join(', ')}.`);
         }
         return tally;
+    }
+
+    // --- Plantillas y refuerzos de las operaciones ---
+    // op.gold: oro por turno para refuerzos, que se va guardando en op.pool. op.template: 'auto', una plantilla de serie
+    // o 'c<n>', una propia. op.form: la formación en curso { name, units, zone, recruited, pending: [[ciudad, unidades]] }.
+    // Se recluta en las ciudades más cercanas a la zona de reunión; al turno siguiente los reclutas marchan hasta ella y
+    // se juntan (army.form = id de la operación); cuando está completa, el ejército entra en la operación.
+    templateOf(id, key) {
+        if (/^c\d+$/.test(key)) { const t = this.nations[id].templates[+key.slice(1)]; return t ? { key, name: t.name, units: t.units, why: 'Plantilla propia.' } : null; }
+        const t = TEMPLATES[key];
+        return t ? { key, ...t } : null;
+    }
+    // Composición sugerida para una operación según su tipo, su objetivo y el terreno de su eje.
+    suggestTemplate(op) {
+        if (op.kind === 'defensa') return { key: 'infanteria', why: 'Para sostener una línea: la infantería es la defensa más barata.' };
+        if (op.kind === 'reserva') return { key: 'mecanizada', why: 'Para acudir a cualquier frente: aguanta y avanza.' };
+        const obj = op.cells[op.cells.length - 1];
+        if (this.fort[obj] || CAPITAL_OF[obj] >= 0) return { key: 'artilleria', why: 'El objetivo es una capital o está fortificado: hace falta fuego para romper la defensa.' };
+        let n = 0, rough = 0;
+        for (let i = 0; i + 1 < op.cells.length; i++) {
+            const a = op.cells[i], b = op.cells[i + 1], k = Math.max(1, Math.round(Math.hypot(G.cx[b] - G.cx[a], G.cy[b] - G.cy[a]) / G.W));
+            for (let j = 0; j <= k; j++) {
+                const c = G.cellAt(G.cx[a] + (G.cx[b] - G.cx[a]) * j / k, G.cy[a] + (G.cy[b] - G.cy[a]) * j / k);
+                if (c < 0 || !isLand(c)) continue;
+                n++;
+                if (['forest', 'hills', 'mountain', 'marsh'].includes(CELL_TERRAIN[c])) rough++;
+            }
+        }
+        if (n && rough / n >= 0.4) return { key: 'mecanizada', why: 'Terreno abrupto en el eje: infantería y tanques juntos.' };
+        if (n >= 8) return { key: 'punta', why: 'Eje largo y llano: tanques solos, los más rápidos.' };
+        return { key: 'acorazada', why: 'Eje corto y llano: tanques con infantería.' };
+    }
+    opTemplate(op) {
+        if (op.template !== 'auto') { const t = this.templateOf(op.owner, op.template); if (t) return t; }
+        const sug = this.suggestTemplate(op);
+        return { ...this.templateOf(op.owner, sug.key), why: sug.why, auto: true };
+    }
+    templateCost(id, units) { return UNIT_KEYS.reduce((sum, k) => sum + units[k] * this.unitCost(id, k), 0); }
+    // Zona de reunión de los refuerzos: casilla libre suya, sin ciudad, junto al punto de partida de la operación.
+    formZone(op) {
+        const id = op.owner, anchor = op.kind === 'defensa' ? op.cells[Math.floor(op.cells.length / 2)] : op.cells[0];
+        let best = -1, bd = Infinity;
+        for (const [c, d] of this.nearCells(anchor, 3)) {
+            if (!isLand(c) || this.owner[c] !== id || CITY_OF[c] >= 0 || this.armyAt[c] || op.cells.includes(c) && op.kind === 'defensa') continue;
+            if (d < bd) { bd = d; best = c; }
+        }
+        return best >= 0 ? best : anchor;
+    }
+    stepReinforcements(id) {
+        for (const op of this.opsOf(id)) if (!op.paused && (op.gold || op.form)) this.reinforce(op);
+    }
+    reinforce(op) {
+        const id = op.owner, n = this.nations[id];
+        if (op.poolTurn !== this.turn) {   // una vez por turno
+            op.poolTurn = this.turn;
+            const tpl = this.opTemplate(op);
+            op.pool = Math.min((op.pool ?? 0) + op.gold, Math.max(op.gold * 4, this.templateCost(id, tpl.units) * 2));
+        }
+        let f = op.form;
+        if (!f) {
+            if (!op.gold) return;
+            const tpl = this.opTemplate(op);
+            f = op.form = { name: tpl.name, units: copyUnits(tpl.units), zone: this.formZone(op), recruited: emptyUnits(), pending: [] };
+        }
+        // Lo reclutado el turno anterior sale de su ciudad hacia la zona de reunión.
+        f.pending = f.pending.filter(([city, units]) => {
+            const g = this.armyOn(city);
+            if (!g || g.owner !== id) return false;
+            const take = emptyUnits();
+            for (const k of UNIT_KEYS) take[k] = Math.min(units[k], g.units[k]);
+            if (!countUnits(take)) return false;
+            const mover = sameUnits(take, g.units) ? g : this.split(g, take);
+            if (mover !== g) mover.op = 0;
+            mover.form = op.id;
+            if (!this.setOrder(mover, { kind: 'march', dest: f.zone })) { if (mover !== g) this.settle(mover); return false; }
+            if (city !== f.zone) this.stepOrder(mover);
+            if (mover !== g && this.armies.has(mover.id) && mover.cell === city && this.armyAt[city] !== mover.id) { this.settle(mover); return true; }   // no ha podido salir: otra vez el turno que viene
+            return false;
+        });
+        // Reclutar lo que falta, empezando por el tipo más atrasado, en la ciudad con cupo más cercana a la zona.
+        const steps = this.field(id, [f.zone]);
+        const cities = PROVINCES.filter(p => this.owner[p.city] === id && this.legal[p.city] === id && steps[p.city] < 1e9).sort((x, y) => steps[x.city] - steps[y.city]);
+        for (let guard = 0; guard < 200; guard++) {
+            const missing = UNIT_KEYS.filter(k => f.recruited[k] < f.units[k]).sort((x, y) => f.recruited[x] / f.units[x] - f.recruited[y] / f.units[y]);
+            if (!missing.length) break;
+            const type = missing[0], p = cities.find(c => this.canRecruitAt(id, c));
+            if (!p) break;
+            const cost = this.unitCost(id, type, p.id);
+            if (op.pool < cost || n.gold < cost || !this.recruit(id, p, type)) break;
+            op.pool -= cost;
+            f.recruited[type]++;
+            const entry = f.pending.find(([c]) => c === p.city);
+            if (entry) entry[1][type]++; else { const u = emptyUnits(); u[type] = 1; f.pending.push([p.city, u]); }
+        }
+        // Formación completa: el ejército de la zona entra en la operación.
+        const at = this.armyOn(f.zone), done = UNIT_KEYS.every(k => f.recruited[k] >= f.units[k]) && !f.pending.length;
+        const marching = [...this.armies.values()].some(a => a.form === op.id && a !== at && a.owner === id);
+        if (done && !marching) {
+            if (at && at.owner === id && at.form === op.id) { at.form = 0; at.order = null; at.op = op.id; }
+            op.form = null;
+            op.formed = (op.formed ?? 0) + 1;
+            this.orderVersion++;
+            if (id === this.player) this.log(`${op.name}: formada una ${f.name.toLowerCase()} en ${this.placeName(f.zone)}; entra en la operación.`);
+        } else if (at && at.owner === id && at.form === op.id && !at.order) this.setOrder(at, { kind: 'hold' });
+    }
+    // Lo que lleva hecho una formación: reclutadas, en camino y ya en la zona.
+    formProgress(op) {
+        const f = op.form;
+        if (!f) return null;
+        const total = countUnits(f.units), done = countUnits(f.recruited);
+        const at = this.armyOn(f.zone), ready = at && at.form === op.id ? countUnits(at.units) : 0;
+        let moving = 0;
+        for (const a of this.armies.values()) if (a.form === op.id && a !== at) moving += countUnits(a.units);
+        return { total, done, ready, moving, waiting: f.pending.reduce((s, [, u]) => s + countUnits(u), 0) };
     }
 
     // Movimientos que haría una operación asistida, sin hacerlos: se juegan en una copia de la partida.
@@ -2786,6 +2934,22 @@ class GameEngine {
         return res;
     }
     playerClearOrder(army) { if (army?.owner === this.player) this.clearOrder(army); }
+    playerSaveTemplate(name, units) {
+        const list = this.nations[this.player].templates;
+        if (!countUnits(units) || list.length >= 12) return false;
+        list.push({ name: String(name).trim().slice(0, 40) || `Plantilla ${list.length + 1}`, units: copyUnits(units) });
+        return true;
+    }
+    playerDeleteTemplate(i) {
+        const n = this.nations[this.player], key = `c${i}`;
+        if (!n.templates[i]) return;
+        n.templates.splice(i, 1);
+        // Las operaciones que la usaban pasan a la sugerida; las que usaban una posterior, se corren un puesto.
+        for (const op of this.opsOf(this.player)) {
+            if (op.template === key) op.template = 'auto';
+            else if (/^c\d+$/.test(op.template) && +op.template.slice(1) > i) op.template = `c${+op.template.slice(1) - 1}`;
+        }
+    }
     playerCreateOp(kind, cells) {
         if (this.over || this.player === null) return null;
         const op = this.createOp(this.player, kind, cells);
@@ -2813,6 +2977,8 @@ class GameEngine {
         else if (key === 'auto' && ['manual', 'asistida', 'auto'].includes(value)) op.auto = value;
         else if (key === 'paused' || key === 'fortify') op[key] = !!value;
         else if (key === 'name') op.name = String(value).trim().slice(0, 60) || op.name;
+        else if (key === 'gold' && OP_GOLD.includes(value)) op.gold = value;
+        else if (key === 'template' && (value === 'auto' || this.templateOf(op.owner, value))) { op.template = value; if (op.form && !countUnits(op.form.recruited)) op.form = null; }
         this.orderVersion++;
     }
 
@@ -4186,6 +4352,7 @@ class GameUI {
         document.addEventListener('input', e => this.onInput(e));
         document.addEventListener('change', e => this.onChange(e));
         document.addEventListener('keydown', e => this.onKey(e));
+        document.addEventListener('toggle', e => { if (e.target.matches?.('[data-tpl-box]')) this.tplOpen = e.target.open; }, true);
         $('#import-file').addEventListener('change', async e => {
             const file = e.target.files[0];
             e.target.value = '';
@@ -4746,7 +4913,7 @@ class GameUI {
             case 'op-set': {
                 const op = g.ops.get(+d.id);
                 if (!op || op.owner !== g.player) return;
-                g.playerOpSet(op, d.key, d.key === 'ratio' ? +d.value : d.key === 'auto' ? d.value : !op[d.key]);
+                g.playerOpSet(op, d.key, d.key === 'ratio' || d.key === 'gold' ? +d.value : d.key === 'auto' ? d.value : !op[d.key]);
                 break;
             }
             case 'op-redraw': {
@@ -4758,6 +4925,9 @@ class GameUI {
             case 'op-end': { const op = g.ops.get(+d.id); if (op) { g.endOp(op, 'terminada por orden tuya'); this.focusOp = null; } break; }
             case 'op-add-near': { const op = g.ops.get(+d.id); if (op) for (const a of g.nearbyFree(op, 4)) g.assignArmy(a, op.id); break; }
             case 'op-unassign': g.assignArmy(g.armies.get(+d.army), 0); break;
+            case 'tpl-step': { const u = this.tplDraft.units; u[d.unit] = Math.max(0, Math.min(60, u[d.unit] + +d.delta)); this.tplOpen = true; break; }
+            case 'tpl-save': if (g.playerSaveTemplate(this.tplDraft.name, this.tplDraft.units)) this.tplDraft = null; this.tplOpen = true; break;
+            case 'tpl-del': g.playerDeleteTemplate(+d.index); this.tplOpen = true; break;
             case 'op-goto': {
                 const op = g.ops.get(+d.id);
                 if (!op) return;
@@ -4999,6 +5169,7 @@ class GameUI {
     onInput(e) {
         if (e.target.id === 'nation-search') { this.filter = e.target.value; this.renderNationList(); }
         if (e.target.id === 'bloc-name') this.blocName = e.target.value;
+        if (e.target.id === 'tpl-name' && this.tplDraft) this.tplDraft.name = e.target.value;
     }
 
     onChange(e) {
@@ -5008,6 +5179,7 @@ class GameUI {
         if (e.target.id === 'peace-mine') { this.peace.mine = +e.target.value; this.renderPeaceDialog(); }
         if (e.target.id === 'peace-keep') { this.peace.keep = e.target.checked; this.renderPeaceDialog(); }
         if (e.target.dataset.opAssign !== undefined) { this.game.assignArmy(this.selectedArmy(), +e.target.value); this.render(); }
+        if (e.target.dataset.opTemplate !== undefined) { const op = this.game.ops.get(+e.target.dataset.opTemplate); if (op) this.game.playerOpSet(op, 'template', e.target.value); this.render(); }
         if (e.target.id === 'op-name') { const op = this.game.ops.get(this.focusOp); if (op) this.game.playerOpSet(op, 'name', e.target.value); this.render(); }
     }
 
@@ -5711,6 +5883,7 @@ class GameUI {
                 <p class="group-title">Automatización</p>
                 <div class="seg">${OP_AUTO.map(([v, l, t]) => `<button data-action="op-set" data-id="${op.id}" data-key="auto" data-value="${v}" class="${op.auto === v ? 'on' : ''}" title="${t}">${l}</button>`).join('')}</div>
                 <p class="note">${OP_AUTO.find(([v]) => v === op.auto)[2]}.${op.kind === 'reserva' ? ' En manual no manda refuerzos.' : ''}</p>
+                ${this.reinforceSection(op)}
                 ${op.kind === 'defensa' ? `<label class="check small" style="margin-top:8px"><input type="checkbox" data-action="op-set" data-id="${op.id}" data-key="fortify" ${op.fortify ? 'checked' : ''}><span>Fortificar las casillas de la línea que ocupe (hasta 2 por turno, ${rules.fortCost} de oro cada una)</span></label>` : ''}
                 <div class="row" style="margin-top:10px;flex-wrap:wrap">
                     <button class="btn" data-action="op-set" data-id="${op.id}" data-key="paused">${op.paused ? 'Reanudar' : 'Pausar'}</button>
@@ -5724,7 +5897,43 @@ class GameUI {
             <div class="row">${Object.entries(OP_KINDS).map(([k, v]) => `<button class="btn" data-action="op-new" data-kind="${k}" ${ops.length >= cap ? 'disabled' : ''}>${v.icon.replace('<svg ', '<svg width="15" height="15" aria-hidden="true" ')}${v.name}</button>`).join('')}</div>
             <div class="op-list">${ops.map(row).join('') || '<p class="note" style="margin:8px">Sin operaciones. Dibuja una flecha de ofensiva, una línea de defensa o una zona de reserva (tecla 5) y asígnale ejércitos: se moverán solos turno a turno.</p>'}</div>
             ${detail}
-            <p class="note" style="margin-top:10px">Tu estado mayor lleva ${cap} operaciones a la vez: ${rules.commandOps} por Doctrina y una más por cada 20 provincias.</p>`;
+            <p class="note" style="margin-top:10px">Tu estado mayor lleva ${cap} operaciones a la vez: ${rules.commandOps} por Doctrina y una más por cada 20 provincias.</p>
+            ${this.templatesSection()}`;
+    }
+    // Refuerzos de una operación: oro por turno, plantilla y cómo va la formación.
+    reinforceSection(op) {
+        const g = this.game, tpl = g.opTemplate(op), n = g.nations[g.player], pr = g.formProgress(op), cost = g.templateCost(g.player, tpl.units);
+        const opts = [['auto', `Automática: ${tpl.auto ? tpl.name : g.templateOf(g.player, g.suggestTemplate(op).key).name}`],
+            ...Object.entries(TEMPLATES).map(([k, t]) => [k, t.name]), ...n.templates.map((t, i) => [`c${i}`, `${t.name} (propia)`])];
+        const status = pr ? `Formando ${esc(op.form.name.toLowerCase())} en ${esc(g.placeName(op.form.zone))}: ${pr.done} de ${pr.total} reclutadas${pr.waiting ? `, ${pr.waiting} salen el turno que viene` : ''}${pr.moving ? `, ${pr.moving} en camino` : ''}${pr.ready ? `, ${pr.ready} en la zona` : ''}.`
+            : op.gold ? 'La primera formación empieza al terminar el turno.' : 'Sin oro para refuerzos.';
+        return `<p class="group-title">Refuerzos</p>
+            <div class="seg">${OP_GOLD.map(v => `<button data-action="op-set" data-id="${op.id}" data-key="gold" data-value="${v}" class="${op.gold === v ? 'on' : ''}">${v ? `${v}` : 'Nada'}</button>`).join('')}</div>
+            <p class="note">Oro por turno, de tus ${g.income(g.player)} de renta${op.gold > g.income(g.player) ? ' (más de lo que ingresas: tirará del tesoro)' : ''}. ${op.gold ? `Una ${esc(tpl.name.toLowerCase())} (${cost} de oro) cada unos ${Math.ceil(cost / op.gold)} turnos.` : ''}</p>
+            <select data-op-template="${op.id}" style="width:100%;margin-top:6px" aria-label="Plantilla de refuerzo">${opts.map(([v, l]) => `<option value="${v}" ${op.template === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+            <p class="note">${esc(tpl.why)} Se recluta en las ciudades más cercanas a la zona de reunión y las tropas marchan hasta ella; completa, entra en la operación.</p>
+            <p class="small" style="margin-top:4px">${status}${op.formed ? ` Formadas: ${op.formed}.` : ''}${op.pool ? ` Guardado: ${op.pool} de oro.` : ''}</p>`;
+    }
+    // Plantillas de serie y propias, con su fuerza, y un editor para crear la tuya.
+    templatesSection() {
+        const g = this.game, r = g.rules(g.player), n = g.nations[g.player];
+        const d = this.tplDraft ??= { name: '', units: { infantry: 6, tank: 2, artillery: 1 } };
+        const facts = u => { const k = countUnits(u); return `${k} · ${echelonOf(k).mark} · ataque ${unitPower(u, 'atk', r)}, defensa ${unitPower(u, 'def', r)}, velocidad ${k ? speedOf(u, r) : 0} · ${g.templateCost(g.player, u)} de oro`; };
+        const row = (name, u, extra = '') => `<div class="tpl-row">${unitIcon(dominantType(u), g.nations[g.player].color)}<span><b>${esc(name)}</b><small>${unitText(u)} · ${facts(u)}</small></span>${extra}</div>`;
+        return `<details class="tpl-box" ${this.tplOpen ? 'open' : ''} data-tpl-box>
+            <summary>Plantillas de ejército</summary>
+            ${Object.values(TEMPLATES).map(t => row(t.name, t.units)).join('')}
+            ${n.templates.map((t, i) => row(t.name, t.units, `<button class="btn ghost" data-action="tpl-del" data-index="${i}" aria-label="Borrar" title="Borrar">✕</button>`)).join('')}
+            <div class="tpl-edit">
+                <input type="text" id="tpl-name" maxlength="40" placeholder="Nombre de tu plantilla" value="${esc(d.name)}" aria-label="Nombre de la plantilla">
+                ${UNIT_KEYS.map(k => `<div class="unit-row">${unitIcon(k, g.nations[g.player].color)}<div>${CONFIG.TYPES[k].name}</div>
+                    <div class="stepper"><button data-action="tpl-step" data-unit="${k}" data-delta="-1" ${d.units[k] ? '' : 'disabled'} aria-label="Una menos">−</button><output>${d.units[k]}</output>
+                    <button data-action="tpl-step" data-unit="${k}" data-delta="1" aria-label="Una más">+</button></div></div>`).join('')}
+                <p class="small muted">${facts(d.units)}</p>
+                <button class="btn" data-action="tpl-save" ${countUnits(d.units) && n.templates.length < 12 ? '' : 'disabled'}>Guardar plantilla</button>
+            </div>
+            <p class="note">La artillería frena a todo el ejército a velocidad 3 y la infantería a 4: para ir rápido, tanques solos. La infantería es la defensa más barata; la artillería, el ataque más barato pero muy frágil.</p>
+        </details>`;
     }
 
     renderBlocs() {

@@ -60,7 +60,7 @@ const setup = () => {
             return PROVINCES.filter(p => g.owner[p.city] === b).sort((x, y) => steps[x.city] - steps[y.city])[0].city;
         },
         // Pasa turnos solo para `owner`: cumple sus órdenes y le devuelve el movimiento.
-        turns(g, owner, n) { for (let i = 0; i < n; i++) { g.executeOrders(owner); g.turn++; for (const a of g.armies.values()) if (a.owner === owner) a.used = 0; } },
+        turns(g, owner, n) { for (let i = 0; i < n; i++) { g.executeOrders(owner); g.turn++; g.nations[owner].recruited.clear(); for (const a of g.armies.values()) if (a.owner === owner) a.used = 0; } },
         // Empieza una partida en la interfaz con el país dado y devuelve su motor.
         uiStart(key, fog = false) {
             for (const d of document.querySelectorAll('dialog[open]')) d.close();
@@ -384,6 +384,84 @@ const CHECKS = [
         const stay = g.armyOn(city), gone = [...g.armies.values()].find(x => x.op === zone.id);
         T.eq([stay.units, stay.op], [{ infantry: 1, tank: 0, artillery: 0 }, 0], 'guarnición sin operación');
         T.ok(gone && gone.cell !== city && countUnits(gone.units) === 6, 'el resto sale con la operación');
+        return true;
+    }],
+    ['F3 · los refuerzos se reclutan, marchan a la zona y entran formados en la operación', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        g.nations[es].gold = 20000;
+        const [, from] = T.plainPair(g, es);
+        const op = g.createOp(es, 'reserva', [from], { gold: 400, template: 'acorazada' });
+        T.turns(g, es, 1);
+        T.ok(op.form && countUnits(op.form.recruited) > 0, 'empieza a reclutar');
+        T.eq(op.form.units, TEMPLATES.acorazada.units, 'con la receta de la plantilla');
+        const spent = 20000 - g.nations[es].gold;
+        T.ok(spent > 0 && spent <= 400, `no gasta más que su oro por turno (${spent})`);
+        let n = 0;
+        while (!op.formed && n < 30) { T.turns(g, es, 1); n++; }
+        T.ok(op.formed === 1, `formada en ${n + 1} turnos`);
+        const army = g.opMembers(op).find(a => a.units.tank >= 8);
+        T.ok(army && army.units.infantry >= 4 && !army.form && !army.order, 'el ejército entra en la operación');
+        T.ok(op.form === null || countUnits(op.form.recruited) <= countUnits(op.form.units), 'y empieza otra');
+        return true;
+    }],
+    ['F3 · composición sugerida según el tipo, el objetivo y el terreno', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        const [start] = T.border(g, es, fr), [, from] = T.plainPair(g, es);
+        T.eq(g.suggestTemplate(g.createOp(es, 'defensa', [from])).key, 'infanteria', 'defensa');
+        T.eq(g.suggestTemplate(g.createOp(es, 'ofensiva', [start, g.nations[fr].capitalCell])).key, 'artilleria', 'contra una capital');
+        const op = g.createOp(es, 'reserva', [from]);
+        op.template = 'punta';
+        T.eq(g.opTemplate(op).name, 'Punta de lanza', 'la elegida manda sobre la sugerida');
+        return true;
+    }],
+    ['F3 · plantillas propias: se guardan, se usan y al borrarlas las operaciones vuelven a la sugerida', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        const [, from] = T.plainPair(g, es);
+        T.ok(g.playerSaveTemplate('Montaña', { infantry: 12, tank: 0, artillery: 1 }), 'guardada');
+        T.ok(g.playerSaveTemplate('Choque', { infantry: 0, tank: 6, artillery: 3 }), 'otra');
+        const a = g.createOp(es, 'reserva', [from]), b = g.createOp(es, 'reserva', [from]);
+        g.playerOpSet(a, 'template', 'c0'); g.playerOpSet(b, 'template', 'c1');
+        T.eq(g.opTemplate(b).units, { infantry: 0, tank: 6, artillery: 3 }, 'usa la propia');
+        const data = JSON.parse(JSON.stringify(g.serialize()));
+        T.eq(GameEngine.load(data).nations[es].templates.map(t => t.name), ['Montaña', 'Choque'], 'se guardan con la partida');
+        g.playerDeleteTemplate(0);
+        T.eq([a.template, b.template, g.opTemplate(b).name], ['auto', 'c0', 'Choque'], 'las demás se corren un puesto');
+        return true;
+    }],
+    ['F3 · la formación en curso se guarda y se carga', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        g.nations[es].gold = 20000;
+        const [, from] = T.plainPair(g, es);
+        const op = g.createOp(es, 'reserva', [from], { gold: 200, template: 'division' });
+        T.turns(g, es, 3);
+        const marching = [...g.armies.values()].filter(a => a.form === op.id).map(a => a.id).sort();
+        const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+        const ho = h.ops.get(op.id);
+        T.eq([ho.gold, ho.template, ho.pool, ho.form.units, ho.form.recruited, ho.form.zone], [200, 'division', op.pool, op.form.units, op.form.recruited, op.form.zone], 'formación');
+        T.eq([...h.armies.values()].filter(a => a.form === op.id).map(a => a.id).sort(), marching, 'ejércitos en camino');
+        return true;
+    }],
+    ['F3 · interfaz: oro, plantilla y editor de plantillas en la pestaña Mando', () => {
+        const g = T.uiStart('es'), es = g.player;
+        const [, from] = T.plainPair(g, es);
+        const op = g.playerCreateOp('reserva', [from]);
+        ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        document.querySelector(`[data-action="op-set"][data-key="gold"][data-value="200"]`).click();
+        T.eq(op.gold, 200, 'oro por turno');
+        const sel = document.querySelector(`[data-op-template="${op.id}"]`);
+        sel.value = 'artilleria'; sel.dispatchEvent(new Event('change', { bubbles: true }));
+        T.eq(op.template, 'artilleria', 'plantilla');
+        T.ok(document.querySelector('#drawer-body').textContent.includes('Grupo de artillería'), 'se ve en la pestaña');
+        const name = document.querySelector('#tpl-name');
+        name.value = 'Paracaidistas'; name.dispatchEvent(new Event('input', { bubbles: true }));
+        document.querySelector('[data-action="tpl-step"][data-unit="tank"][data-delta="1"]').click();
+        document.querySelector('[data-action="tpl-save"]').click();
+        T.eq(g.nations[es].templates.at(-1), { name: 'Paracaidistas', units: { infantry: 6, tank: 3, artillery: 1 } }, 'plantilla propia guardada');
+        T.ok([...document.querySelectorAll(`[data-op-template="${op.id}"] option`)].some(o => o.value === 'c0'), 'y elegible en la operación');
         return true;
     }]
 ];
