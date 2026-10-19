@@ -21,6 +21,21 @@ El terreno de cada casilla sale de datos reales y cuenta en las reglas (coste de
 
 Las partidas se guardan en el propio dispositivo (autoguardado al final de cada turno y tres ranuras). Para pasar una partida a otro dispositivo, usa «Partida → Exportar a archivo» e «Importar archivo».
 
+## Investigación
+
+Cada país puede investigar mejoras permanentes (botón de la cabecera o tecla I). Hay 36 investigaciones en 12 ramas de tres niveles, agrupadas en cuatro áreas:
+
+- **Militar:** Infantería, Blindados y Artillería (ataque, defensa y velocidad de cada tipo) y Doctrina (menos castigo al estar rodeado, asedios más cortos, menos bajas al ganar).
+- **Estado:** Movilización (más reclutas por turno), Ciencia (investigar más rápido, más barato y dos cosas a la vez) e Industria (yacimientos que rinden más y abaratan más las tropas).
+- **Terreno:** Infraestructura (carreteras más baratas y más rápidas, suministro más lejos), Movilidad (montaña, colinas, bosque, pantano, ríos y lagos) y Fortificación (más defensa, obras más cortas, búnkeres y casamatas).
+- **Inteligencia:** Reconocimiento (más visión, tipo y número de los ejércitos enemigos, sus niveles) y Espionaje (espías más baratos, que duran más y que informan de más).
+
+Cada investigación se paga al empezar (entre 4 y 12 turnos de renta según el nivel, un 10 % más por cada una ya terminada) y tarda 6, 10 o 15 turnos. Se investiga una cosa a la vez (dos con Ciencia 3); si se cambia, la anterior queda en pausa con su progreso. La IA también investiga, según esté en guerra o en paz, sus tropas y su terreno.
+
+En el mapa, los galones bajo la ficha (o el borde de bronce, plata u oro de la peana en la vista realista) indican el nivel investigado en la rama de su tipo de tropa, y las fortificaciones cambian de material con el nivel de su dueño: sacos terreros, hormigón, búnkeres y casamatas.
+
+Con niebla de guerra, de un ejército enemigo a la vista solo se sabe de quién es y su tamaño aproximado, con el escalón de la OTAN sobre una ficha vacía (II batallón, III regimiento, X brigada, XX división). Su tipo y su número se conocen con Reconocimiento 2 o con un espía en la provincia; sus galones y el nivel de sus fortificaciones, con Reconocimiento 3 o con Agentes dobles.
+
 ## Archivos
 
 | Archivo | Qué es |
@@ -33,6 +48,7 @@ Las partidas se guardan en el propio dispositivo (autoguardado al final de cada 
 | `fonts/` | Barlow Semi Condensed, incluida para que se vea igual sin conexión. |
 | `tools/build-map.mjs` | Genera `europa-data.js` a partir de los datos del simulador GeoSim (no incluidos aquí). Al final llama a `tools/terrain.mjs`. |
 | `tools/build-terrain.mjs` | Añade al `europa-data.js` existente el terreno real por casilla y los ríos, y genera `relieve.png`. Descarga los datos la primera vez a `tools/cache/` (unos 50 s). |
+| `tools/smoke-research.mjs` | Pruebas del motor y de la interfaz en el navegador (Playwright): investigación, sus efectos en las reglas, la IA, la inteligencia y las insignias. |
 | `tools/smoke-vista.mjs` | Prueba en el navegador (Playwright): empieza una partida, comprueba la vista realista y las animaciones y guarda capturas. |
 | `tools/release.mjs` | Marca una versión nueva (`index.html`, `sw.js`, `version.json`) antes de publicar. |
 | `tools/resources.json` | Yacimientos (petróleo, gas, carbón, hierro, minerales), editable a mano. |
