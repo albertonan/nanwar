@@ -242,6 +242,86 @@
         #overlay .float { padding: 26px; width: min(420px, calc(100vw - 32px)); text-align: center; }
         #overlay h2 { font-size: 34px; margin-bottom: 8px; }
 
+        /* Investigación: pastilla de la cabecera y diálogo con el árbol */
+        .figure.research { cursor: pointer; border: 0; background: rgba(240, 196, 25, 0.12); color: var(--text); padding: 4px 12px 5px; border-radius: 10px; font: inherit; text-align: left; min-width: 0; max-width: 270px; }
+        .figure.research:hover { background: rgba(240, 196, 25, 0.2); }
+        .figure.research b { font-size: 15px; color: var(--signal); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+        .figure.research .mini { height: 4px; border-radius: 2px; background: rgba(235, 231, 216, 0.15); margin-top: 3px; overflow: hidden; }
+        .figure.research .mini i { display: block; height: 100%; background: var(--signal); border-radius: 2px; }
+        .figure.research.idle b { animation: breathe 2s ease-in-out infinite; }
+        @keyframes breathe { 50% { opacity: 0.45; } }
+        .btn.nudge { position: relative; }
+        .btn.nudge::after { content: ""; position: absolute; top: -4px; right: -4px; width: 11px; height: 11px; border-radius: 50%; background: var(--war); box-shadow: 0 0 0 2px var(--panel); }
+        dialog .float.research { width: min(1120px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow-y: auto; padding: 20px; border-radius: 16px; display: grid; gap: 16px; }
+        .rs-head { display: flex; align-items: baseline; gap: 4px 14px; flex-wrap: wrap; }
+        .rs-head h2 { font-size: 26px; }
+        .rs-head .btn { margin-left: auto; align-self: center; }
+        .rs-labs { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 10px; }
+        .rs-lab { display: flex; align-items: center; gap: 12px; padding: 10px 14px 10px 10px; border-radius: 14px; background: var(--raised); border: 0; color: inherit; font: inherit; text-align: left; }
+        button.rs-lab { cursor: pointer; }
+        button.rs-lab:hover { filter: brightness(1.08); }
+        .rs-lab small { display: block; color: var(--muted); font-size: 12.5px; }
+        .rs-lab b { display: block; font-size: 15.5px; }
+        .rs-lab.free { background: transparent; box-shadow: inset 0 0 0 1.5px rgba(240, 196, 25, 0.5); }
+        .rs-lab.free b { color: var(--signal); }
+        .rs-lab.locked { background: transparent; box-shadow: inset 0 0 0 1.5px var(--line); color: var(--muted); }
+        .rs-slot { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; background: var(--panel); flex: none; }
+        .rs-ring .bg { fill: none; stroke: rgba(235, 231, 216, 0.14); stroke-width: 4; }
+        .rs-ring .fg { fill: none; stroke: var(--signal); stroke-width: 4; stroke-linecap: round; }
+        .rs-ring text { fill: var(--text); font: 700 13px var(--font); }
+        .rs-filter { display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 3px; border-radius: 999px; background: var(--ink); justify-self: start; }
+        .rs-filter button { font: 600 13.5px var(--font); color: var(--muted); background: none; border: 0; border-radius: 999px; padding: 6px 14px; cursor: pointer; }
+        .rs-filter button.on { background: var(--raised); color: var(--text); }
+        .rs-body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
+        .rs-rows { display: grid; gap: 4px; min-width: 0; }
+        .rs-row { display: grid; grid-template-columns: 170px repeat(3, minmax(0, 1fr)); gap: 14px; padding: 5px; border-radius: 12px; }
+        .rs-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
+        .rs-name b { display: block; font-size: 14.5px; line-height: 1.2; }
+        .rs-name small { display: block; color: var(--muted); font-size: 12px; line-height: 1.25; }
+        .rs-patch { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; flex: none; background: radial-gradient(circle at 35% 30%, #4a5440, #2c3427); color: var(--signal); box-shadow: inset 0 0 0 1.5px rgba(240, 196, 25, 0.35); }
+        .rs-patch svg { width: 23px; height: 23px; }
+        .rs-patch.lg { width: 48px; height: 48px; }
+        .rs-patch.lg svg { width: 29px; height: 29px; }
+        .rs-node { font: inherit; color: inherit; text-align: left; cursor: pointer; display: grid; gap: 3px; align-content: start; padding: 9px 11px; border: 1.5px solid transparent; border-radius: 12px; background: var(--raised); position: relative; min-width: 0; }
+        .rs-node:hover { filter: brightness(1.1); }
+        .rs-node + .rs-node::before { content: ""; position: absolute; left: -16px; top: 50%; width: 15px; height: 2px; border-radius: 2px; background: var(--line); }
+        .rs-node.after-done::before { background: rgba(143, 209, 107, 0.6); }
+        .rs-node .n { font-weight: 600; font-size: 14px; line-height: 1.22; overflow-wrap: break-word; hyphens: auto; }
+        .rs-node .st { font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; align-items: center; gap: 0 5px; }
+        .rs-node .st .short { color: var(--war); }
+        .rs-node.done { background: rgba(143, 209, 107, 0.12); }
+        .rs-node.done .st { color: var(--go); }
+        .rs-node.current { background: rgba(240, 196, 25, 0.12); border-color: rgba(240, 196, 25, 0.75); }
+        .rs-node.paused { border-style: dashed; border-color: rgba(166, 168, 146, 0.6); }
+        .rs-node.locked { opacity: 0.5; }
+        .rs-node.locked .gal path { stroke: var(--muted); }
+        .rs-node.sel { outline: 2px solid var(--text); outline-offset: 2px; }
+        .rs-bar { height: 5px; border-radius: 3px; background: rgba(235, 231, 216, 0.14); overflow: hidden; margin-top: 3px; }
+        .rs-bar i { display: block; height: 100%; background: var(--signal); border-radius: 3px; }
+        .rs-node.paused .rs-bar i { background: var(--muted); }
+        .rs-card { background: var(--raised); border-radius: 16px; padding: 16px; display: grid; gap: 12px; position: sticky; top: 0; min-width: 0; }
+        .rs-who { display: flex; align-items: center; gap: 12px; }
+        .rs-crumb { font-size: 12.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+        .rs-card h3 { font-size: 21px; margin: 0; }
+        .rs-deltas { display: grid; gap: 8px; }
+        .rs-deltas span { color: var(--muted); font-size: 13px; display: block; }
+        .rs-deltas b { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-weight: 600; }
+        .rs-deltas s { text-decoration: none; color: var(--muted); font-weight: 400; }
+        .rs-deltas em { font-style: normal; color: var(--go); }
+        .rs-card .status { font-size: 13.5px; display: flex; align-items: center; gap: 6px; }
+        .rs-card .swap { font-size: 13px; color: var(--muted); }
+        .rs-card .tip { font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 10px; }
+        .rs-card .btn { width: 100%; padding: 10px; border-radius: 10px; }
+        .ui-ico { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; vertical-align: -2px; }
+        .gal { flex: none; }
+        .gal path { fill: none; stroke: var(--signal); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+        .toast.done { border-left-color: var(--go); }
+        @media (max-width: 960px) {
+            .rs-body { grid-template-columns: minmax(0, 1fr); }
+            .rs-card { position: static; }
+        }
+        @media (prefers-reduced-motion: reduce) { .figure.research.idle b { animation: none; } }
+
         /* Móvil: herramientas abajo, ficha como panel inferior, países a pantalla completa */
         @media (max-width: 760px) {
             #topbar { gap: 12px; padding: max(6px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) 6px max(10px, env(safe-area-inset-left)); min-height: 52px; }
@@ -281,6 +361,16 @@
             dialog .float { padding: 14px; }
             .slot { grid-template-columns: 1fr auto; }
             .slot > div { grid-column: 1 / -1; }
+            .figure.research { max-width: 120px; padding: 3px 8px; }
+            .figure.research span { display: none; }
+            .figure.research b { font-size: 13px; }
+            dialog .float.research { padding: 14px; max-height: calc(100vh - 24px); }
+            .rs-row { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 14px; }
+            .rs-name { grid-column: 1 / -1; }
+            .rs-filter { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; }
+            .rs-filter button { flex: none; }
+            .rs-card { position: sticky; top: auto; bottom: -14px; max-height: 46vh; overflow-y: auto; box-shadow: 0 -10px 24px rgba(0, 0, 0, 0.45); }
+            .rs-card .tip { display: none; }
         }
     </style>
 </head>
@@ -290,6 +380,7 @@
         <div class="brand"><span class="flag" id="flag"></span><h1 id="nation-name">NanWar</h1></div>
         <div class="figure" id="fig-gold" title="Oro en el tesoro e ingresos por turno"><span>Oro</span><b id="gold">—</b></div>
         <div class="figure" title="Turno actual"><span>Turno</span><b id="turn">1</b></div>
+        <button class="figure research" id="fig-research" data-action="open-research" title="Investigación (I)" hidden></button>
         <div class="spacer"></div>
         <button class="btn ghost" data-action="next-army" id="btn-next" title="Seleccionar el siguiente ejército que aún puede moverse">Siguiente ejército <kbd>N</kbd></button>
         <button class="btn" id="btn-install" data-action="install" hidden title="Instalar NanWar como aplicación">Instalar</button>
@@ -313,6 +404,7 @@
     </main>
 </div>
 <dialog id="game-dialog"><div class="float" id="game-dialog-body"></div></dialog>
+<dialog id="research-dialog" aria-label="Investigación"><div class="float research" id="research-body"></div></dialog>
 <dialog id="peace-dialog"><div class="float" id="peace-body"></div></dialog>
 <dialog id="alerts-dialog"><div class="float" id="alerts-body"></div></dialog>
 <div id="overlay" hidden><div class="float" id="overlay-card"></div></div>
@@ -443,6 +535,7 @@ const baseRules = () => ({
     spyWide: false                       // el espía informa también de las provincias vecinas y de galones, muros e investigación
 });
 
+const BASE_RULES = baseRules();
 const RESEARCH_AREAS = ['Militar', 'Estado', 'Terreno', 'Inteligencia'];
 const RESEARCH_BRANCHES = [
     { id: 'infanteria', area: 'Militar', name: 'Infantería', sub: 'Atributos de la infantería', icon: 'inf' },
@@ -2110,7 +2203,7 @@ class GameEngine {
         if (!plan.cells.length) { this.log("Esas casillas ya están fortificadas o en obras."); return true; }
         if (plan.cost > this.nations[this.player].gold) { this.log(`Fondos insuficientes: la fortificación cuesta ${plan.cost}g.`); return false; }
         const n = this.buildFort(this.player, plan);
-        this.log(`Empiezas a fortificar ${n} casilla${n > 1 ? 's' : ''} por ${plan.cost}g: listas en ${CONFIG.FORT_TURNS} turnos.`);
+        this.log(`Empiezas a fortificar ${n} casilla${n > 1 ? 's' : ''} por ${plan.cost}g: listas en ${this.rules(this.player).fortTurns} turnos.`);
         return true;
     }
     playerDiplomacy(action, target) {
@@ -2519,11 +2612,48 @@ const ICONS = {
     supply: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M2 6h11v10H2zM13 9h4.5l3.5 3.5V16h-8"/><circle cx="6" cy="18" r="2"/><circle cx="17" cy="18" r="2"/></svg>',
     relief: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M2 20 9 7l4 6 3-4 6 11z"/><path d="M7.5 9.8 9 11l1.6-1.4"/></svg>'
 };
+// Investigación: símbolos OTAN para las tropas y los ingenieros, pictogramas reales para el resto (32×32).
+const RS_STAR = (() => { const p = []; for (let i = 0; i < 10; i++) { const r = i % 2 ? 5.2 : 12.5, a = Math.PI / 5 * i - Math.PI / 2; p.push(`${(16 + r * Math.cos(a)).toFixed(1)},${(16.8 + r * Math.sin(a)).toFixed(1)}`); } return p.join(' '); })();
+const RS_FRAME = '<rect x="3" y="8" width="26" height="16" rx="1" fill="none" stroke="currentColor" stroke-width="2.2"/>';
+const RS_ICON = {
+    inf: RS_FRAME + '<path d="M3 8l26 16M29 8L3 24" stroke="currentColor" stroke-width="2.2"/>',
+    tank: RS_FRAME + '<ellipse cx="16" cy="16" rx="8.5" ry="4.4" fill="none" stroke="currentColor" stroke-width="2.2"/>',
+    art: RS_FRAME + '<circle cx="16" cy="16" r="3.4" fill="currentColor"/>',
+    doc: `<polygon points="${RS_STAR}" fill="currentColor"/>`,
+    mob: '<path d="M5 21.5C5 14 10 8.5 16 8.5S27 14 27 21.5z" fill="currentColor"/><rect x="2.5" y="21.5" width="27" height="3" rx="1.5" fill="currentColor"/><path d="M9.5 20c.4-4 2.6-7 5.8-8" fill="none" stroke="#000" stroke-opacity=".28" stroke-width="1.6" stroke-linecap="round"/>',
+    sci: '<path d="M12 4.5h8M13.5 4.5v8.2L6.6 24.3A2.5 2.5 0 0 0 8.8 28h14.4a2.5 2.5 0 0 0 2.2-3.7l-6.9-11.6V4.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.6 21h12.8l2.4 4.2c.4.7-.1 1.3-.8 1.3H8c-.7 0-1.2-.6-.8-1.3z" fill="currentColor"/>',
+    ind: '<path d="M3 28V15.5l7 4v-4l7 4v-4l5 2.9V5.5h5V28z" fill="currentColor"/><path d="M7 23.5h3M13 23.5h3M19 23.5h3" stroke="#000" stroke-opacity=".3" stroke-width="2"/>',
+    road: RS_FRAME + '<path d="M9 20v-6h14v6M16 14v6" fill="none" stroke="currentColor" stroke-width="2.2"/>',
+    mnt: '<path d="M2 27L11.5 10l5 8.5 3.5-5L30 27z" fill="currentColor"/><path d="M9.2 14.2l2.3-4.2 2.4 4.2-1.2-.6-1.2.9-1.1-.9z" fill="#fff" fill-opacity=".5"/>',
+    fort: '<path fill="currentColor" fill-rule="evenodd" d="M4 24A12 11 0 0 1 28 24zM10 17.5h12v2.6H10z"/><rect x="2" y="24" width="28" height="3.4" rx="1.4" fill="currentColor"/>',
+    eye: '<rect x="5" y="7" width="8" height="11" rx="2.5" fill="currentColor"/><rect x="19" y="7" width="8" height="11" rx="2.5" fill="currentColor"/><rect x="12" y="10" width="8" height="5" fill="currentColor"/><circle cx="9" cy="21" r="6.5" fill="currentColor"/><circle cx="23" cy="21" r="6.5" fill="currentColor"/><circle cx="9" cy="21" r="3.4" fill="#000" fill-opacity=".3"/><circle cx="23" cy="21" r="3.4" fill="#000" fill-opacity=".3"/>',
+    spy: '<path d="M2.5 20.5c3 3.2 24 3.2 27 0-1.4 4.4-25.6 4.4-27 0z" fill="currentColor"/><path d="M7.5 20.6c.2-6.4 2.3-11.6 5-11.6 1.4 0 2.2 1.3 3.5 1.3S18.1 9 19.5 9c2.7 0 4.8 5.2 5 11.6-5.6 1.3-11.4 1.3-17 0z" fill="currentColor"/><path d="M7.7 17.6c5.5 1.3 11.1 1.3 16.6 0" stroke="#000" stroke-opacity=".32" stroke-width="2.2" fill="none"/>'
+};
+const rsIcon = k => `<svg viewBox="0 0 32 32" aria-hidden="true">${RS_ICON[k]}</svg>`;
+const UI_ICON = {
+    check: '<path d="M3 8.5l3.2 3L13 4.5"/>',
+    lock: '<rect x="3.5" y="7" width="9" height="6.5" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/>',
+    pause: '<path d="M6 4v8M10 4v8"/>',
+    arrow: '<path d="M3 8h9M9 5l3 3-3 3"/>',
+    flask: '<path d="M6 2.5h4M6.8 2.5v4L3.3 12.3A1.2 1.2 0 0 0 4.3 14h7.4a1.2 1.2 0 0 0 1-1.7L9.2 6.5v-4"/>'
+};
+const uiIcon = (k, size = 15) => `<svg class="ui-ico" width="${size}" height="${size}" viewBox="0 0 16 16" aria-hidden="true">${UI_ICON[k]}</svg>`;
+// Galones: tantos como el nivel, como los de un uniforme.
+const galones = n => {
+    let p = '';
+    for (let i = 0; i < n; i++) { const y = 2 + i * 4.4; p += `<path d="M2 ${(y + 4.4).toFixed(1)}L9 ${y.toFixed(1)}L16 ${(y + 4.4).toFixed(1)}"/>`; }
+    const h = (8 + (n - 1) * 4.4).toFixed(1);
+    return `<svg class="gal" width="18" height="${h}" viewBox="0 0 18 ${h}" role="img" aria-label="Nivel ${n}">${p}</svg>`;
+};
+const decimal = x => String(Math.round(x * 100) / 100).replace('.', ',');
+// Movimiento por tramo como fracción de punto: 6 → ½, 4 → ⅓, 3 → ¼.
+const moveFraction = sub => ({ [MOVE / 2]: '½', [MOVE / 3]: '⅓', [MOVE / 4]: '¼' })[sub] ?? `${decimal(sub / MOVE)}`;
+
 const TOOLS = [
     { id: 'command', label: 'Mando', key: '1', icon: ICONS.command, title: 'Seleccionar y dar órdenes' },
-    { id: 'road', label: 'Carretera', key: '2', icon: ICONS.road, cls: 1, title: `Construir carretera (${CONFIG.ROAD_COST} de oro por tramo)` },
-    { id: 'highway', label: 'Autopista', key: '3', icon: ICONS.highway, cls: 2, title: `Convertir en autopista (+${CONFIG.HIGHWAY_COST} de oro por tramo)` },
-    { id: 'fort', label: 'Fortificar', key: '4', icon: ICONS.fort, title: `Fortificar casillas (${CONFIG.FORT_COST} de oro cada una, ${CONFIG.FORT_TURNS} turnos)` },
+    { id: 'road', label: 'Carretera', key: '2', icon: ICONS.road, cls: 1, title: r => `Construir carretera (${decimal(CONFIG.ROAD_COST * r.roadCost)} de oro por tramo, más en terreno difícil)` },
+    { id: 'highway', label: 'Autopista', key: '3', icon: ICONS.highway, cls: 2, title: r => `Convertir en autopista (+${decimal(CONFIG.HIGHWAY_COST * r.roadCost)} de oro por tramo)` },
+    { id: 'fort', label: 'Fortificar', key: '4', icon: ICONS.fort, title: r => `Fortificar casillas (${r.fortCost} de oro cada una, ${r.fortTurns} turnos)` },
     { id: 'cities', label: 'Ciudades', key: '5', icon: ICONS.cities, title: 'Seleccionar varias ciudades para reclutar o fortificar en todas a la vez' }
 ];
 
@@ -2908,7 +3038,8 @@ class MapView {
             ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
             if (hexPx >= 5) {
                 ctx.font = font(11, 700); ctx.lineWidth = 3; ctx.strokeStyle = INK; ctx.fillStyle = '#ffb3a8';
-                ctx.strokeText(`${sg.held}/${CONFIG.SIEGE_TURNS}`, x, y - r - 7); ctx.fillText(`${sg.held}/${CONFIG.SIEGE_TURNS}`, x, y - r - 7);
+                const label = `${sg.held}/${g.rules(sg.by).siegeTurns}`;
+                ctx.strokeText(label, x, y - r - 7); ctx.fillText(label, x, y - r - 7);
             }
         }
 
@@ -3075,14 +3206,14 @@ class GameUI {
         else if (game.player === null && this.view.w > 900) this.view.fit(410);
         $('#legend').innerHTML = `<summary>Leyenda</summary><ul>
             <li>${unitIcon('infantry', '#9aa57a')} Infantería &nbsp;${unitIcon('tank', '#9aa57a')} Blindados &nbsp;${unitIcon('artillery', '#9aa57a')} Artillería</li>
-            <li><i class="line" style="border-top:3px solid ${SIGNAL}"></i>Autopista: ⅓ de punto por tramo</li>
-            <li><i class="line" style="border-top:2px solid #efe9d6"></i>Carretera: ½ punto por tramo</li>
+            <li><i class="line" style="border-top:3px solid ${SIGNAL}"></i>Autopista: <span data-legend="highway">⅓</span> de punto por tramo</li>
+            <li><i class="line" style="border-top:2px solid #efe9d6"></i>Carretera: <span data-legend="road">½</span> punto por tramo</li>
             <li><i class="line" style="border-top:3px solid #e3d9c0"></i>Fortificación</li>
             <li>★ capital &nbsp; ● ciudad &nbsp; A rayas: territorio en disputa (ocupado en guerra)</li>
-            <li>Terreno (coste de mover, defensa): ${Object.values(CONFIG.TERRAIN).map(t => `${t.name.toLowerCase()} ${t.cost}${t.def > 1 ? ` ×${String(t.def).replace('.', ',')}` : ''}`).join(', ')}</li>
-            <li><i class="line" style="border-top:3px solid #4a86a0"></i>Río: cruzarlo sin carretera cuesta ½ punto más; quien defiende tras él, ×${String(CONFIG.RIVER_DEFENSE).replace('.', ',')}</li>
+            <li>Terreno (coste de mover, defensa): <span data-legend="terrain"></span></li>
+            <li><i class="line" style="border-top:3px solid #4a86a0"></i>Río: <span data-legend="river"></span>; quien defiende tras él, ×${String(CONFIG.RIVER_DEFENSE).replace('.', ',')}</li>
             <li>Ficha con borde rojo: ejército rodeado por 3 o más lados (más débil y más lento)</li>
-            <li>Anillo rojo: ciudad asediada (hay que mantener tropas ${CONFIG.SIEGE_TURNS} turnos para tomarla)</li>
+            <li>Anillo rojo: ciudad asediada (hay que mantener tropas <span data-legend="siege">${CONFIG.SIEGE_TURNS}</span> turnos para tomarla)</li>
             <li>Con niebla de guerra, en sombra: lo que no ves. Ojo junto a una ciudad: tu espía</li>
             <li>${Object.entries(E.resourceTypes).map(([k, name]) => `${CONFIG.RESOURCE_ICON[k]} ${name}`).join(' &nbsp;')}</li>
             <li>Un yacimiento abastece a su provincia; si una carretera pasa por él, también a las ciudades que una (más renta y tropas más baratas). Más tenue: aún sin carretera</li></ul>`;
@@ -3174,9 +3305,10 @@ class GameUI {
 
     // «colinas, defensa ×1,3, cuesta 2 · río», para la ficha y la información bajo el puntero.
     terrainText(cell) {
-        const t = terrainOf(cell), num = x => String(x).replace('.', ',');
+        const t = terrainOf(cell), num = x => String(x).replace('.', ','), r = this.myRules();
         const river = [0, 1, 2, 3, 4, 5].some(d => RIVER[cell * 6 + d]);
-        return `${t.name.toLowerCase()}${t.def > 1 ? `, defensa ×${num(t.def)}` : ''}, mover cuesta ${num(t.cost)}${river ? ' · junto a un río (cruzarlo cuesta ½ más y defiende ×' + num(CONFIG.RIVER_DEFENSE) + ')' : ''}`;
+        const crossing = r.riverCrossing ? `cruzarlo cuesta ${moveFraction(r.riverCrossing)} más` : 'tus pontoneros lo cruzan sin coste';
+        return `${t.name.toLowerCase()}${t.def > 1 ? `, defensa ×${num(t.def)}` : ''}, mover cuesta ${num(r.terrainCost[CELL_TERRAIN[cell]])}${river ? ` · junto a un río (${crossing}; defiende ×${num(CONFIG.RIVER_DEFENSE)})` : ''}`;
     }
 
     cellFromEvent(e) {
@@ -3223,10 +3355,11 @@ class GameUI {
         }
         lines.push(`<span class="muted">${this.terrainText(cell)}</span>`);
         const supply = g.provinceSupply(G.prov[cell]);
-        if (supply.length) lines.push(`Abastecida por ${supply.map(r => CONFIG.RESOURCE_ICON[r.type]).join('')}: +${Math.round(100 * Math.min(CONFIG.RESOURCE_INDUSTRY_MAX, CONFIG.RESOURCE_INDUSTRY * supply.length))} % de renta`);
+        const ownerRules = g.owner[cell] >= 0 ? g.rules(g.owner[cell]) : BASE_RULES;
+        if (supply.length) lines.push(`Abastecida por ${supply.map(r => CONFIG.RESOURCE_ICON[r.type]).join('')}: +${Math.round(100 * Math.min(ownerRules.resIndustryMax, ownerRules.resIndustry * supply.length))} % de renta`);
         const sg = g.sieges.get(cell);
-        if (sg) lines.push(`<span class="warn-text">Asediada por ${g.nm(sg.by)}: ${sg.held} de ${CONFIG.SIEGE_TURNS} turnos</span>`);
-        if (g.fort[cell]) lines.push(`Fortificada: defensa ×${CONFIG.FORT_DEFENSE}`);
+        if (sg) lines.push(`<span class="warn-text">Asediada por ${g.nm(sg.by)}: ${sg.held} de ${g.rules(sg.by).siegeTurns} turnos</span>`);
+        if (g.fort[cell]) lines.push(`Fortificada: defensa ×${decimal(ownerRules.fortDefense)}`);
         else if (g.fortWork.has(cell)) lines.push(`Fortificando: ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}`);
         if (!g.sees(g.player, cell)) lines.push('<span class="muted">Niebla de guerra: no sabes qué tropas hay</span>');
         else if (a) {
@@ -3342,7 +3475,7 @@ class GameUI {
         const list = [...this.multi].map(pid => PROVINCES[pid]);
         const qty = this.recruitQty ?? 1, gold = g.nations[p0].gold;
         const forts = list.map(p => p.city).filter(c => !g.fort[c] && !g.fortWork.has(c));
-        const canFort = Math.min(forts.length, Math.floor(gold / CONFIG.FORT_COST));
+        const fortCost = g.rules(g.player).fortCost, canFort = Math.min(forts.length, Math.floor(gold / fortCost));
         el.hidden = false;
         el.style.setProperty('--owner', color);
         el.innerHTML = `
@@ -3364,8 +3497,8 @@ class GameUI {
                     ${unitIcon(k, color)}${CONFIG.TYPES[k].name}<b>${pl.units} uds</b><small>${pl.cost} oro</small></button>`; }).join('')}</div>
                 <p class="note">Se recluta ciudad por ciudad hasta agotar el oro o el cupo de cada una.</p></section>
             <section class="sec"><h3>Fortificar</h3>
-                <button class="btn" data-action="multi-fort" ${canFort ? '' : 'disabled'}>Fortificar ${plural(canFort, 'ciudad', 'ciudades')} (${canFort * CONFIG.FORT_COST} oro)</button>
-                <p class="note">Listas en ${CONFIG.FORT_TURNS} turnos. No cuentan las que ya están fortificadas o en obras${canFort < forts.length ? '; no te llega el oro para todas' : ''}.</p></section>` : ''}`;
+                <button class="btn" data-action="multi-fort" ${canFort ? '' : 'disabled'}>Fortificar ${plural(canFort, 'ciudad', 'ciudades')} (${canFort * fortCost} oro)</button>
+                <p class="note">Listas en ${g.rules(g.player).fortTurns} turnos. No cuentan las que ya están fortificadas o en obras${canFort < forts.length ? '; no te llega el oro para todas' : ''}.</p></section>` : ''}`;
     }
 
     flash(msg) { this.game.log(msg); this.hintOverride = msg; this.render(); }
@@ -3475,8 +3608,8 @@ class GameUI {
             case 'multi-recruit': g.playerRecruitMany([...this.multi], d.unit, this.recruitQty ?? 1); break;
             case 'multi-fort': {
                 const cells = [...this.multi].map(pid => PROVINCES[pid].city).filter(c => !g.fort[c] && !g.fortWork.has(c))
-                    .slice(0, Math.floor(g.nations[g.player].gold / CONFIG.FORT_COST));
-                if (cells.length) g.playerFortify({ cells, path: cells, cost: cells.length * CONFIG.FORT_COST, cls: 'fort' });
+                    .slice(0, Math.floor(g.nations[g.player].gold / g.rules(g.player).fortCost));
+                if (cells.length) g.playerFortify({ cells, path: cells, cost: cells.length * g.rules(g.player).fortCost, cls: 'fort' });
                 break;
             }
             case 'watch': this.prefs.watch = d.value; writePrefs(this.prefs); if ($('#game-dialog').open) this.renderGameDialog(); break;
@@ -3526,6 +3659,12 @@ class GameUI {
             case 'bloc-request': g.playerRequestJoin(+d.bloc); break;
             case 'bloc-leave': g.playerLeaveBloc(+d.bloc); break;
             case 'open-game': this.renderGameDialog(); $('#game-dialog').showModal(); return;
+            case 'open-research': this.openResearch(d.tech); return;
+            case 'close-research': $('#research-dialog').close(); return;
+            case 'rs-select': this.researchSel = d.tech; this.renderResearch(); return;
+            case 'rs-filter': this.researchFilter = d.area; this.renderResearch(); return;
+            case 'rs-start': g.startResearch(g.player, d.tech); this.renderResearch(); break;
+            case 'rs-pause': g.pauseResearch(g.player, d.tech); this.renderResearch(); break;
             case 'close-game': $('#game-dialog').close(); return;
             case 'save': {
                 const ok = writeSave(d.slot, g);
@@ -3563,6 +3702,7 @@ class GameUI {
     async endTurnFlow() {
         const g = this.game;
         if (this.replaying || g.player === null || g.over || !g.beginAiPhase()) return;
+        const knew = new Set(g.nations[g.player].tech.done);
         this.setTool('command');
         const order = g.aiOrder();
         if (this.prefs.watch !== 'ver') {
@@ -3595,6 +3735,7 @@ class GameUI {
             $('#replay').hidden = true;
         }
         g.finishAiPhase();
+        for (const t of g.nations[g.player].tech.done) if (!knew.has(t)) this.flash(`${uiIcon('check')} Investigación terminada: <b>${TECH_BY_ID.get(t).name}</b>.`, 'open-research', 'Ver investigación');
         writeSave('auto', g);
         this.select(this.selected);
         if (g.alerts.length || g.proposals.some(p => p.kind === 'llamada')) this.openAlerts();
@@ -3655,6 +3796,7 @@ class GameUI {
 
     onKey(e) {
         if (this.replaying) { if (e.key === 'Escape') this.skipReplay(); return; }
+        if ($('#research-dialog').open) { this.onResearchKey(e); return; }
         if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || $('#game-dialog').open || $('#peace-dialog').open || $('#alerts-dialog').open) return;
         const g = this.game;
         if (e.key === 'Escape') { this.cancel(); return; }
@@ -3662,6 +3804,7 @@ class GameUI {
         if (g.player === null || g.over) return;
         const tool = TOOLS.find(t => t.key === e.key);
         if (tool) { this.setTool(tool.id); return; }
+        if (e.key === 'i' || e.key === 'I') { this.openResearch(); return; }
         if (e.key === 'l' || e.key === 'L') { this.view.showSupply = !this.view.showSupply; this.render(); }
         else if (e.key === 'n' || e.key === 'N') this.nextArmy();
         else if (e.key === 'Enter') { e.preventDefault(); $('#end-turn').click(); }
@@ -3707,6 +3850,8 @@ class GameUI {
         $('#end-turn').disabled = p0 === null || g.over;
         $('#btn-next').hidden = p0 === null;
         $('#btn-install').hidden = !this.installPrompt;
+        this.renderResearchFigure();
+        this.renderLegend();
         if (p0 === null) {
             $('#nation-name').textContent = 'NanWar';
             $('#flag').style.background = SIGNAL;
@@ -3722,7 +3867,7 @@ class GameUI {
     renderTools() {
         const playing = this.game.player !== null && !this.game.over;
         $('#tools').innerHTML = TOOLS.map(t => `
-            <button class="tool ${this.tool === t.id ? 'on' : ''}" data-action="tool" data-tool="${t.id}" title="${t.title}" ${playing ? '' : 'disabled'}>
+            <button class="tool ${this.tool === t.id ? 'on' : ''}" data-action="tool" data-tool="${t.id}" title="${typeof t.title === 'function' ? t.title(this.myRules()) : t.title}" ${playing ? '' : 'disabled'}>
                 ${t.icon}${t.label}<kbd>${t.key}</kbd></button>`).join('') + `<hr>
             <button class="tool ${this.view.showSupply ? 'on' : ''}" data-action="supply" title="Mostrar en naranja tu territorio sin suministro" ${playing ? '' : 'disabled'}>
                 ${ICONS.supply}Logística<kbd>L</kbd></button>
@@ -3791,7 +3936,7 @@ class GameUI {
             const supplied = g.inSupply(p0, a.cell);
             const rows = UNIT_KEYS.filter(k => a.units[k] > 0).map(k => `
                 <div class="unit-row">${unitIcon(k, g.nations[o].color)}
-                    <div>${CONFIG.TYPES[k].name}<div class="small muted">ataque ${CONFIG.TYPES[k].atk}, defensa ${CONFIG.TYPES[k].def}, velocidad ${CONFIG.TYPES[k].speed}</div></div>
+                    <div>${CONFIG.TYPES[k].name}<div class="small muted">ataque ${g.rules(p0).types[k].atk}, defensa ${g.rules(p0).types[k].def}, velocidad ${g.rules(p0).types[k].speed}</div></div>
                     <div class="stepper"><button data-action="step" data-unit="${k}" data-delta="-1" ${this.send[k] ? '' : 'disabled'} aria-label="Una menos">−</button>
                     <output>${this.send[k]} de ${a.units[k]}</output>
                     <button data-action="step" data-unit="${k}" data-delta="1" ${this.send[k] < a.units[k] ? '' : 'disabled'} aria-label="Una más">+</button></div>
@@ -3808,7 +3953,7 @@ class GameUI {
                 ${(() => { const sides = g.hostileSides(p0, a.cell); if (sides < CONFIG.FLANKED_SIDES) return '';
                     const cercado = sides >= CONFIG.SURROUNDED_SIDES;
                     return `<p class="note warn">${cercado ? 'Cercado' : 'Rodeado'} por ${sides} lados: ataque y defensa ×${g.flankFactor(p0, a.cell)} y ${cercado ? 'solo puede avanzar una casilla' : 'mueve la mitad'}. Mejor retirarse o romper el cerco.</p>`; })()}
-                ${supplied ? '' : `<p class="note warn">Sin suministro: lejos de tus ciudades y de tu red de carreteras solo avanza una casilla por turno. Construye carreteras hasta el frente para abastecerlo (llegan a ${CONFIG.SUPPLY_ROAD_RANGE} casillas de la red).</p>`}
+                ${supplied ? '' : `<p class="note warn">Sin suministro: lejos de tus ciudades y de tu red de carreteras solo avanza una casilla por turno. Construye carreteras hasta el frente para abastecerlo (llegan a ${g.rules(p0).supplyRoad} casillas de la red).</p>`}
                 ${left > 0 ? `<p class="note">Haz clic en una casilla ${this.view.isRealistic() ? 'de la zona clara' : 'verde'} para mover o en una roja para atacar. Por carretera llegas más lejos; si no se ha movido este turno, siempre puede avanzar al menos una casilla.</p>` : ''}
             </section>`);
         } else if (a && g.sees(p0, cell)) {
@@ -3875,10 +4020,10 @@ class GameUI {
                 <dt>Renta</dt><dd>${Math.round(p.value * (1 + g.dev[p.id] / 1000))} de oro${connected ? ` (+${CONFIG.ROAD_BONUS * 100} % por carretera)` : ', sin carretera a la capital'}</dd>
                 <dt>Desarrollo</dt><dd>+${Math.round(g.dev[p.id] / 10)} % de renta${g.dev[p.id] < (connected ? CONFIG.DEV_MAX_CONNECTED : CONFIG.DEV_MAX) && g.legal[p.city] === cityOwner ? `, crece un ${(connected ? CONFIG.DEV_GROWTH_CONNECTED : CONFIG.DEV_GROWTH) / 10} % por turno${connected ? '' : ' (con carretera a la capital crecería más)'}` : ''}</dd>
                 <dt>Terreno</dt><dd>${this.terrainText(cell)}</dd>
-                ${g.sieges.has(p.city) ? `<dt>Asedio</dt><dd class="warn-text">${g.nm(g.sieges.get(p.city).by)} tiene tropas en ${esc(p.cityName)}: lleva ${g.sieges.get(p.city).held} de ${CONFIG.SIEGE_TURNS} turnos. Si las mantiene, toma la provincia.</dd>` : ''}
+                ${g.sieges.has(p.city) ? `<dt>Asedio</dt><dd class="warn-text">${g.nm(g.sieges.get(p.city).by)} tiene tropas en ${esc(p.cityName)}: lleva ${g.sieges.get(p.city).held} de ${g.rules(g.sieges.get(p.city).by).siegeTurns} turnos. Si las mantiene, toma la provincia.</dd>` : ''}
                 ${g.isDisputed(cell) ? `<dt>Estado</dt><dd class="warn-text">en disputa: la ocupa ${g.nm(o)} pero es de ${g.nm(g.legal[cell])}. Rinde la mitad y se anexiona al firmar la paz.</dd>` : ''}
                 ${res.map(r => { const reach = g.resourceReach(r); return `<dt>${r.typeName}</dt><dd>${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}, +${r.value} de oro. ${reach.length ? `Abastece también a ${reach.map(x => esc(PROVINCES[x].name)).join(', ')}.` : 'Solo abastece a esta provincia: pasa una carretera por su casilla y llévala hasta otras ciudades.'}</dd>`; }).join('')}
-                ${(() => { const s = g.provinceSupply(p.id); return s.length ? `<dt>Industria</dt><dd>+${Math.round(100 * Math.min(CONFIG.RESOURCE_INDUSTRY_MAX, CONFIG.RESOURCE_INDUSTRY * s.length))} % de renta y tropas más baratas: la abastecen ${s.map(r => `${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}`).join(', ')}</dd>` : ''; })()}
+                ${(() => { const s = g.provinceSupply(p.id), r = g.rules(g.owner[p.city]); return s.length ? `<dt>Industria</dt><dd>+${Math.round(100 * Math.min(r.resIndustryMax, r.resIndustry * s.length))} % de renta y tropas más baratas: la abastecen ${s.map(r => `${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}`).join(', ')}</dd>` : ''; })()}
                 ${g.fort[cell] ? `<dt>Casilla</dt><dd>fortificada</dd>` : g.fortWork.has(cell) ? `<dt>Casilla</dt><dd>fortificando, ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}</dd>` : ''}
             </dl></section>`);
 
@@ -3936,9 +4081,143 @@ class GameUI {
         return html;
     }
 
+    // Aviso pasajero (unos segundos) con un botón opcional.
+    flash(html, action, label) {
+        const note = { html, action, label, id: (this.flashId = (this.flashId ?? 0) + 1) };
+        (this.flashes ??= []).push(note);
+        setTimeout(() => { this.flashes = this.flashes.filter(x => x !== note); this.renderToasts(); }, 6000);
+        this.renderToasts();
+    }
+    // Lo que en la leyenda depende de tus investigaciones: costes de terreno, carreteras, ríos y asedios.
+    renderLegend() {
+        const key = `${this.game.player}:${this.game.techVersion}`;
+        if (this.legendKey === key) return;
+        this.legendKey = key;
+        const r = this.myRules(), set = (k, html) => { const el = $(`#legend [data-legend="${k}"]`); if (el) el.innerHTML = html; };
+        set('terrain', Object.entries(CONFIG.TERRAIN).map(([k, t]) => `${t.name.toLowerCase()} ${decimal(r.terrainCost[k])}${t.def > 1 ? ` ×${decimal(t.def)}` : ''}`).join(', '));
+        set('road', moveFraction(r.roadMove[1]));
+        set('highway', moveFraction(r.roadMove[2]));
+        set('river', r.riverCrossing ? `cruzarlo sin carretera cuesta ${moveFraction(r.riverCrossing)} punto más` : 'tus pontoneros lo cruzan sin coste extra');
+        set('siege', r.siegeTurns);
+    }
+    myRules() { return this.game.player !== null ? this.game.rules(this.game.player) : BASE_RULES; }
+
+    // --- Investigación ---
+    renderResearchFigure() {
+        const g = this.game, p0 = g.player, fig = $('#fig-research');
+        fig.hidden = p0 === null || g.over;
+        $('#end-turn').classList.toggle('nudge', p0 !== null && !g.over && g.nations[p0].tech.current.length < g.rules(p0).labs);
+        if (fig.hidden) return;
+        const cur = g.nations[p0].tech.current;
+        if (!cur.length) {
+            fig.className = 'figure research idle';
+            fig.innerHTML = '<span>Investigación</span><b>Laboratorio libre</b>';
+            return;
+        }
+        const t = TECH_BY_ID.get(cur[0]), p = g.techProgress(p0, t.id), turns = g.techTurns(p0, t.id);
+        fig.className = 'figure research';
+        fig.innerHTML = `<span>Investigando${cur.length > 1 ? ' (2)' : ''}</span><b>${t.name} · ${turns - p} t</b><div class="mini"><i style="width:${Math.round(100 * p / turns)}%"></i></div>`;
+    }
+    openResearch(techId) {
+        if (this.game.player === null || this.game.over) return;
+        if (techId) this.researchSel = techId;
+        this.renderResearch();
+        if (!$('#research-dialog').open) $('#research-dialog').showModal();
+        $('#research-dialog .rs-node.sel')?.focus();
+    }
+    // Casillas visibles con el filtro actual, por filas (ramas) y columnas (niveles), para moverse con las flechas.
+    researchGrid() {
+        const area = this.researchFilter ?? 'Todas';
+        return RESEARCH_BRANCHES.filter(b => area === 'Todas' || b.area === area).map(b => [1, 2, 3].map(i => `${b.id}${i}`));
+    }
+    onResearchKey(e) {
+        if (e.key === 'i' || e.key === 'I') { $('#research-dialog').close(); return; }
+        const grid = this.researchGrid(), sel = this.researchSel;
+        const r = grid.findIndex(row => row.includes(sel)), c = r >= 0 ? grid[r].indexOf(sel) : 0;
+        const move = { ArrowLeft: [0, -1], ArrowRight: [0, 1], ArrowUp: [-1, 0], ArrowDown: [1, 0] }[e.key];
+        if (move) {
+            e.preventDefault();
+            const nr = Math.max(0, Math.min(grid.length - 1, (r < 0 ? 0 : r) + move[0])), nc = Math.max(0, Math.min(2, c + move[1]));
+            this.researchSel = grid[nr][nc];
+            this.renderResearch();
+            $('#research-dialog .rs-node.sel')?.focus();
+        } else if (e.key === 'Enter' && e.target.closest?.('.rs-node')) {
+            e.preventDefault();
+            $('#research-dialog .rs-card [data-action="rs-start"], #research-dialog .rs-card [data-action="rs-pause"]')?.click();
+        }
+    }
+    renderResearch() {
+        const g = this.game, p0 = g.player;
+        if (p0 === null) return;
+        const s = g.nations[p0].tech, rules = g.rules(p0), gold = g.nations[p0].gold;
+        if (!TECH_BY_ID.has(this.researchSel)) this.researchSel = s.current[0] ?? TECHS.find(t => g.techState(p0, t.id) === 'open')?.id ?? TECHS[0].id;
+        const area = this.researchFilter ?? 'Todas';
+        if (area !== 'Todas' && TECH_BY_ID.get(this.researchSel) && BRANCH_BY_ID.get(TECH_BY_ID.get(this.researchSel).branch).area !== area)
+            this.researchSel = `${RESEARCH_BRANCHES.find(b => b.area === area).id}1`;
+        const ring = (p, t) => {
+            const c = 2 * Math.PI * 18;
+            return `<svg class="rs-ring" width="44" height="44" viewBox="0 0 44 44" aria-hidden="true"><circle class="bg" cx="22" cy="22" r="18"/>
+                <circle class="fg" cx="22" cy="22" r="18" stroke-dasharray="${(c * p / t).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 22 22)"/>
+                <text x="22" y="26.5" text-anchor="middle">${t - p}</text></svg>`;
+        };
+        const bar = (p, t) => `<div class="rs-bar"><i style="width:${Math.round(100 * p / t)}%"></i></div>`;
+        let labs = '';
+        for (let k = 0; k < rules.labs; k++) {
+            const id = s.current[k];
+            if (id) {
+                const t = TECH_BY_ID.get(id), p = g.techProgress(p0, id), turns = g.techTurns(p0, id);
+                labs += `<button class="rs-lab" type="button" data-action="rs-select" data-tech="${id}">${ring(p, turns)}<span><small>Laboratorio ${k + 1}</small><b>${t.name}</b><small>Termina en el turno ${g.turn + turns - p}</small></span></button>`;
+            } else labs += `<div class="rs-lab free"><span class="rs-slot">${uiIcon('flask', 20)}</span><span><small>Laboratorio ${k + 1}</small><b>Libre</b><small>Elige una investigación</small></span></div>`;
+        }
+        if (rules.labs === 1) labs += `<div class="rs-lab locked"><span class="rs-slot">${uiIcon('lock', 18)}</span><span><small>Laboratorio 2</small><b>Cerrado</b><small>Se abre con ${TECH_BY_ID.get('ciencia3').name}</small></span></div>`;
+
+        const rows = RESEARCH_BRANCHES.filter(b => area === 'Todas' || b.area === area).map(b => `<div class="rs-row">
+            <div class="rs-name"><span class="rs-patch">${rsIcon(b.icon)}</span><span><b>${b.name}</b><small>${b.sub}</small></span></div>
+            ${[1, 2, 3].map(i => {
+                const id = `${b.id}${i}`, t = TECH_BY_ID.get(id), st = g.techState(p0, id), p = g.techProgress(p0, id), turns = g.techTurns(p0, id);
+                let line;
+                if (st === 'done') line = `${uiIcon('check', 14)} Hecha`;
+                else if (st === 'current') line = `En curso · faltan ${turns - p}`;
+                else if (st === 'paused') line = `${uiIcon('pause', 13)} En pausa · ${p}/${turns}`;
+                else if (st === 'locked') line = `${uiIcon('lock', 13)} Tras el nivel ${i - 1}`;
+                else { const c = g.researchCost(p0, id); line = `${turns} turnos · <span class="${c > gold ? 'short' : ''}">${c} oro</span>`; }
+                const after = i > 1 && s.done.has(`${b.id}${i - 1}`) ? ' after-done' : '';
+                return `<button class="rs-node ${st}${after}${this.researchSel === id ? ' sel' : ''}" type="button" data-action="rs-select" data-tech="${id}" aria-pressed="${this.researchSel === id}">
+                    ${galones(i)}<span class="n">${t.name}</span><span class="st">${line}</span>${st === 'current' || st === 'paused' ? bar(p, turns) : ''}</button>`;
+            }).join('')}</div>`).join('');
+
+        const t = TECH_BY_ID.get(this.researchSel), br = BRANCH_BY_ID.get(t.branch), st = g.techState(p0, t.id);
+        const p = g.techProgress(p0, t.id), turns = g.techTurns(p0, t.id);
+        const swap = s.current.length >= rules.labs ? s.current[0] : null;
+        const swapNote = swap && (st === 'open' || st === 'paused')
+            ? `<p class="swap">${TECH_BY_ID.get(swap).name} quedará en pausa con sus ${g.techProgress(p0, swap)} de ${g.techTurns(p0, swap)} turnos; no se vuelve a pagar.</p>` : '';
+        let action;
+        if (st === 'done') action = `<p class="status" style="color:var(--go)">${uiIcon('check')} Investigada. El efecto ya se aplica.</p>`;
+        else if (st === 'current') action = `<p class="status">En curso: ${p} de ${turns} turnos. Termina en el turno ${g.turn + turns - p}.</p><button class="btn" data-action="rs-pause" data-tech="${t.id}">${uiIcon('pause')} Pausar</button>`;
+        else if (st === 'paused') action = `<p class="status">En pausa: ${p} de ${turns} turnos, ya pagada.</p><button class="btn primary" data-action="rs-start" data-tech="${t.id}">Reanudar · ${plural(turns - p, 'turno', 'turnos')}</button>${swapNote}`;
+        else if (st === 'locked') action = `<p class="status muted">${uiIcon('lock')} Antes, ${TECH_BY_ID.get(`${t.branch}${t.tier - 1}`).name} (nivel ${t.tier - 1}).</p>`;
+        else {
+            const c = g.researchCost(p0, t.id);
+            action = c > gold ? `<button class="btn" disabled>Te faltan ${c - gold} de oro</button>`
+                : `<button class="btn primary" data-action="rs-start" data-tech="${t.id}">Investigar · ${c} oro · ${plural(turns, 'turno', 'turnos')}</button>${swapNote}`;
+        }
+        const card = `<div class="rs-card"><div class="rs-who"><span class="rs-patch lg">${rsIcon(br.icon)}</span><div><div class="rs-crumb">${br.name} · ${galones(t.tier)} nivel ${t.tier}</div><h3>${t.name}</h3></div></div>
+            <div class="rs-deltas">${t.changes.map(([k, a, b]) => `<div><span>${k}</span><b><s>${a}</s>${uiIcon('arrow', 14)}<em>${b}</em></b></div>`).join('')}</div>
+            ${action}<p class="tip">${t.note}</p></div>`;
+
+        const growth = Math.round(CONFIG.RESEARCH.COST_GROWTH * 100 * s.done.size);
+        $('#research-body').innerHTML = `<div class="rs-head"><h2>Investigación</h2>
+            <span class="muted">${plural(s.done.size, 'terminada', 'terminadas')}${growth ? ` · cada nueva cuesta un ${growth} % más` : ''}</span>
+            <button class="btn ghost" data-action="close-research" aria-label="Cerrar">Cerrar <kbd>Esc</kbd></button></div>
+            <div class="rs-labs">${labs}</div>
+            <div class="rs-filter" role="group" aria-label="Filtrar por área">${['Todas', ...RESEARCH_AREAS].map(a => `<button data-action="rs-filter" data-area="${a}" class="${area === a ? 'on' : ''}" aria-pressed="${area === a}">${a}</button>`).join('')}</div>
+            <div class="rs-body"><div class="rs-rows">${rows}</div>${card}</div>`;
+    }
+
     renderToasts() {
         const g = this.game;
-        $('#toasts').innerHTML = g.proposals.map((pr, i) => {
+        $('#toasts').innerHTML = (this.flashes ?? []).map(f => `<div class="toast float done"><p>${f.html}</p>
+            ${f.action ? `<div class="row"><button class="btn" data-action="${f.action}">${f.label}</button></div>` : ''}</div>`).join('') + g.proposals.map((pr, i) => {
             const who = `<b>${g.nm(pr.from)}</b>`;
             let text, yes = 'Aceptar', no = 'Rechazar';
             if (pr.kind === 'paz') text = `${who} te propone la paz.`;

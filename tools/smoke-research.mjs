@@ -47,6 +47,14 @@ const setup = () => {
             return c;
         },
         // Primer paso u → dirección d entre casillas de tierra que cumple la condición.
+        // Empieza una partida en la interfaz con el país dado y devuelve su motor.
+        uiStart(key) {
+            for (const d of document.querySelectorAll('dialog[open]')) d.close();
+            ui.setGame(T.game(7));
+            ui.choice = T.nation(key); ui.render();
+            document.querySelector('[data-action="start"]').click();
+            return ui.game;
+        },
         edge(g, pred) {
             for (const u of G.land) for (let d = 0; d < 6; d++) { const v = G.nb[u * 6 + d]; if (v >= 0 && isLand(v) && pred(u, v, d)) return [u, d]; }
             throw new Error('no hay tramo así');
@@ -347,6 +355,50 @@ const CHECKS = [
         const total = alive.reduce((s, n) => s + n.tech.done.size, 0);
         T.eq(JSON.stringify(run().serialize()), JSON.stringify(g.serialize()), 'misma semilla, misma partida');
         return total > 0 || 'nadie terminó nada';
+    }],
+
+    ['F4 · la tecla I abre el diálogo con las 36 investigaciones y sus filtros', () => {
+        T.uiStart('es');
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'i', bubbles: true }));
+        T.ok($('#research-dialog').open, 'diálogo abierto');
+        T.eq(document.querySelectorAll('#research-dialog .rs-node').length, 36, 'casillas');
+        document.querySelector('#research-dialog [data-action="rs-filter"][data-area="Militar"]').click();
+        T.eq(document.querySelectorAll('#research-dialog .rs-node').length, 12, 'filtro Militar');
+        document.querySelector('#research-dialog [data-action="rs-filter"][data-area="Todas"]').click();
+        T.eq(document.querySelectorAll('#research-dialog .rs-node.locked').length, 24, 'niveles 2 y 3 cerrados');
+        $('#research-dialog').close();
+        return true;
+    }],
+    ['F4 · investigar desde el diálogo, la cabecera y el aviso de laboratorio libre', () => {
+        const g = T.uiStart('es'), p = g.player;
+        g.nations[p].gold = 100000; ui.render();
+        T.ok($('#end-turn').classList.contains('nudge'), 'aviso con el laboratorio libre');
+        T.ok(/Laboratorio libre/.test($('#fig-research').textContent), 'cabecera libre');
+        ui.openResearch();
+        document.querySelector('#research-dialog .rs-node[data-tech="blindados1"]').click();
+        T.ok(/Blindaje compuesto/.test($('#research-dialog .rs-card').textContent), 'ficha de la seleccionada');
+        document.querySelector('#research-dialog [data-action="rs-start"]').click();
+        T.eq(g.nations[p].tech.current, ['blindados1'], 'en curso');
+        T.ok(/Blindaje compuesto/.test($('#fig-research').textContent), 'cabecera: en curso');
+        T.ok(!$('#end-turn').classList.contains('nudge'), 'sin aviso');
+        T.ok(document.querySelector('#research-dialog .rs-node[data-tech="blindados1"]').classList.contains('current'), 'casilla en curso');
+        document.querySelector('#research-dialog [data-action="rs-pause"]').click();
+        T.eq(g.nations[p].tech.current, [], 'pausada');
+        T.ok(document.querySelector('#research-dialog .rs-node[data-tech="blindados1"]').classList.contains('paused'), 'casilla en pausa');
+        $('#research-dialog').close();
+        return true;
+    }],
+    ['F4 · al terminar una investigación sale un aviso', async () => {
+        const g = T.uiStart('es'), p = g.player;
+        g.nations[p].gold = 100000;
+        g.startResearch(p, 'infanteria1');
+        g.nations[p].tech.progress.set('infanteria1', g.techTurns(p, 'infanteria1') - 1);
+        ui.prefs.watch = 'directo';
+        await ui.endTurnFlow();
+        T.ok(g.nations[p].tech.done.has('infanteria1'), 'terminada');
+        T.ok(/Investigación terminada/.test($('#toasts').textContent), 'aviso en pantalla');
+        T.ok($('#end-turn').classList.contains('nudge'), 'laboratorio libre otra vez');
+        return true;
     }]
 ];
 
@@ -363,7 +415,7 @@ try {
     for (const [name, fn] of CHECKS) {
         if (filter && !name.includes(filter)) continue;
         ran++;
-        const result = await page.evaluate(`(() => { try { return (${fn.toString()})(); } catch (e) { return String(e && e.stack || e); } })()`);
+        const result = await page.evaluate(`Promise.resolve().then(${fn.toString()}).catch(e => String(e && e.stack || e))`);
         if (result === true) console.log(`ok    ${name}`);
         else { failed++; console.log(`FALLA ${name}\n      ${String(result).split('\n').slice(0, 3).join('\n      ')}`); }
     }
