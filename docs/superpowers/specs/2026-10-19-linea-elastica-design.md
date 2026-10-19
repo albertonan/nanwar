@@ -139,6 +139,44 @@ En las partidas antiguas, al cargar: `drawn = cells`, `state = 'aguanta'` y `fro
 
 Cada línea decide sola con su propia franja y sus propias brechas. Si una se repliega y el enemigo entra en la franja de la de al lado, esa también se replegará por su cuenta. Si no entra, se queda. No se coordinan entre ellas en esta versión.
 
+## Segunda parte: reparto de esfuerzos entre operaciones
+
+### Por qué
+
+El jugador tenía una línea de defensa formándose y creó una ofensiva. Durante varios turnos la ofensiva no tuvo nada con qué atacar, por dos motivos:
+
+- los ejércitos son de una sola operación, y la ofensiva solo recoge los que no tienen ninguna (`offensiveFree`); la línea ya tenía todos los cercanos y nada se los cedía;
+- el reclutamiento va operación por operación en orden de creación (`stepReinforcements` → `reinforce`): la primera gasta el oro y ocupa el cupo de las ciudades, y la siguiente espera a que la primera acabe.
+
+Lo que pide el jugador: «si se genera otra orden, en el mismo sitio o en otro, hay que dividir esfuerzos, no completar una y luego la otra».
+
+### Reclutamiento repartido
+
+- Cada turno las operaciones con refuerzos reclutan **por rondas**: una unidad para cada operación por turno, con las más prioritarias primero en cada ronda (prioridad del frente × lo que piden, como `directive`), hasta que no quede oro, cupo o fondo en ninguna. Ninguna completa su formación antes de que las demás reciban su parte.
+- El fondo de cada operación (`op.pool`) sigue siendo suyo. Lo que se reparte por rondas es el oro de la nación y el cupo de las ciudades.
+- Si dos operaciones quieren la misma ciudad, cada ronda toma la ciudad con cupo más cercana a su zona de reunión. Así se reparten las ciudades de forma natural.
+
+### Ejércitos repartidos
+
+- **Mínimo de una línea de defensa:** los ejércitos que necesita para cubrir todas sus casillas y mantener una relación de al menos 1 frente al enemigo de su franja. Ese mínimo **no se cede nunca** a otra operación (decisión mía, porque el jugador no eligió: así una ofensiva nueva no vacía la línea ni la hace replegarse).
+- **Sobrante:** lo que una operación tiene por encima de su mínimo. Las ofensivas en marcha no tienen sobrante salvo que estén en pausa. La reserva lo tiene todo como sobrante.
+- **Una operación que pide ayuda** (`opNeed` > 0, o una ofensiva sin ejércitos) recibe, al crearse y al empezar cada turno, ejércitos de este orden: libres (como ahora), reserva, sobrante de las líneas de defensa y sobrante de ofensivas en pausa. Solo cuentan los que lleguen en 3 turnos de marcha (`OP_GATHER_TURNS`). Primero el más cercano.
+- **Reparto justo:** si varias operaciones piden a la vez, se reparten los ejércitos disponibles por rondas según prioridad × necesidad, igual que el reclutamiento. Ninguna se lo lleva todo.
+- **Sin nada que ceder:** si no hay sobrante, la ofensiva espera a los reclutas nuevos, que ya le llegan por rondas, y su ficha lo dice: «la línea de Erzurum necesita todas sus tropas; esperando reclutas (2 en camino)».
+- Un ejército cedido cambia de operación (`a.op`) y el parte lo dice una vez por turno y operación: «Línea de Erzurum cede 2 ejércitos a Ofensiva sobre Tiflis».
+- Las órdenes propias del jugador y los ejércitos movidos a mano ese turno no se tocan, como ahora.
+
+### IA
+
+La IA usa el mismo reparto: deja de asignar solo ejércitos libres en `aiCommand` y pasa por la misma función de ceder sobrante.
+
+### Pruebas (además de las de la primera parte)
+
+11. Con una línea formándose y una ofensiva creada después, las dos reciben reclutas el mismo turno.
+12. Una ofensiva creada junto a una línea con sobrante recibe ejércitos de ella ese mismo turno. La línea no baja de su mínimo.
+13. Si la línea no tiene sobrante, la ofensiva no le quita nada y su ficha dice que espera reclutas.
+14. Dos ofensivas que piden a la vez reciben ejércitos las dos.
+
 ## Rendimiento
 
 La búsqueda de línea solo se ejecuta cuando hace falta: al crear una propuesta, al pasar a «Se repliega» o al evaluar si se puede volver. No se ejecuta todos los turnos en las líneas que aguantan sin brecha. El resultado se guarda en caché por turno. Objetivo: en el mundo «Caos total», el turno de la IA no sube más de un 10 % sobre lo que tarda hoy. `tools/perf-mapa.mjs` solo mide el dibujo del mapa, así que hay que añadir una medición del turno de la IA antes del cambio, para tener la referencia, y repetirla después.
