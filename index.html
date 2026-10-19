@@ -234,6 +234,9 @@
         .bloc.mine { box-shadow: inset 4px 0 0 var(--ally); }
         .members { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
         .check { display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: start; }
+        .orders { display: flex; flex-wrap: wrap; gap: 6px; }
+        .orders .btn.on { border-color: var(--signal); box-shadow: inset 0 0 0 1px var(--signal); }
+        #btn-orders .count { background: var(--signal); color: var(--ink); border-radius: 99px; padding: 0 6px; font-size: 12px; }
         .check input { margin: 2px 0 0; }
         .log-turn { color: var(--signal); font-weight: 700; margin: 12px 0 4px; font-size: 13px; }
         .log-turn:first-child { margin-top: 0; }
@@ -396,6 +399,7 @@
         <button class="figure research" id="fig-research" data-action="open-research" title="Investigación (I)" hidden></button>
         <div class="spacer"></div>
         <button class="btn ghost" data-action="next-army" id="btn-next" title="Seleccionar el siguiente ejército que aún puede moverse">Siguiente ejército <kbd>N</kbd></button>
+        <button class="btn" data-action="run-orders" id="btn-orders" hidden title="Cumplir ya las órdenes de varios turnos de tus ejércitos (O). Al terminar el turno se cumplen solas.">Ejecutar órdenes</button>
         <button class="btn" id="btn-install" data-action="install" hidden title="Instalar NanWar como aplicación">Instalar</button>
         <button class="btn" data-action="open-game">Partida</button>
         <button class="btn primary" id="end-turn" data-action="end-turn" disabled>Terminar turno <kbd>Intro</kbd></button>
@@ -832,6 +836,9 @@ class GameEngine {
         this.spies = new Map();     // provincia → { since, revealedTurn }: espías del jugador
         this.spyVersion = 0;
         this.armyVersion = 0;       // cambia cada vez que un ejército se mueve, aparece o desaparece
+        this.orderVersion = 0;      // cambia al dar, cumplir o cancelar órdenes
+        this.fields = new Map();    // caminos hacia los destinos de las órdenes (se rehacen si cambia el mapa)
+        this.fieldStamp = '';
         this.visCache = null;
 
         // Carreteras: clase por arista dirigida (0 nada, 1 carretera, 2 autopista). Se empieza sin ninguna: las construyen los jugadores.
@@ -916,6 +923,7 @@ class GameEngine {
             relations,
             armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used]),
             nextArmyId: this.nextArmyId,
+            orders: [...this.armies.values()].filter(a => a.order).map(a => [a.id, a.order.kind, a.order.dest, a.order.target, a.order.ratio, a.order.flee ? 1 : 0, a.order.since, a.order.stuck]),
             blocs: this.blocs.map(b => ({ id: b.id, name: b.name, founder: b.founder, secret: b.secret, since: b.since, members: [...b.members] })),
             nextBlocId: this.nextBlocId
         };
@@ -1021,11 +1029,19 @@ class GameEngine {
             g.armyAt[cell] = id;
         }
         g.nextArmyId = Math.max(int(data.nextArmyId, 1, 1e9, 1), ...[...g.armies.keys()].map(x => x + 1), 1);
+        const kinds = ['march', 'attack', 'hold', 'fortify', 'follow'];
         g.blocs = list(data.blocs).map(b => ({ id: int(b?.id, 1, 1e6, 1), name: str(b?.name, 40), founder: nat(b?.founder), secret: !!b?.secret,
             since: int(b?.since, 0, 1e6, 0), members: new Set(list(b?.members).map(nat)) }));
         g.nextBlocId = Math.max(int(data.nextBlocId, 1, 1e6, 1), ...g.blocs.map(b => b.id + 1), 1);
         g.blocsChanged();
         g.version++; g.roadVersion++; g.fortVersion++;
+        // Órdenes: solo de ejércitos que existen y con destinos que se pueden cumplir (si no, se descartan).
+        for (const x of list(data.orders)) {
+            const a = g.armies.get(int(x?.[0], 1, 1e9, 0)), kind = kinds.find(k => k === x?.[1]);
+            if (!a || a.order || !kind) continue;
+            if (g.setOrder(a, { kind, dest: int(x?.[2], -1, G.N - 1, -1), target: int(x?.[3], 0, 1e9, 0), ratio: [0, 1, 1.3, 1.8].includes(Number(x?.[4])) ? Number(x[4]) : 1.3, flee: !!x?.[5] }))
+                Object.assign(a.order, { since: int(x?.[6], 0, 1e6, g.turn), stuck: int(x?.[7], 0, 3, 0) });
+        }
         return g;
     }
 
@@ -1433,6 +1449,217 @@ class GameEngine {
         if (sameUnits(a.units, send)) return a;
         for (const k of UNIT_KEYS) a.units[k] -= send[k];
         return this.newArmy(a.owner, a.cell, send, a.used);
+    }
+
+    // --- Órdenes de ejército: duran varios turnos y se cumplen solas al terminar el turno (o con «Ejecutar órdenes») ---
+    // army.order = { kind, dest, target, ratio, flee, since, stuck, path, eta }
+    //   march: ir a `dest`; attack: ir a `dest` y atacar lo que haya si la relación de fuerzas llega a `ratio`;
+    //   hold: quedarse; fortify: fortificar su casilla y quedarse; follow: ir detrás del ejército `target`.
+    //   flee: si queda rodeado, se aparta antes de seguir. stuck: turnos seguidos sin poder avanzar.
+    // army.direct = turno en que el jugador lo movió a mano: ese turno no cumple su orden.
+
+    // Coste en subpuntos de ir de cada casilla hasta `dest` para un ejército de `owner`: Dijkstra hacia atrás desde el
+    // destino que solo avanza lo que se le pide (sirve para muchos ejércitos con el mismo destino). Los ejércitos ajenos
+    // cortan el paso, salvo en el propio destino; el mar cuesta el triple para que prefiera ir por tierra.
+    orderField(owner, dest) {
+        const stamp = `${this.version}:${this.armyVersion}:${this.roadVersion}:${this.fortVersion}:${this.techVersion}:${this.blocVersion}`;
+        if (stamp !== this.fieldStamp) { this.fields.clear(); this.fieldStamp = stamp; }
+        const key = owner * G.N + dest;
+        let f = this.fields.get(key);
+        if (f) return f;
+        const dist = new Float64Array(G.N).fill(Infinity), next = new Int32Array(G.N).fill(-1), done = new Uint8Array(G.N), heap = new MinHeap();
+        const open = c => {
+            if (c === dest || !isLand(c)) return true;
+            const o = this.owner[c];
+            if (!(o === owner || this.allied(owner, o) || this.atWar(owner, o))) return false;
+            const id = this.armyAt[c];
+            return !id || this.armies.get(id).owner === owner;
+        };
+        dist[dest] = 0; heap.push(0, dest);
+        const to = cell => {   // completa el cálculo hasta conocer la distancia de `cell`
+            while (!done[cell] && heap.size) {
+                const [k, v] = heap.pop();
+                if (done[v] || k > dist[v]) continue;
+                done[v] = 1;
+                const hostile = isLand(v) && this.atWar(owner, this.owner[v]);
+                for (let d = 0; d < 6; d++) {
+                    const u = G.nb[v * 6 + d];
+                    if (u < 0 || done[u] || !open(u)) continue;
+                    const cost = isLand(v) ? this.stepCost(owner, u, (d + 3) % 6, hostile) : MOVE * 3;
+                    if (k + cost < dist[u]) { dist[u] = k + cost; next[u] = v; heap.push(dist[u], u); }
+                }
+            }
+            return done[cell] ? dist[cell] : Infinity;
+        };
+        f = { dest, dist, next, done, to };
+        this.fields.set(key, f);
+        return f;
+    }
+    // Camino de casillas desde `from` hasta el destino del campo (vacío si no hay paso).
+    fieldPath(f, from) {
+        if (f.to(from) === Infinity) return [];
+        const path = [from];
+        for (let c = from; c !== f.dest && path.length < 2000; ) { c = f.next[c]; if (c < 0) return []; path.push(c); }
+        return path;
+    }
+    // Relación de fuerzas que espera `owner` al atacar `def` en `cell`. Si no conoce el ejército (niebla de guerra),
+    // supone lo peor de su escalón en infantería, para que la orden no use información que el jugador no tiene.
+    expectedRatio(owner, units, from, def, cell) {
+        if (this.intel(owner, def.owner, cell).exact) { const fx = this.combatFactors(owner, units, from, def, cell); return fx.atk / fx.dfn; }
+        const n = countUnits(def.units), guess = n <= 3 ? 3 : n <= 9 ? 9 : n <= 24 ? 24 : 40;
+        const fx = this.combatFactors(owner, units, from, { owner: def.owner, units: { infantry: guess, tank: 0, artillery: 0 } }, cell);
+        return fx.atk / fx.dfn;
+    }
+    orderTarget(a) {
+        const o = a.order;
+        if (!o) return -1;
+        if (o.kind === 'follow') { const t = this.armies.get(o.target); return t && t.owner === a.owner ? t.cell : -1; }
+        return o.kind === 'march' || o.kind === 'attack' ? o.dest : -1;
+    }
+    // Recalcula el camino y los turnos que faltan (para dibujarlos y para la ficha).
+    refreshOrder(a) {
+        const o = a.order, dest = this.orderTarget(a);
+        if (!o) return;
+        if (dest < 0 || dest === a.cell) { o.path = [a.cell]; o.eta = 0; return; }
+        const f = this.orderField(a.owner, dest);
+        o.path = this.fieldPath(f, a.cell);
+        o.eta = o.path.length ? this.pathTurns(a.owner, a.units, o.path, f.dist) : null;
+    }
+    // Turnos para recorrer un camino: con suministro, lo que dé su velocidad (al menos una casilla); sin él, una casilla.
+    pathTurns(owner, units, path, dist) {
+        const per = speedOf(units, this.rules(owner)) * MOVE;
+        let i = 0, turns = 0;
+        while (i < path.length - 1 && turns < 500) {
+            turns++;
+            if (!this.inSupply(owner, path[i])) { i++; continue; }
+            const start = dist[path[i]];
+            i++;
+            while (i < path.length - 1 && start - dist[path[i + 1]] <= per) i++;
+        }
+        return Math.max(1, turns);
+    }
+    setOrder(a, order) {
+        if (!a || !this.armies.has(a.id)) return false;
+        const o = { kind: order.kind, dest: order.dest ?? -1, target: order.target ?? 0, ratio: order.ratio ?? 1.3, flee: order.flee ?? true, since: this.turn, stuck: 0, path: [], eta: null };
+        if (!['march', 'attack', 'hold', 'fortify', 'follow'].includes(o.kind)) return false;
+        if (o.kind === 'march' || o.kind === 'attack') {
+            const d = o.dest, ow = isLand(d) ? this.owner[d] : -2;
+            if (d < 0 || !isLand(d) || !(ow === a.owner || this.allied(a.owner, ow) || this.atWar(a.owner, ow))) return false;
+        }
+        if (o.kind === 'follow') { const t = this.armies.get(o.target); if (!t || t.owner !== a.owner || t === a) return false; }
+        a.order = o;
+        this.refreshOrder(a);
+        this.orderVersion++;
+        return true;
+    }
+    clearOrder(a) { if (a?.order) { a.order = null; this.orderVersion++; } }
+
+    // Cumple la orden de un ejército este turno con el movimiento que le quede. Devuelve lo que ha pasado:
+    // 'moved', 'arrived', 'attacked', 'waiting' (sin ventaja suficiente), 'blocked', 'fled', 'cancelled' o null.
+    stepOrder(a) {
+        const o = a.order, owner = a.owner;
+        if (!o || this.over) return null;
+        if (o.kind === 'hold') return null;
+        if (o.kind === 'fortify') {
+            const r = this.rules(owner);
+            if (this.fort[a.cell] || this.fortWork.has(a.cell)) { a.order = { ...o, kind: 'hold' }; this.orderVersion++; return null; }
+            if (this.owner[a.cell] !== owner) { this.clearOrder(a); return 'cancelled'; }
+            if (this.nations[owner].gold < r.fortCost) return 'waiting';
+            this.buildFort(owner, { cells: [a.cell], path: [a.cell], cost: r.fortCost, cls: 'fort' });
+            a.order = { ...o, kind: 'hold' };
+            this.orderVersion++;
+            return 'fortified';
+        }
+        const dest = this.orderTarget(a);
+        if (dest < 0) { this.clearOrder(a); return 'cancelled'; }
+        if (o.kind !== 'follow' && a.cell === dest) { this.clearOrder(a); return 'arrived'; }
+        const mp = this.mp(a);
+        if (mp <= 0) return null;
+        const r = this.reach(owner, a.cell, mp, a.used === 0);
+        // Rodeado: primero se aparta hacia donde tenga menos enemigos alrededor.
+        const sides = this.hostileSides(owner, a.cell);
+        if (o.flee && sides >= CONFIG.FLANKED_SIDES) {
+            let best = -1, bestSides = sides;
+            for (const v of this.destinations(r)) {
+                if (this.armyAt[v]) continue;
+                const s = this.hostileSides(owner, v);
+                if (s < bestSides) { bestSides = s; best = v; }
+            }
+            if (best >= 0) { this.moveArmy(a, best, r); this.refreshOrder(a); return 'fled'; }
+        }
+        if (o.kind === 'attack' && r.attacks.has(dest)) {
+            const def = this.armyOn(dest), from = r.attacks.get(dest);
+            if (this.expectedRatio(owner, a.units, from, def, dest) >= o.ratio) {
+                this.attack(a, from, dest, r);
+                const after = this.armies.get(a.id);
+                if (after && after.cell === dest) { this.clearOrder(after); return 'arrived'; }
+                if (after) this.refreshOrder(after);
+                return 'attacked';
+            }
+            if (from !== a.cell) { const moved = this.moveArmy(a, from, r); if (moved.order) this.refreshOrder(moved); }
+            return 'waiting';
+        }
+        if (o.kind === 'follow' && G.dirTo(a.cell, dest) >= 0) return null;   // ya va pegado detrás
+        const f = this.orderField(owner, dest), here = f.to(a.cell);
+        let best = -1, bestD = here;
+        for (const v of this.destinations(r)) {
+            if (v !== dest && this.armyAt[v]) continue;            // no se junta con otro ejército por el camino
+            if (o.kind === 'follow' && v === dest) continue;        // sigue al otro ejército sin juntarse con él
+            const dv = f.dist[v];                                   // solo están calculadas las más cercanas que `here`
+            if (f.done[v] && dv < bestD) { bestD = dv; best = v; }
+        }
+        if (best < 0) {
+            if (o.stuckTurn !== this.turn) { o.stuckTurn = this.turn; o.stuck++; }
+            if (o.stuck >= 3 && o.kind !== 'follow') { this.clearOrder(a); return 'cancelled'; }
+            return 'blocked';
+        }
+        o.stuck = 0;
+        const moved = this.moveArmy(a, best, r);
+        if (moved !== a || !this.armies.has(a.id)) return 'arrived';   // se ha unido a otro ejército en el destino
+        if (a.cell === dest) { this.clearOrder(a); return 'arrived'; }
+        this.refreshOrder(a);
+        return 'moved';
+    }
+
+    // Cumple las órdenes de todos los ejércitos de `id` que aún pueden moverse. Devuelve el resumen para el registro.
+    executeOrders(id) {
+        const out = { moved: 0, arrived: [], attacked: 0, waiting: 0, blocked: 0, fled: 0, cancelled: [], fortified: 0 };
+        if (this.over) return out;
+        const list = [...this.armies.values()].filter(a => a.owner === id && a.order && a.direct !== this.turn)
+            .sort((x, y) => (x.order.kind === 'attack' ? 0 : 1) - (y.order.kind === 'attack' ? 0 : 1) || x.id - y.id);
+        for (const a of list) {
+            if (this.over) break;
+            if (!this.armies.has(a.id) || this.armyOn(a.cell) !== a) continue;
+            const name = a.order?.kind === 'march' || a.order?.kind === 'attack' ? PROVINCES[G.prov[a.order.dest]] : null;
+            const res = this.stepOrder(a);
+            if (res === 'moved') out.moved++;
+            else if (res === 'arrived') { out.moved++; out.arrived.push(name?.name ?? '?'); }
+            else if (res === 'attacked') out.attacked++;
+            else if (res === 'waiting') out.waiting++;
+            else if (res === 'blocked') out.blocked++;
+            else if (res === 'fled') out.fled++;
+            else if (res === 'fortified') out.fortified++;
+            else if (res === 'cancelled') out.cancelled.push(name?.name ?? 'su objetivo');
+        }
+        if (id === this.player) {
+            const parts = [];
+            if (out.moved) parts.push(`${plural(out.moved, 'ejército avanza', 'ejércitos avanzan')}`);
+            if (out.arrived.length) parts.push(`${out.arrived.length === 1 ? 'uno llega' : `${out.arrived.length} llegan`} a su destino (${[...new Set(out.arrived)].join(', ')})`);
+            if (out.attacked) parts.push(`${plural(out.attacked, 'ataque', 'ataques')}`);
+            if (out.waiting) parts.push(`${out.waiting} esperan a tener ventaja para atacar`);
+            if (out.fled) parts.push(`${out.fled} se apartan del cerco`);
+            if (out.fortified) parts.push(`${plural(out.fortified, 'obra', 'obras')} de fortificación`);
+            if (out.blocked) parts.push(`${out.blocked} sin paso`);
+            if (parts.length) this.log(`Órdenes: ${parts.join(', ')}.`);
+            for (const n of out.cancelled) this.log(`Se cancela una orden hacia ${n}: no hay paso desde hace tres turnos.`);
+        }
+        return out;
+    }
+    // Ejércitos de `id` con una orden que aún pueden cumplir este turno.
+    pendingOrders(id) {
+        let n = 0;
+        for (const a of this.armies.values()) if (a.owner === id && a.order && a.order.kind !== 'hold' && a.direct !== this.turn && this.armyOn(a.cell) === a && this.mp(a) > 0) n++;
+        return n;
     }
 
     zoc(cell, a) {
@@ -2073,6 +2300,8 @@ class GameEngine {
     }
     beginAiPhase() {
         if (this.over || this.player === null) return false;
+        this.executeOrders(this.player);   // lo que quede de las órdenes del jugador, antes de que jueguen los demás
+        if (this.over) return false;
         for (const p of [...this.proposals]) this.answerProposal(this.proposals.indexOf(p), false, true);
         this.proposals = [];
         this.alerts = [];
@@ -2273,9 +2502,22 @@ class GameEngine {
         const isAttack = r.attacks.has(dest);
         if (!isAttack && !this.destinations(r).has(dest)) return null;
         const mover = this.split(army, copyUnits(send));
+        mover.direct = this.turn;   // orden directa: este turno no cumple la suya
         if (isAttack) { this.attack(mover, r.attacks.get(dest), dest, r); return this.armyOn(dest) ?? this.armyOn(r.attacks.get(dest)); }
         return this.moveArmy(mover, dest, r);
     }
+    // Da una orden de varios turnos a un ejército del jugador y la empieza a cumplir ya, si puede moverse.
+    playerOrder(army, order) {
+        if (this.over || army?.owner !== this.player) return null;
+        if (!this.setOrder(army, order)) { this.log('No se puede dar esa orden: el destino tiene que ser tuyo, de un aliado o de un enemigo en guerra.'); return null; }
+        army.direct = 0;   // una orden nueva vale ya, aunque lo hayas movido a mano este turno
+        const res = this.stepOrder(army);
+        if (res === 'arrived') this.log('El ejército ha llegado a su destino.');
+        else if (res === 'cancelled') this.log('No hay paso hasta ese destino: la orden se cancela.');
+        return res;
+    }
+    playerClearOrder(army) { if (army?.owner === this.player) this.clearOrder(army); }
+
     // Recluta hasta `qty` unidades (Infinity: todas las que permitan el oro y el cupo).
     playerRecruit(p, type, qty = 1) {
         if (this.over) return;
@@ -3281,6 +3523,8 @@ class MapView {
             ctx.beginPath(); ctx.arc(ex, ey, r * 0.2, 0, Math.PI * 2); ctx.fillStyle = INK; ctx.fill();
         }
 
+        if (g.player !== null && !g.over) this.drawOrders(hexPx, font);
+
         // Ejércitos: fichas OTAN en la vista sencilla, miniaturas en la realista. Mientras se mueven, siguen su camino.
         const tokens = [];
         const seen = (wx, wy, cell) => { const c = G.cellAt(wx, wy); return g.sees(g.player, c >= 0 && isLand(c) ? c : cell); };
@@ -3355,6 +3599,51 @@ class MapView {
             }
         }
         if (this.motion.active(now)) this.requestFrame();
+    }
+
+    // Órdenes de varios turnos de tus ejércitos: camino discontinuo hasta el destino (rojo si es para atacar, punteado si
+    // sigue a otro ejército) con los turnos que faltan; «mantener» y «fortificar» como rótulo bajo la ficha.
+    drawOrders(hexPx, font) {
+        const g = this.game, ctx = this.ctx, sel = this.selectedCell >= 0 ? g.armyOn(this.selectedCell) : null;
+        const pills = [];
+        ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        for (const a of g.armies.values()) {
+            const o = a.order;
+            if (!o || a.owner !== g.player || g.armyOn(a.cell) !== a || this.motion.tracks.has(a.id)) continue;
+            const [ax, ay] = this.toScreen(G.cx[a.cell], G.cy[a.cell]);
+            if (o.kind === 'hold' || o.kind === 'fortify') {
+                if (hexPx >= 10) pills.push({ x: ax, y: ay, side: -1, text: o.kind === 'hold' ? 'mantener' : 'fortificar', dark: true });
+                continue;
+            }
+            if (o.path?.[0] !== a.cell) g.refreshOrder(a);
+            if (!o.path || o.path.length < 2) continue;
+            const pts = o.path.map(c => this.toScreen(G.cx[c], G.cy[c]));
+            if (pts.every(([x, y]) => x < -50 || y < -50 || x > this.w + 50 || y > this.h + 50)) continue;
+            const isSel = sel === a, color = o.kind === 'attack' ? '#ff8a78' : SIGNAL;
+            ctx.globalAlpha = isSel ? 1 : 0.75;
+            ctx.beginPath();
+            pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+            ctx.strokeStyle = 'rgba(21,26,18,0.8)'; ctx.lineWidth = isSel ? 5 : 3.5; ctx.stroke();
+            ctx.setLineDash(o.kind === 'follow' ? [1.5, 5] : [8, 5]);
+            ctx.strokeStyle = color; ctx.lineWidth = isSel ? 2.6 : 1.8; ctx.stroke();
+            ctx.setLineDash([]);
+            const [x1, y1] = pts[pts.length - 1], [x0, y0] = pts[pts.length - 2];
+            const ang = Math.atan2(y1 - y0, x1 - x0), L = isSel ? 11 : 8;
+            ctx.beginPath();
+            ctx.moveTo(x1, y1); ctx.lineTo(x1 - L * Math.cos(ang - 0.45), y1 - L * Math.sin(ang - 0.45)); ctx.lineTo(x1 - L * Math.cos(ang + 0.45), y1 - L * Math.sin(ang + 0.45)); ctx.closePath();
+            ctx.fillStyle = color; ctx.fill(); ctx.lineWidth = 1.2; ctx.strokeStyle = INK; ctx.stroke();
+            ctx.globalAlpha = 1;
+            if (o.eta && o.kind !== 'follow' && (isSel || hexPx >= 8)) pills.push({ x: x1, y: y1, side: 1, text: `${o.eta} ${o.eta === 1 ? 'turno' : 'turnos'}`, color });
+        }
+        ctx.font = font(11, 700); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        for (const p of pills) {   // al lado de la ficha: a la izquierda las de quedarse, a la derecha los turnos
+            const w = ctx.measureText(p.text).width + 12;
+            p.x += p.side * (Math.max(13, hexPx * 1.15) + 6 + w / 2);
+            ctx.beginPath(); ctx.roundRect(p.x - w / 2, p.y - 8, w, 16, 8);
+            ctx.fillStyle = p.dark ? 'rgba(21,26,18,0.82)' : p.color; ctx.fill();
+            ctx.lineWidth = 1; ctx.strokeStyle = INK; ctx.stroke();
+            ctx.fillStyle = p.dark ? '#ebe7d8' : INK; ctx.fillText(p.text, p.x, p.y + 1);
+        }
     }
 
     // Ficha OTAN de la vista sencilla: color del país, símbolo del tipo dominante y número de unidades.
@@ -3443,6 +3732,8 @@ class GameUI {
         this.view.onRealisticFailed = () => { this.prefs.view = 'sencilla'; this.view.setMode('sencilla'); this.renderTools(); };
         this.view.setMode(this.prefs.view);
         this.multi = new Set();      // provincias seleccionadas con la herramienta Ciudades
+        this.ordering = null;        // { kind }: orden a la espera de que se elija el destino en el mapa
+        this.orderRatio = 1.3;       // ventaja mínima para atacar de las órdenes nuevas
         this.replaying = false;
 
         this.bindMap();
@@ -3549,7 +3840,7 @@ class GameUI {
             if (pointers.size < 2) pinch = null;
             if (pointers.size === 1) { const [p] = pointers.values(); startDrag(p.x, p.y, true); }   // tras el pellizco sigue arrastrando
             if (pointers.size === 0) {
-                if (tap) this.clickCell(this.cellFromEvent(e));
+                if (tap) this.clickCell(this.cellFromEvent(e), e.shiftKey);
                 drag = null;
                 c.classList.remove('dragging');
             }
@@ -3666,15 +3957,23 @@ class GameUI {
         tip.style.top = `${Math.min(y, box.height - tip.offsetHeight - 8)}px`;
     }
 
-    clickCell(cell) {
+    clickCell(cell, shift = false) {
         const g = this.game;
         if (this.replaying) return;
+        if (this.ordering) { this.pickOrderTarget(cell); return; }
         if (cell < 0 || !isLand(cell)) { if (this.tool === 'command') this.select(-1); return; }
         if (g.player === null) { this.choice = g.owner[cell]; this.render(); return; }
         if (g.over) return;
         if (this.tool === 'cities') { this.toggleCity(cell); return; }
         if (this.tool !== 'command') { this.buildClick(cell); return; }
         const army = this.selectedArmy();
+        // Mayúsculas + clic: orden de marchar (o de atacar, si allí hay un enemigo) hasta esa casilla, en varios turnos.
+        if (army && shift && cell !== army.cell) {
+            const foe = g.armyOn(cell);
+            this.ordering = { kind: foe && g.atWar(g.player, foe.owner) && g.sees(g.player, cell) ? 'attack' : 'march' };
+            this.pickOrderTarget(cell);
+            return;
+        }
         if (army && this.reachInfo && (this.reachInfo.attacks.has(cell) || this.reachInfo.moves.has(cell))) {
             const result = g.playerMove(army, copyUnits(this.send), cell);
             const next = result && g.armies.has(result.id) && result.owner === g.player ? result.cell : cell;
@@ -3682,6 +3981,23 @@ class GameUI {
             return;
         }
         this.select(cell === this.selected ? -1 : cell);
+    }
+
+    // Destino de la orden que se está dando: casilla para marchar o atacar, ejército propio para seguir.
+    pickOrderTarget(cell) {
+        const g = this.game, kind = this.ordering?.kind, army = this.selectedArmy();
+        this.ordering = null;
+        if (!army || cell < 0 || !isLand(cell) || cell === army.cell) { this.render(); return; }
+        let order;
+        if (kind === 'follow') {
+            const t = g.armyOn(cell);
+            if (!t || t.owner !== g.player) { this.flash('Para seguir a un ejército, haz clic en otro ejército tuyo.'); return; }
+            order = { kind, target: t.id };
+        } else order = { kind, dest: cell, ratio: this.orderRatio, flee: this.orderFlee ?? true };
+        const before = army.id;
+        g.playerOrder(army, order);
+        const now = g.armies.get(before);
+        this.select(now && now.owner === g.player ? now.cell : this.selected);
     }
 
     buildClick(cell) {
@@ -3796,6 +4112,7 @@ class GameUI {
     }
 
     cancel() {
+        if (this.ordering) { this.ordering = null; this.render(); return; }
         if (this.pending) { this.pending = null; this.view.preview = null; this.render(); return; }
         if (this.tool !== 'command') {
             if (this.anchor >= 0) { this.anchor = -1; this.view.preview = null; this.render(); }
@@ -3819,8 +4136,8 @@ class GameUI {
     nextArmy() {
         const g = this.game;
         if (g.player === null || g.over) return;
-        const ready = [...g.armies.values()].filter(a => a.owner === g.player && g.armyOn(a.cell) === a && g.mp(a) > 0).sort((x, y) => x.id - y.id);
-        if (!ready.length) { this.flash('Ningún ejército puede moverse más este turno.'); return; }
+        const ready = [...g.armies.values()].filter(a => a.owner === g.player && g.armyOn(a.cell) === a && g.mp(a) > 0 && !a.order).sort((x, y) => x.id - y.id);
+        if (!ready.length) { this.flash('Ningún ejército sin órdenes puede moverse más este turno.'); return; }
         const cur = g.armyOn(this.selected);
         const next = ready.find(a => cur && a.id > cur.id) ?? ready[0];
         this.setTool('command');
@@ -3899,6 +4216,27 @@ class GameUI {
             case 'alerts-close': $('#alerts-dialog').close(); g.alerts = []; break;
             case 'alert-goto': $('#alerts-dialog').close(); g.alerts = []; this.view.centerOn(+d.cell, 6); this.setTool('command'); this.select(+d.cell); return;
             case 'next-army': this.nextArmy(); return;
+            case 'run-orders': this.runOrders(); return;
+            case 'order': {
+                const a = this.selectedArmy();
+                if (!a) return;
+                if (['march', 'attack', 'follow'].includes(d.kind)) { this.ordering = { kind: d.kind }; break; }
+                g.playerOrder(a, { kind: d.kind });
+                break;
+            }
+            case 'order-cancel': g.playerClearOrder(this.selectedArmy()); break;
+            case 'order-ratio': {
+                this.orderRatio = +d.value;
+                const a = this.selectedArmy();
+                if (a?.order?.kind === 'attack') { a.order.ratio = this.orderRatio; g.orderVersion++; }
+                break;
+            }
+            case 'order-flee': {
+                this.orderFlee = !(this.orderFlee ?? true);
+                const a = this.selectedArmy();
+                if (a?.order) { a.order.flee = this.orderFlee; g.orderVersion++; }
+                break;
+            }
             case 'install':
                 if (this.installPrompt) { this.installPrompt.prompt(); this.installPrompt.userChoice.finally(() => { this.installPrompt = null; this.renderTop(); }); }
                 return;
@@ -3986,7 +4324,16 @@ class GameUI {
     // Fin de turno: los demás países juegan de golpe ("directo") o uno a uno, enseñando cada jugada ("ver").
     async endTurnFlow() {
         const g = this.game;
-        if (this.replaying || g.player === null || g.over || !g.beginAiPhase()) return;
+        if (this.replaying || g.player === null || g.over) return;
+        // Primero tus órdenes de varios turnos; viendo las jugadas, se espera a que acaben de moverse.
+        if (this.prefs.watch === 'ver' && g.pendingOrders(g.player)) {
+            this.replaying = true;
+            g.executeOrders(g.player);
+            this.render();
+            await new Promise(res => setTimeout(res, Math.min(2500, this.view.motion.pendingMs() + 150)));
+            this.replaying = false;
+        }
+        if (!g.beginAiPhase()) { this.render(); return; }
         const knew = new Set(g.nations[g.player].tech.done);
         this.setTool('command');
         const order = g.aiOrder();
@@ -4024,6 +4371,16 @@ class GameUI {
         writeSave('auto', g);
         this.select(this.selected);
         if (g.alerts.length || g.proposals.some(p => p.kind === 'llamada')) this.openAlerts();
+    }
+    // «Ejecutar órdenes» (O): los ejércitos con órdenes de varios turnos las cumplen ya, con lo que les quede de movimiento.
+    runOrders() {
+        const g = this.game;
+        if (this.replaying || g.player === null || g.over) return;
+        if (!g.pendingOrders(g.player)) { this.flash('Ningún ejército con órdenes puede moverse ahora.'); return; }
+        const sel = g.armyOn(this.selected)?.id;
+        g.executeOrders(g.player);
+        const a = sel && g.armies.get(sel);
+        this.select(a && a.owner === g.player ? a.cell : this.selected);
     }
     skipReplay() { this.skipping = true; this.view.motion.clear(); this.game.motion.length = 0; this.wakeReplay?.(); }
     // Vista sencilla ⇄ realista (botón «Relieve» y tecla V). Se guarda en este dispositivo, no en la partida.
@@ -4093,6 +4450,7 @@ class GameUI {
         if (e.key === 'a' || e.key === 'A') { this.toggleHighway(); return; }
         if (e.key === 'l' || e.key === 'L') { this.view.showSupply = !this.view.showSupply; this.render(); }
         else if (e.key === 'n' || e.key === 'N') this.nextArmy();
+        else if (e.key === 'o' || e.key === 'O') this.runOrders();
         else if (e.key === 'Enter') { e.preventDefault(); $('#end-turn').click(); }
     }
 
@@ -4135,6 +4493,9 @@ class GameUI {
         $('#turn').textContent = g.turn;
         $('#end-turn').disabled = p0 === null || g.over;
         $('#btn-next').hidden = p0 === null;
+        const pending = p0 === null || g.over ? 0 : g.pendingOrders(p0);
+        $('#btn-orders').hidden = !pending;
+        $('#btn-orders').innerHTML = `Ejecutar órdenes <span class="count">${pending}</span> <kbd>O</kbd>`;
         $('#btn-install').hidden = !this.installPrompt;
         this.renderResearchFigure();
         this.renderLegend();
@@ -4245,6 +4606,7 @@ class GameUI {
                 ${supplied ? '' : `<p class="note warn">Sin suministro: lejos de tus ciudades y de tu red de carreteras solo avanza una casilla por turno. Construye carreteras hasta el frente para abastecerlo (llegan a ${g.rules(p0).supplyRoad} casillas de la red).</p>`}
                 ${left > 0 ? `<p class="note">Haz clic en una casilla ${this.view.isRealistic() ? 'de la zona clara' : 'verde'} para mover o en una roja para atacar. Por carretera llegas más lejos; si no se ha movido este turno, siempre puede avanzar al menos una casilla.</p>` : ''}
             </section>`);
+            sections.push(this.orderSection(a));
         } else if (a && g.sees(p0, cell) && g.armyView(p0, a).n === null) {
             const ech = echelonOf(countUnits(a.units));
             sections.push(`<section class="sec"><h3>Ejército de ${g.nm(a.owner)}</h3>
@@ -4327,6 +4689,46 @@ class GameUI {
                     <p class="row">${this.nationChip(o)} ${this.relationChip(o)}${g.isDisputed(cell) ? ` <span class="small warn-text">en disputa con ${g.nm(g.legal[cell])}</span>` : o !== p.country ? ` <span class="small muted">antes de ${g.nm(p.country)}</span>` : ''}</p></div>
                 <button class="btn ghost" data-action="close-card" aria-label="Cerrar" title="Cerrar (Esc)">✕</button>
             </header>${sections.join('')}`;
+    }
+
+    // Qué hace un ejército con orden, en una frase.
+    orderText(a) {
+        const g = this.game, o = a.order;
+        if (!o) return '';
+        const place = c => { const p = PROVINCES[G.prov[c]]; return esc(CITY_OF[c] >= 0 ? p.cityName : p.name); };
+        const eta = o.eta ? `; llega en ${o.eta === 1 ? 'este turno o el siguiente' : `unos ${o.eta} turnos`}` : '';
+        const stuck = o.stuck ? ` <span class="warn-text">Sin paso desde hace ${plural(o.stuck, 'turno', 'turnos')}: se cancela a los 3.</span>` : '';
+        const ratio = o.ratio ? `con una relación de fuerzas de ${decimal(o.ratio)} a 1 o más` : 'a toda costa';
+        switch (o.kind) {
+            case 'march': return `Marcha hacia ${place(o.dest)}${eta}.${stuck}`;
+            case 'attack': return `Va a por ${place(o.dest)} y ataca lo que haya ${ratio}${eta}.${stuck}`;
+            case 'hold': return 'Mantiene la posición: no se mueve hasta que le des otra orden.';
+            case 'fortify': return `Fortificará su casilla en cuanto tengas ${g.rules(g.player).fortCost} de oro.`;
+            case 'follow': { const t = g.armies.get(o.target); return t ? `Sigue al ejército de ${place(t.cell)} (${countUnits(t.units)} unidades), una casilla por detrás.` : 'Sigue a un ejército que ya no existe.'; }
+        }
+        return '';
+    }
+    // Órdenes de varios turnos en la ficha del ejército.
+    orderSection(a) {
+        const o = a.order, flee = o ? o.flee : (this.orderFlee ?? true), ratio = o?.kind === 'attack' ? o.ratio : this.orderRatio;
+        const btn = (kind, label, title) => `<button class="btn ${o?.kind === kind ? 'on' : ''}" data-action="order" data-kind="${kind}" title="${title}">${label}</button>`;
+        return `<section class="sec">
+            <h3>Orden de varios turnos</h3>
+            ${o ? `<p class="small">${this.orderText(a)}</p>
+                <div class="row" style="margin:6px 0 8px"><button class="btn ghost" data-action="order-cancel">Cancelar la orden</button></div>` : '<p class="small muted">Sin orden: solo se mueve cuando lo mueves tú.</p>'}
+            <div class="orders">
+                ${btn('march', 'Marchar a…', 'Elige un destino; va hasta allí aunque tarde varios turnos, por el camino más rápido')}
+                ${btn('attack', 'Atacar…', 'Elige un objetivo; va hasta allí y ataca cuando tenga la ventaja que marques')}
+                ${btn('hold', 'Mantener', 'Se queda donde está; «Siguiente ejército» deja de pedirte que lo muevas')}
+                ${btn('fortify', 'Fortificar aquí', 'Fortifica su casilla y se queda en ella')}
+                ${btn('follow', 'Seguir a…', 'Va una casilla por detrás de otro ejército tuyo, por ejemplo artillería tras los tanques')}
+            </div>
+            <div class="row" style="margin-top:8px"><span class="small">Atacar con</span><div class="seg" style="flex:1">
+                ${[[1.8, '1,8 : 1'], [1.3, '1,3 : 1'], [1, '1 : 1'], [0, 'Siempre']].map(([v, l]) => `<button data-action="order-ratio" data-value="${v}" class="${ratio === v ? 'on' : ''}" title="${v ? `Solo ataca si su fuerza es al menos ${decimal(v)} veces la del defensor` : 'Ataca sin mirar la relación de fuerzas'}">${l}</button>`).join('')}
+            </div></div>
+            <label class="check small" style="margin-top:8px"><input type="checkbox" data-action="order-flee" ${flee ? 'checked' : ''}> Apartarse si lo rodean (3 lados o más)</label>
+            <p class="note">Las órdenes son para todo el ejército y se cumplen solas al terminar tu turno, o ya con «Ejecutar órdenes» (O). Si lo mueves a mano, ese turno manda lo tuyo. Con niebla, la ventaja se calcula con lo peor de su escalón.</p>
+        </section>`;
     }
 
     // Botones de diplomacia con una nación (en la ficha y en el panel de países).
@@ -4560,8 +4962,10 @@ class GameUI {
         else if (this.tool === 'cities') text = 'Ciudades: haz clic en tus provincias para añadirlas o quitarlas de la selección.';
         else if (this.tool === 'fort') text = this.anchor < 0 ? 'Fortificar: haz clic en una casilla tuya.' : 'Clic en otra casilla para fortificar la línea, o en la misma para solo esa. Clic derecho para terminar.';
         else if (this.tool !== 'command') text = this.anchor < 0 ? `${this.highway ? 'Autopista (A para quitarla)' : 'Carretera (A para autopista)'}: haz clic en una casilla tuya para empezar.` : 'Haz clic donde termina el tramo; se construye el camino más barato. Clic derecho para terminar.';
-        else if (this.reachInfo) text = `${this.view.isRealistic() ? 'Zona clara: mover' : 'Verde: mover'}. Rojo: atacar. Clic derecho o Esc para cancelar.`;
-        else text = 'Clic en un ejército tuyo para darle órdenes, o en una provincia para ver qué puedes hacer.';
+        else if (this.ordering) text = this.ordering.kind === 'follow' ? 'Haz clic en el ejército tuyo al que debe seguir. Esc para cancelar.'
+            : `Haz clic en el destino: ${this.ordering.kind === 'attack' ? 'irá hasta allí y atacará lo que haya cuando tenga ventaja' : 'irá hasta allí aunque tarde varios turnos'}. Esc para cancelar.`;
+        else if (this.reachInfo) text = `${this.view.isRealistic() ? 'Zona clara: mover' : 'Verde: mover'}. Rojo: atacar. Mayúsculas + clic más lejos: marchar en varios turnos. Esc para cancelar.`;
+        else text = 'Clic en un ejército tuyo para darle órdenes (con Mayúsculas + clic, marcha hasta allí en varios turnos), o en una provincia para ver qué puedes hacer.';
         el.textContent = text;
         el.hidden = !text;
         el.classList.toggle('beside-card', !$('#card').hidden);
