@@ -1135,6 +1135,114 @@ const CHECKS = [
         T.eq(ui.opPreview, null, 'y se quita al salir');
         return true;
     }],
+    ['Revisión L · sin la línea dibujada (o arrollada) aún se puede replegar', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        const s = T.sector(g, es, fr);
+        const dir = g.lineDir(es, s.line);
+        for (const c of s.line) { g.owner[c] = fr; }
+        g.version++;
+        const forces = s.back.slice(0, 3).map(c => T.army(g, es, c, 2));
+        const res = g.bestLine(es, { ref: s.line, forces, enemy: 100, dir, limit: 2 * 4 * MOVE, base: s.line, baseLimit: 4 * 4 * MOVE });
+        T.ok(res && !res.same && res.cells.every(c => g.owner[c] === es), 'con la línea dibujada en manos del enemigo, hay línea detrás');
+        const h = T.game();
+        h.start(es); h.declareWar(es, fr);
+        const t = T.sector(h, es, fr), one = t.line[3];
+        const op = h.createOp(es, 'defensa', [one]);
+        for (const c of t.back.slice(0, 2)) h.assignArmy(T.army(h, es, c, 2), op.id);
+        h.owner[one] = fr; h.version++;
+        T.army(h, fr, one, 0, 4);
+        const dec = h.defenseDecide(op);
+        T.eq([dec.state, !!dec.stuck], ['repliega', false], 'una línea de una casilla arrollada se repliega');
+        return true;
+    }],
+    ['Revisión L · al volver con una casilla aún en manos del enemigo no hay vaivén', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        const s = T.sector(g, es, fr);
+        const op = g.createOp(es, 'defensa', s.line);
+        for (const c of s.line) g.assignArmy(T.army(g, es, c, 2), op.id);
+        const foes = [0, 1, 2, 3].map(k => T.army(g, fr, s.front(k), 0, 4));
+        T.turns(g, es, 2);
+        T.ok(op.cells.join() !== s.line.join(), 'replegada');
+        for (const f of foes) if (g.armies.has(f.id)) g.removeArmy(f);
+        const lost = s.line[2];
+        if (g.armyOn(lost)) g.removeArmy(g.armyOn(lost));
+        g.owner[lost] = fr; g.version++;
+        T.army(g, fr, lost, 0, 12);   // fuerte: el contraataque no la recupera
+        for (const c of s.back) if (!g.armyAt[c]) g.assignArmy(T.army(g, es, c, 0, 4), op.id);
+        T.ok(g.lineEval(op, op.drawn).rel >= 1.5, 'fuerza para volver');
+        const seen = [];
+        for (let i = 0; i < 5; i++) { T.turns(g, es, 1); seen.push(op.state); }
+        T.ok(op.cells.join() === s.line.join() && !seen.slice(1).includes('repliega'), `vuelve y no se repliega otra vez: ${seen.join(', ')}`);
+        return true;
+    }],
+    ['Revisión L · una línea en pausa no se queda sin tropas; la propuesta deja de verse al crearla', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        const [a0] = T.border(g, es, fr), [a1] = T.border(g, es, fr, 2);
+        const path = g.planFort(es, a0, a1).path;
+        const line = g.createOp(es, 'defensa', path);
+        for (const c of path) g.assignArmy(T.army(g, es, c, 2), line.id);
+        line.paused = true;
+        const n = g.opMembers(line).length;
+        g.createOp(es, 'ofensiva', [a0, T.nearestCity(g, es, fr, a0)]);
+        g.shareForces(es);
+        T.eq(g.opMembers(line).length, n, 'la línea en pausa conserva sus ejércitos');
+        g.endOp(line);
+        const pt = T.nation('pt');
+        g.declareWar(es, pt);
+        ui.tab = 'mando'; ui.drawerOpen = true; ui.focusOp = 0; ui.render();
+        const btn = document.querySelector(`[data-preview="${pt}"]`);
+        btn.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        T.ok(ui.opPreview, 'se ve al pasar');
+        btn.click();
+        T.eq(ui.opPreview, null, 'al crearla deja de verse');
+        return true;
+    }],
+    ['Revisión L · al replegarse evita pasar junto al enemigo si puede; avisa si no hay superioridad', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        // Busca un sitio donde el paso más corto roce a un enemigo y haya otro que acerque sin rozarlo.
+        let setup = null;
+        const spots = G.land.filter(c => g.owner[c] === es && T.free(g, c) && CELL_TERRAIN[c] === 'plain' && g.inSupply(es, c));
+        for (let k = 0; k < spots.length && !setup; k += 5) {
+            const from = spots[k];
+            let dest;
+            try { dest = T.farCell(g, es, from, 4, 6); } catch { continue; }
+            const a = T.army(g, es, from, 2), f = g.orderField(es, dest), here = f.to(from);
+            const r = g.reach(es, from, g.mp(a), true);
+            const steps = [...g.destinations(r)].filter(v => !g.armyAt[v] && f.done[v] && f.dist[v] < here);
+            const min = Math.min(...steps.map(v => f.dist[v])), best = steps.filter(v => f.dist[v] === min);
+            const foes = [];
+            for (const b of best) {
+                const j = G.nb.slice(b * 6, b * 6 + 6).find(x => x >= 0 && isLand(x) && !g.armyAt[x] && x !== from && G.dirTo(from, x) < 0 && !steps.includes(x));
+                if (j === undefined) break;
+                foes.push(T.army(g, fr, j, 1));
+            }
+            if (foes.length === best.length && steps.some(v => !g.zoc(v, es))) setup = { a, dest, from };
+            else { for (const x of foes) g.removeArmy(x); g.removeArmy(a); }
+        }
+        T.ok(setup, 'hay un sitio con camino seguro');
+        const run = avoid => {
+            const c = GameEngine.load(JSON.parse(JSON.stringify(g.serialize()))), b = c.armies.get(setup.a.id);
+            c.advance(b, setup.dest, c.reach(es, b.cell, c.mp(b), true), false, avoid);
+            return c.zoc(b.cell, es);
+        };
+        T.eq([run(false), run(true)], [true, false], 'el camino más corto roza al enemigo; al replegarse toma el seguro');
+        const h = T.game();
+        h.start(es); h.declareWar(es, fr);
+        const s = T.sector(h, es, fr);
+        const op = h.createOp(es, 'defensa', s.line);
+        for (const c of s.line) h.assignArmy(T.army(h, es, c, 1), op.id);
+        for (let k = 0; k < 4; k++) T.army(h, fr, s.front(k), 0, 8);
+        h.executeOps(es, [op.id]);
+        T.ok(h.logs.some(l => l.msg.includes('ninguna posición cercana da superioridad')), 'avisa de que hacen falta refuerzos');
+        return true;
+    }],
     ['Mapa · vista y capas en un solo panel, recordadas en el dispositivo', () => {
         const g = T.uiStart('es');
         const key = k => document.dispatchEvent(new KeyboardEvent('keydown', { key: k }));

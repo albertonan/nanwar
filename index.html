@@ -1809,12 +1809,15 @@ class GameEngine {
     }
     // Un paso de turno hacia `dest` por el camino más rápido, sin juntarse con otros ejércitos por el camino (en el
     // destino, solo si `merge`). Devuelve 'moved', 'arrived', 'merged' o 'blocked'.
-    advance(a, dest, r, merge = true) {
+    // Con `avoid`, una casilla junto a un ejército enemigo cuenta como tres casillas más (para replegarse sin rozarlo).
+    advance(a, dest, r, merge = true, avoid = false) {
         const f = this.orderField(a.owner, dest), here = f.to(a.cell);
         let best = -1, bestD = here;
         for (const v of this.destinations(r)) {
             if (this.armyAt[v] && !(merge && v === dest)) continue;   // con otro ejército solo se entra en el destino, y si `merge`
-            if (f.done[v] && f.dist[v] < bestD) { bestD = f.dist[v]; best = v; }   // solo están calculadas las más cercanas que `here`
+            if (!f.done[v] || f.dist[v] >= here) continue;            // solo están calculadas las más cercanas que `here`
+            const d = f.dist[v] + (avoid && v !== dest && this.zoc(v, a.owner) ? 3 * MOVE : 0);
+            if (d < bestD) { bestD = d; best = v; }
         }
         if (best < 0) return 'blocked';
         const moved = this.moveArmy(a, best, r);
@@ -1987,14 +1990,16 @@ class GameEngine {
         const near = new Set();
         for (const c of cells) for (const x of this.nearCells(c, 3).keys()) near.add(x);
         for (const c of near) { const e = foeOn(c); if (e) enemy += this.seenPower(id, e, 'atk'); }
-        for (const c of cells) if (this.atWar(id, this.owner[c]) || foeOn(c)) { breach = true; break; }
-        if (!breach && dir) for (const c of this.lineBand(op, cells)) {
+        let lost = false, rear = false;
+        for (const c of cells) if (this.atWar(id, this.owner[c]) || foeOn(c)) { lost = true; break; }
+        if (dir) for (const c of this.lineBand(op, cells)) {
             if (line.has(c) || this.legal[c] !== id || !(this.atWar(id, this.owner[c]) || foeOn(c))) continue;
-            if (this.lineSide(cells, dir, c) < 0) { breach = true; break; }
+            if (this.lineSide(cells, dir, c) < 0) { rear = true; break; }
         }
+        breach = lost || rear;
         const mean = cells.reduce((s, c) => s + this.defBonus(id, c), 0) / Math.max(1, cells.length), rules = this.rules(id);
         const own = members.reduce((s, a) => s + unitPower(a.units, 'def', rules) * (line.has(a.cell) ? this.defBonus(id, a.cell) : mean), 0);
-        return { own, enemy, rel: enemy > 0 ? own / enemy : null, breach, mean };
+        return { own, enemy, rel: enemy > 0 ? own / enemy : null, breach, lost, rear, mean };
     }
     // Río delante de una casilla (hacia el enemigo): defiende ×RIVER_DEFENSE a quien la guarda.
     riverFront(cell, dir) {
@@ -2018,7 +2023,7 @@ class GameEngine {
         const usable = c => isLand(c) && this.owner[c] === owner && !(this.armyAt[c] && this.atWar(owner, this.armies.get(this.armyAt[c]).owner));
         const spread = (from, max, behindOnly) => {
             const dist = new Map(), heap = new MinHeap();
-            for (const c of from) if (usable(c)) { dist.set(c, 0); heap.push(0, c); }
+            for (const c of from) if (isLand(c)) { dist.set(c, 0); heap.push(0, c); }   // aunque el enemigo ya la tenga
             while (heap.size) {
                 const [k, v] = heap.pop();
                 if (k > dist.get(v)) continue;
@@ -2033,6 +2038,7 @@ class GameEngine {
         };
         const zone = spread(ref, limit, true);
         if (base && Number.isFinite(baseLimit)) { const total = spread(base, baseLimit, false); for (const c of [...zone.keys()]) if (!total.has(c)) zone.delete(c); }
+        for (const c of [...zone.keys()]) if (!usable(c)) zone.delete(c);   // las de partida perdidas no sirven para la línea nueva
         const cities = new Set();
         for (const c of zone.keys()) for (const x of this.nearCells(c, 2).keys()) if (CITY_OF[x] >= 0 && this.owner[x] === owner) cities.add(x);
         const judge = (cells, depth) => {
@@ -2261,10 +2267,11 @@ class GameEngine {
     }
 
     // --- Reparto de esfuerzos entre operaciones ---
-    // Ejércitos que una operación no cede: una línea, los que cubren sus casillas y le dan una relación de al menos
-    // LINE_HOLD (uno más de los que tiene si no llegan); una ofensiva en marcha, todos; la reserva y las pausadas, ninguno.
+    // Ejércitos que una operación no cede: una línea (aunque esté en pausa), los que cubren sus casillas y le dan una
+    // relación de al menos LINE_HOLD (uno más de los que tiene si no llegan); una ofensiva en marcha, todos; la reserva y
+    // las ofensivas en pausa, ninguno.
     opMinimum(op) {
-        if (op.paused || op.kind === 'reserva') return 0;
+        if (op.kind === 'reserva' || (op.paused && op.kind === 'ofensiva')) return 0;
         const members = this.opMembers(op);
         if (op.kind === 'ofensiva') return members.length;
         const ev = this.lineEval(op, op.cells, members);
@@ -2296,7 +2303,7 @@ class GameEngine {
             if (o.auto === 'manual' || takers.some(t => t.op === o)) continue;
             const members = this.opMembers(o).filter(a => !a.order && a.direct !== this.turn);
             let spare = [];
-            if (o.kind === 'reserva' || o.paused) spare = members;
+            if (o.kind === 'reserva' || (o.paused && o.kind === 'ofensiva')) spare = members;
             else if (o.kind === 'defensa') {
                 const k = members.length - this.opMinimum(o), line = new Set(o.cells);
                 if (k > 0) spare = members.sort((x, y) => line.has(x.cell) - line.has(y.cell) || this.threat(id, x.cell) - this.threat(id, y.cell)).slice(0, k);
@@ -2347,13 +2354,16 @@ class GameEngine {
             const evD = this.lineEval(op, drawn, members);
             if (evD.rel === null || evD.rel >= LINE_RETURN) return { state: 'restablece', cells: drawn, ev, evD };
         }
-        if (ev.breach || (ev.rel !== null && ev.rel < LINE_HOLD)) {
+        // Mientras vuelve a la línea dibujada, sus casillas aún enemigas son lo que va a retomar, no una brecha.
+        const retaking = op.state === 'restablece' && atDrawn, broken = retaking ? ev.rear : ev.breach;
+        if (broken || (ev.rel !== null && ev.rel < LINE_HOLD)) {
             const rules = this.rules(id), slow = Math.min(...members.map(a => speedOf(a.units, rules))), cap = this.nations[id].capitalCell;
             const cand = this.bestLine(id, { ref: op.cells, forces: members, enemy: ev.enemy, dir: this.lineDir(id, drawn), limit: LINE_STEP_TURNS * slow * MOVE,
                 base: drawn, baseLimit: LINE_MAX_TURNS * slow * MOVE, keep: this.owner[cap] === id ? cap : -1 });
             if (cand && !cand.same) return { state: 'repliega', cells: cand.cells, ev, cand };
             return { state: op.state === 'repliega' && moving ? 'repliega' : 'aguanta', cells: op.cells, ev, stuck: true };
         }
+        if (retaking && ev.lost) return { state: 'restablece', cells: op.cells, ev };   // sigue hasta retomar toda la línea
         return { state: (op.state === 'repliega' || op.state === 'restablece') && moving ? op.state : 'aguanta', cells: op.cells, ev };
     }
     // Nombre corto de una línea para el parte: su lugar central y su terreno («colinas y río»).
@@ -2389,7 +2399,7 @@ class GameEngine {
             op.cells = [...dec.cells];
             this.orderVersion++;
             const why = [dec.ev.breach ? 'brecha en la línea' : '', ratioText(dec.ev)].filter(Boolean).join(' y ');
-            tally.notes.push(`${why}; se repliega a ${this.lineLabel(id, op.cells)}${dec.cand.rel !== null ? `, ${decimal(dec.cand.rel)} a 1 prevista` : ''}`);
+            tally.notes.push(`${why}; se repliega a ${this.lineLabel(id, op.cells)}${dec.cand.rel !== null ? `, ${decimal(dec.cand.rel)} a 1 prevista` : ''}${dec.cand.rel !== null && dec.cand.rel < LINE_HOLD ? '; ninguna posición cercana da superioridad: hacen falta refuerzos' : ''}`);
         } else if (dec.state === 'restablece' && op.cells !== op.drawn && op.cells.join() !== op.drawn.join()) {
             op.cells = [...op.drawn];
             this.orderVersion++;
@@ -2465,14 +2475,14 @@ class GameEngine {
             idle.splice(idle.indexOf(pick), 1);
             if (!live(pick)) continue;
             const a = this.detach(pick), r = this.reach(id, a.cell, this.mp(a), a.used === 0);
-            if (this.advance(a, c, r, false) !== 'blocked') { tally.moved++; leave(pick, a); } else this.reattach(a);
+            if (this.advance(a, c, r, false, op.state === 'repliega') !== 'blocked') { tally.moved++; leave(pick, a); } else this.reattach(a);
         }
         // Los que sobran refuerzan la casilla más amenazada de la línea (se juntan con quien la guarde).
         const hot = [...op.cells].sort((x, y) => danger.get(y) - danger.get(x))[0];
         for (const a0 of idle) {
             if (!live(a0) || hot === undefined) continue;
             const a = this.detach(a0), r = this.reach(id, a.cell, this.mp(a), a.used === 0);
-            if (this.advance(a, hot, r, true) !== 'blocked') { tally.moved++; leave(a0, a); } else this.reattach(a);
+            if (this.advance(a, hot, r, true, op.state === 'repliega') !== 'blocked') { tally.moved++; leave(a0, a); } else this.reattach(a);
         }
         if (garrisons.length) tally.notes.push(`deja guarnición en ${[...new Set(garrisons)].join(', ')}`);
         if (cut.length) tally.notes.push(`${plural(cut.length, 'ejército cortado aguanta', 'ejércitos cortados aguantan')} en ${[...new Set(cut)].join(', ')}`);
@@ -5291,6 +5301,7 @@ class GameUI {
 
     // Sustituye la partida en curso (al cargar).
     setGame(g) {
+        this.opPreview = null;
         game = g;
         this.game = g;
         this.legendKey = null;
@@ -5832,6 +5843,7 @@ class GameUI {
             case 'op-unassign': g.assignArmy(g.armies.get(+d.army), 0); break;
             case 'cmd': g.playerCommand(d.key, d.value); break;
             case 'op-suggest': {
+                this.opPreview = null;
                 const sg = g.frontPlan(g.player, +d.enemy);
                 if (!sg) return;
                 const op = d.kind === 'defensa' ? g.playerCreateOp('defensa', sg.line) : g.playerCreateOp('ofensiva', sg.attack);
