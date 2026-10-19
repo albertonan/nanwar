@@ -7,6 +7,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { naturalEarthFeatures } from '../../tools/geometry/lib/naturalearth.mjs';
+import { projectLonLat } from './projection.mjs';
+import { addTerrain } from './terrain.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '../..');
@@ -19,29 +21,6 @@ const HEX = Number(process.argv[2]) || 2.5;   // radio del hexágono en unidades
 const geometry = read('geometry.json');
 const settlements = read('settlements.json').settlements;
 const military = read('military.json');
-
-// --- Proyección (la misma que tools/geometry/lib/project.mjs) ---
-const R = 6371000;
-const rad = d => d * Math.PI / 180;
-function laea([lon, lat], [lon0, lat0]) {
-    const phi = rad(lat), phi0 = rad(lat0), dl = rad(lon - lon0);
-    const k = Math.sqrt(2 / (1 + Math.sin(phi0) * Math.sin(phi) + Math.cos(phi0) * Math.cos(phi) * Math.cos(dl)));
-    return [R * k * Math.cos(phi) * Math.sin(dl), R * k * (Math.cos(phi0) * Math.sin(phi) - Math.sin(phi0) * Math.cos(phi) * Math.cos(dl))];
-}
-const CENTER = [10, 52], CLIP_LON = [-25, 60], CLIP_LAT = [34, 72];
-const fit = (() => {
-    const pts = [];
-    for (let i = 0; i <= 64; i++) {
-        const lon = CLIP_LON[0] + (CLIP_LON[1] - CLIP_LON[0]) * i / 64;
-        const lat = CLIP_LAT[0] + (CLIP_LAT[1] - CLIP_LAT[0]) * i / 64;
-        pts.push(laea([lon, CLIP_LAT[0]], CENTER), laea([lon, CLIP_LAT[1]], CENTER), laea([CLIP_LON[0], lat], CENTER), laea([CLIP_LON[1], lat], CENTER));
-    }
-    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
-    const [minX, maxX, minY, maxY] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
-    const scale = Math.min(1000 / (maxX - minX), 1000 / (maxY - minY));
-    return ([x, y]) => [500 + (x - (minX + maxX) / 2) * scale, 500 - (y - (minY + maxY) / 2) * scale];
-})();
-const projectLonLat = p => fit(laea(p, CENTER));
 
 // --- Geometría ---
 function parsePath(d) {
@@ -324,6 +303,7 @@ const data = {
     sources: 'GeoSim pack europe-2025 (GISCO NUTS 2024, Natural Earth 5.1.1, GeoNames, IISS Military Balance 2024 / SIPRI)'
 };
 
+await addTerrain(data, join(here, '../relieve.png'));
 writeFileSync(out, `// Generado por tools/build-map.mjs. No editar a mano.\nwindow.EUROPA = ${JSON.stringify(data)};\n`);
 const counts = countCells();
 const sorted = [...counts].sort((a, b) => a - b);
