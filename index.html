@@ -251,6 +251,18 @@
         .op-member .btn { padding: 2px 8px; }
         .link { background: none; border: 0; padding: 0; color: var(--text); font: 600 13.5px var(--font); text-decoration: underline; text-decoration-color: var(--line); cursor: pointer; }
         .tpl-box { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 8px; }
+        .tpl-box.directive { margin-top: 0; border-top: 0; padding-top: 0; }
+        .theatre { display: grid; gap: 2px; margin-bottom: 8px; }
+        .theatre-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 2px 8px; font-size: 12.5px; color: var(--muted); }
+        .small-seg button { padding: 3px 7px; font-size: 11.5px; }
+        .suggest { margin: 8px 0; padding: 8px 10px; border-radius: 8px; border: 1px dashed var(--line); display: grid; gap: 6px; }
+        .goal { display: grid; gap: 2px; padding: 2px 8px; font-size: 13px; }
+        .goal .meter { margin: 0; }
+        .budget { display: grid; gap: 4px; padding: 6px 8px; }
+        .budget input[type="range"] { width: 100%; accent-color: var(--signal); }
+        .budget-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin: 4px 0; background: var(--ink); }
+        .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+        .b-recruit { background: #f0c419; } .b-research { background: #62aede; } .b-forts { background: #e8dcc0; } .b-roads { background: #8fd16b; }
         .tpl-box summary { cursor: pointer; font-weight: 600; padding: 4px 8px; }
         .tpl-row { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 5px 8px; font-size: 13.5px; }
         .tpl-row b { display: block; font-weight: 600; }
@@ -576,6 +588,17 @@ const TEMPLATES = {
     division: { name: 'División', units: { infantry: 20, tank: 8, artillery: 4 }, why: 'Tres brigadas juntas: el escalón XX.' }
 };
 const OP_GOLD = [0, 50, 100, 200, 400];   // oro por turno que se puede dar a una operación para refuerzos
+// Directiva nacional: la postura fija la ventaja con la que atacan las ofensivas nuevas y un reparto de la renta.
+const POSTURES = {
+    defensa: { name: 'Defensa total', ratio: 1.8, budget: { recruit: 45, research: 10, forts: 35, roads: 5 }, desc: 'Ofensivas nuevas en «cauta» (1,8 a 1). Mucho oro para fortificar.' },
+    desgaste: { name: 'Desgaste', ratio: 1.3, budget: { recruit: 50, research: 20, forts: 15, roads: 10 }, desc: 'Ataques solo con ventaja (1,3 a 1); la línea aguanta el resto.' },
+    limitada: { name: 'Ofensiva limitada', ratio: 1.3, budget: { recruit: 60, research: 15, forts: 5, roads: 20 }, desc: 'Una o dos ofensivas hacia objetivos concretos, con carreteras para abastecerlas.' },
+    total: { name: 'Guerra total', ratio: 1, budget: { recruit: 85, research: 5, forts: 5, roads: 5 }, desc: 'Ofensivas nuevas en «agresiva» (1 a 1) y casi todo a reclutar.' }
+};
+const BUDGET_KEYS = { recruit: 'Reclutar', research: 'Investigar', forts: 'Fortificar', roads: 'Carreteras' };
+const PRIORITY = { alta: 3, media: 2, baja: 1 };
+const newCommand = () => ({ posture: 'desgaste', spend: false, budget: { ...POSTURES.desgaste.budget }, share: 60, pools: { research: 0, forts: 0, roads: 0 },
+    goals: [], goalsMet: [], priority: {}, rear: false });
 
 // --- Investigación ---
 // Coste: turnos de renta según el nivel (con un mínimo), un 10 % más caro por cada investigación ya terminada.
@@ -893,7 +916,7 @@ class GameEngine {
         this.nations = E.countries.map((c, id) => ({
             id, key: c.key, name: c.name, color: c.color,
             capitalCell: PROVINCES[c.capital].city, capitalName: PROVINCES[c.capital].cityName,
-            gold: 0, alive: true, recruited: new Map(), overlord: -1, templates: [],
+            gold: 0, alive: true, recruited: new Map(), overlord: -1, templates: [], command: newCommand(),
             tech: { done: new Set(), progress: new Map(), current: [] }   // investigación: hechas, turnos invertidos, en curso
         }));
         const n = this.nations.length;
@@ -957,7 +980,7 @@ class GameEngine {
             forts: G.land.filter(i => this.fort[i]), fortWork: [...this.fortWork].map(([c, w]) => [c, w.owner, w.left]),
             spies: [...this.spies].map(([pid, s]) => [pid, s.since, s.revealedTurn]),
             sieges: [...this.sieges].map(([c, s]) => [c, s.by, s.prev, s.held]),
-            nations: this.nations.map(n => ({ gold: n.gold, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord, templates: n.templates,
+            nations: this.nations.map(n => ({ gold: n.gold, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord, templates: n.templates, command: n.command,
                 tech: { done: [...n.tech.done], progress: [...n.tech.progress], current: [...n.tech.current] } })),
             relations,
             armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used]),
@@ -1054,6 +1077,19 @@ class GameEngine {
             alive: !!n?.alive,
             recruited: new Map(list(n?.recruited).map(x => [provIdx(x?.[0]), int(x?.[1], 0, 1e6, 0)])),
             overlord: natOrNone(n?.overlord ?? -1),
+            command: (() => {
+                const c = n?.command ?? {}, out = newCommand();
+                if (Object.prototype.hasOwnProperty.call(POSTURES, c.posture)) out.posture = c.posture;
+                out.spend = !!c.spend;
+                out.share = int(c.share, 0, 100, 60);
+                for (const k of Object.keys(BUDGET_KEYS)) out.budget[k] = int(c.budget?.[k], 0, 100, out.budget[k]);
+                for (const k of Object.keys(out.pools)) out.pools[k] = int(c.pools?.[k], 0, 1e8, 0);
+                out.goals = [...new Set(list(c.goals).slice(0, 400).map(provIdx))];
+                out.goalsMet = [...new Set(list(c.goalsMet).map(nat))];
+                for (const [k, v] of Object.entries(c.priority ?? {})) if (PRIORITY[v] && Number.isInteger(+k) && +k >= 0 && +k < NN) out.priority[+k] = v;
+                out.rear = !!c.rear;
+                return out;
+            })(),
             templates: list(n?.templates).slice(0, 12).map(t => ({ name: str(t?.name, 40) || 'Plantilla', units: { infantry: int(t?.units?.infantry, 0, 99, 0), tank: int(t?.units?.tank, 0, 99, 0), artillery: int(t?.units?.artillery, 0, 99, 0) } }))
                 .filter(t => countUnits(t.units) > 0),
             tech: techOf(n?.tech)
@@ -1726,6 +1762,7 @@ class GameEngine {
             else if (res === 'fortified') out.fortified++;
             else if (res === 'cancelled') out.cancelled.push(name?.name ?? 'su objetivo');
         }
+        this.directive(id);
         // Los refuerzos de las operaciones (reclutar y mandar a su zona) no dependen de la automatización.
         this.stepReinforcements(id);
         // Luego las operaciones: las automáticas siempre; las asistidas, cuando se piden (botón o confirmación).
@@ -1801,7 +1838,7 @@ class GameEngine {
         let name = opts.name ?? base;
         for (let i = 2; !opts.name && taken.has(name); i++) name = `${base} ${i}`;
         const op = { id: this.nextOpId++, owner, kind, name, cells: kind === 'ofensiva' ? cells : [...new Set(cells)],
-            ratio: opts.ratio ?? (kind === 'defensa' ? 1.8 : 1.3), auto: opts.auto ?? 'auto', paused: false, fortify: !!opts.fortify,
+            ratio: opts.ratio ?? (kind === 'defensa' ? 1.8 : POSTURES[this.nations[owner].command.posture].ratio), auto: opts.auto ?? 'auto', paused: false, fortify: !!opts.fortify,
             since: this.turn, waiting: 0, uncovered: 0, gold: OP_GOLD.includes(opts.gold) ? opts.gold : 0, template: opts.template ?? 'auto', pool: 0, formed: 0, form: null };
         this.ops.set(op.id, op);
         this.orderVersion++;
@@ -1933,7 +1970,7 @@ class GameEngine {
             if (op.auto !== 'manual') {
                 const strength = a => unitPower(a.units, 'atk', rules) + unitPower(a.units, 'def', rules);
                 const pool = this.opMembers(op).filter(a => !a.order).sort((x, y) => strength(y) - strength(x));
-                const needy = this.opsOf(id).filter(o => o !== op && o.kind !== 'reserva' && !o.paused).map(o => [o, this.opNeed(o)]).filter(([, n]) => n > 0).sort((x, y) => y[1] - x[1]);
+                const needy = this.opsOf(id).filter(o => o !== op && o.kind !== 'reserva' && !o.paused).map(o => [o, this.opNeed(o) * this.priorityOf(o)]).filter(([, n]) => n > 0).sort((x, y) => y[1] - x[1]);
                 for (const [o] of needy) {
                     const a = pool.shift();
                     if (!a) break;
@@ -2003,18 +2040,19 @@ class GameEngine {
         return best >= 0 ? best : anchor;
     }
     stepReinforcements(id) {
-        for (const op of this.opsOf(id)) if (!op.paused && (op.gold || op.form)) this.reinforce(op);
+        for (const op of this.opsOf(id)) if (!op.paused && (op.gold || op.form || op.extra)) this.reinforce(op);
     }
     reinforce(op) {
         const id = op.owner, n = this.nations[id];
         if (op.poolTurn !== this.turn) {   // una vez por turno
             op.poolTurn = this.turn;
             const tpl = this.opTemplate(op);
-            op.pool = Math.min((op.pool ?? 0) + op.gold, Math.max(op.gold * 4, this.templateCost(id, tpl.units) * 2));
+            op.pool = Math.min((op.pool ?? 0) + op.gold, Math.max(op.gold * 4, this.templateCost(id, tpl.units) * 2)) + (op.extra ?? 0);
+            op.extra = 0;
         }
         let f = op.form;
         if (!f) {
-            if (!op.gold) return;
+            if (!op.gold && op.pool < this.templateCost(id, this.opTemplate(op).units) / 4) return;
             const tpl = this.opTemplate(op);
             f = op.form = { name: tpl.name, units: copyUnits(tpl.units), zone: this.formZone(op), recruited: emptyUnits(), pending: [] };
         }
@@ -2068,6 +2106,138 @@ class GameEngine {
         let moving = 0;
         for (const a of this.armies.values()) if (a.form === op.id && a !== at) moving += countUnits(a.units);
         return { total, done, ready, moving, waiting: f.pending.reduce((s, [, u]) => s + countUnits(u), 0) };
+    }
+
+    // --- Directiva nacional: postura, objetivos, presupuesto, teatros y retaguardia ---
+    // nation.command = { posture, spend, budget, share, pools, goals: [provincias], goalsMet: [países], priority: { país: 'alta'|… }, rear }
+    // Teatro (frente) de una operación: el país enemigo de su objetivo o el más cercano a sus casillas (-1 si ninguno).
+    opFront(op) {
+        const key = `${this.version}:${this.turn}:${this.blocVersion}:${op.cells.join(',').length}:${op.cells[op.cells.length - 1]}`;
+        if (op._frontKey === key) return op._front;
+        let front = -1;
+        const id = op.owner, obj = op.cells[op.cells.length - 1];
+        if (op.kind === 'ofensiva' && this.owner[obj] !== id && this.owner[obj] >= 0) front = this.owner[obj];
+        else {
+            const enemies = this.enemiesOf(id);
+            if (enemies.length) {
+                const dist = this.field(id, op.cells);
+                let best = 1e9;
+                for (const c of G.land) if (dist[c] < best && enemies.includes(this.owner[c])) { best = dist[c]; front = this.owner[c]; }
+            }
+        }
+        op._frontKey = key; op._front = front;
+        return front;
+    }
+    priorityOf(op) { const f = this.opFront(op); return PRIORITY[this.nations[op.owner].command.priority[f] ?? 'media'] ?? 2; }
+    setPosture(id, key) {
+        const c = this.nations[id].command;
+        if (!POSTURES[key]) return;
+        c.posture = key;
+        c.budget = { ...POSTURES[key].budget };
+    }
+    // Progreso de los objetivos estratégicos: provincias en tu poder de las marcadas, agrupadas por su dueño legal.
+    goalProgress(id) {
+        const c = this.nations[id].command, byNation = new Map();
+        for (const pid of c.goals) {
+            const p = PROVINCES[pid], k = this.legal[p.city] === id ? p.country : this.legal[p.city];   // de quién era o es
+            if (!byNation.has(k)) byNation.set(k, { nation: k, total: 0, held: 0 });
+            const e = byNation.get(k);
+            e.total++;
+            if (this.owner[p.city] === id) e.held++;
+        }
+        return [...byNation.values()];
+    }
+    toggleGoal(id, pid) {
+        const c = this.nations[id].command, i = c.goals.indexOf(pid);
+        if (i >= 0) c.goals.splice(i, 1); else if (c.goals.length < 400) c.goals.push(pid);
+        this.orderVersion++;
+    }
+    // Lo que hace la directiva cada turno, antes de los refuerzos de las operaciones.
+    directive(id) {
+        const n = this.nations[id], c = n.command;
+        // Objetivos cumplidos frente a un país en guerra: se avisa una vez.
+        for (const gp of this.goalProgress(id)) {
+            const met = gp.total > 0 && gp.held === gp.total;
+            if (met && !c.goalsMet.includes(gp.nation)) {
+                c.goalsMet.push(gp.nation);
+                if (id === this.player) this.log(`Objetivos estratégicos cumplidos frente a ${this.nm(gp.nation)}: es buen momento para proponer la paz.`);
+            } else if (!met && c.goalsMet.includes(gp.nation)) c.goalsMet.splice(c.goalsMet.indexOf(gp.nation), 1);
+        }
+        // Retaguardia: con una reserva activa, lo que sobra en las ciudades sin peligro va a la reserva (deja una infantería).
+        if (c.rear && this.enemiesOf(id).length) {
+            const res = this.opsOf(id).find(o => o.kind === 'reserva' && !o.paused && o.auto !== 'manual');
+            if (res) for (const a of [...this.armies.values()]) {
+                if (a.owner !== id || a.op || a.order || a.form || CITY_OF[a.cell] < 0 || countUnits(a.units) < 2 || this.armyOn(a.cell) !== a) continue;
+                if (this.threat(id, a.cell) === 0) { a.op = res.id; this.orderVersion++; }
+            }
+        }
+        if (!c.spend) return;
+        // Presupuesto: una parte de la renta (share) se reparte según el presupuesto; el resto queda para ti.
+        const income = Math.max(0, this.income(id)) * c.share / 100, total = Object.values(c.budget).reduce((x, y) => x + y, 0) || 1;
+        const part = k => Math.floor(income * c.budget[k] / total);
+        // Reclutar: a las operaciones, más a las de prioridad alta y a las que piden ayuda.
+        const ops = this.opsOf(id).filter(o => !o.paused);
+        if (ops.length) {
+            const w = ops.map(o => this.priorityOf(o) * (1 + this.opNeed(o))), sum = w.reduce((x, y) => x + y, 0);
+            ops.forEach((o, i) => { o.extra = (o.extra ?? 0) + Math.floor(part('recruit') * w[i] / sum); });
+        }
+        c.pools.research = Math.min(c.pools.research + part('research'), income * 40 + 1000);
+        c.pools.forts = Math.min(c.pools.forts + part('forts'), income * 40 + 1000);
+        c.pools.roads = Math.min(c.pools.roads + part('roads'), income * 40 + 1000);
+        // Investigar lo que investigaría la IA en tu lugar, cuando lo guardado alcance.
+        if (n.tech.current.length < this.rules(id).labs) {
+            const tech = this.aiTechChoice(id);
+            if (tech && this.techState(id, tech) === 'open') {
+                const cost = this.researchCost(id, tech);
+                if (c.pools.research >= cost && n.gold >= cost && this.startResearch(id, tech)) c.pools.research -= cost;
+            } else if (tech && this.techState(id, tech) === 'paused') this.startResearch(id, tech);
+        }
+        // Fortificar las ciudades más amenazadas.
+        const fortCost = this.rules(id).fortCost;
+        if (c.pools.forts >= fortCost) {
+            const cities = this.citiesOf(id).filter(p => !this.fort[p.city] && !this.fortWork.has(p.city) && this.legal[p.city] === id)
+                .map(p => [p.city, this.threat(id, p.city)]).filter(([, t]) => t > 0).sort((x, y) => y[1] - x[1]);
+            for (const [cell] of cities) {
+                if (c.pools.forts < fortCost || n.gold < fortCost) break;
+                this.buildFort(id, { cells: [cell], path: [cell], cost: fortCost, cls: 'fort' });
+                c.pools.forts -= fortCost;
+                if (id === this.player) this.log(`Directiva: se fortifica ${this.placeName(cell)}.`);
+            }
+        }
+        // Carreteras hasta la ciudad más valiosa que aún no esté unida a la capital.
+        if (c.pools.roads >= CONFIG.ROAD_COST * 2 && this.owner[n.capitalCell] === id) {
+            const e = this.economy(id), loose = this.citiesOf(id).filter(p => !e.connected.has(p.id)).sort((x, y) => y.value - x.value)[0];
+            const plan = loose ? this.planRoad(id, loose.city, x => e.seen[x] === 1, 1) : null;
+            if (plan && plan.cost <= c.pools.roads && plan.cost <= n.gold && this.buildRoad(id, plan)) {
+                c.pools.roads -= plan.cost;
+                if (id === this.player) this.log(`Directiva: carretera hasta ${loose.cityName} (${plan.cost} de oro).`);
+            }
+        }
+    }
+    // Propuestas de operaciones para un frente sin ninguna: línea en la frontera y ofensiva sobre la ciudad más cercana.
+    frontSuggestions(id) {
+        const out = [];
+        const fronts = new Set(this.opsOf(id).map(op => this.opFront(op)));
+        for (const e of this.enemiesOf(id)) {
+            if (fronts.has(e)) continue;
+            const border = G.land.filter(c => this.owner[c] === id && [0, 1, 2, 3, 4, 5].some(d => { const j = G.nb[c * 6 + d]; return j >= 0 && isLand(j) && this.owner[j] === e; }));
+            if (!border.length) continue;
+            // Encadena las casillas de la frontera de vecina en vecina, empezando por un extremo.
+            const left = new Set(border), line = [];
+            let cur = border.reduce((m, c) => (G.cx[c] + G.cy[c] < G.cx[m] + G.cy[m] ? c : m), border[0]);
+            while (cur !== undefined && line.length < 40) {
+                line.push(cur); left.delete(cur);
+                let next, nd = Infinity;
+                for (const c of left) { const d = (G.cx[c] - G.cx[cur]) ** 2 + (G.cy[c] - G.cy[cur]) ** 2; if (d < nd) { nd = d; next = c; } }
+                cur = next;
+            }
+            const steps = this.field(id, border);
+            const city = PROVINCES.filter(p => this.owner[p.city] === e).sort((x, y) => steps[x.city] - steps[y.city])[0];
+            let start = border[0];
+            if (city) { const back = this.field(id, [city.city]); start = border.reduce((m, c) => (back[c] < back[m] ? c : m), border[0]); }
+            out.push({ enemy: e, line, attack: city ? [start, city.city] : null, target: city?.cityName });
+        }
+        return out;
     }
 
     // Movimientos que haría una operación asistida, sin hacerlos: se juegan en una copia de la partida.
@@ -2934,6 +3104,15 @@ class GameEngine {
         return res;
     }
     playerClearOrder(army) { if (army?.owner === this.player) this.clearOrder(army); }
+    playerCommand(key, value) {
+        const c = this.nations[this.player].command;
+        if (key === 'posture') this.setPosture(this.player, value);
+        else if (key === 'spend' || key === 'rear') c[key] = !c[key];
+        else if (key === 'share') c.share = Math.max(0, Math.min(100, Math.round(+value) || 0));
+        else if (key in BUDGET_KEYS) c.budget[key] = Math.max(0, Math.min(100, Math.round(+value) || 0));
+        else if (key === 'priority') { const [nation, level] = String(value).split(':'); if (PRIORITY[level]) c.priority[+nation] = level; }
+        this.orderVersion++;
+    }
     playerSaveTemplate(name, units) {
         const list = this.nations[this.player].templates;
         if (!countUnits(units) || list.length >= 12) return false;
@@ -4052,6 +4231,7 @@ class MapView {
             const [sx, sy] = this.toScreen(wx, wy);
             if (!visible(sx, sy)) continue;
             if (far && !pose?.moving && a.owner !== g.player && !g.atWar(g.player, a.owner)) continue;
+            if (far && a.owner === g.player && a.op && g.ops.has(a.op) && !pose?.moving) continue;   // de lejos, una ficha por operación
             if (!seen(wx, wy, a.cell)) continue;
             const mine = a.owner === g.player;
             const view = g.armyView(g.player, a);
@@ -4144,7 +4324,7 @@ class MapView {
                 const m = pts[Math.floor((pts.length - 1) / 2)], n2 = pts[Math.min(pts.length - 1, Math.floor((pts.length - 1) / 2) + 1)];
                 labels.push({ x: (m[0] + n2[0]) / 2, y: (m[1] + n2[1]) / 2 - w * 1.2 - 4, text: it.name, color: it.color });
             } else if (it.kind === 'defensa') {
-                ctx.beginPath(); pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+                ctx.beginPath(); pts.forEach(([x, y], i) => (i && G.dirTo(it.cells[i - 1], it.cells[i]) >= 0 ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
                 if (pts.length === 1) { ctx.arc(pts[0][0], pts[0][1], 3, 0, Math.PI * 2); }
                 ctx.strokeStyle = 'rgba(21,26,18,0.85)'; ctx.lineWidth = 5; ctx.stroke();
                 ctx.strokeStyle = it.color; ctx.lineWidth = 2.4; if (it.draft) ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
@@ -4153,7 +4333,7 @@ class MapView {
                 ctx.beginPath();
                 for (let i = 0; i < it.cells.length - 1; i++) {
                     const a = it.cells[i], b = it.cells[i + 1], [x0, y0] = pts[i], [x1, y1] = pts[i + 1];
-                    const len = Math.hypot(x1 - x0, y1 - y0); if (len < 1) continue;
+                    const len = Math.hypot(x1 - x0, y1 - y0); if (len < 1 || G.dirTo(a, b) < 0) continue;
                     let nx = -(y1 - y0) / len, ny = (x1 - x0) / len;
                     const wx = (G.cx[a] + G.cx[b]) / 2, wy = (G.cy[a] + G.cy[b]) / 2, side = G.cellAt(wx + nx * G.S * 1.6, wy + ny * G.S * 1.6);
                     if (side >= 0 && isLand(side) && g.owner[side] === g.player) { nx = -nx; ny = -ny; }
@@ -4175,7 +4355,7 @@ class MapView {
                 labels.push({ x, y: y - rr * 0.9 - 9, text: `ZR · ${it.name}`, color: it.color });
             }
             // Anillo bajo los ejércitos de la operación
-            if (it.op && hexPx >= 4) {
+            if (it.op && hexPx >= FAR_HEX) {   // de lejos se ve la ficha de la operación, no las de cada ejército
                 const rr = Math.max(9, Math.min(24, hexPx * 1.25));
                 ctx.strokeStyle = it.color; ctx.lineWidth = 3;
                 for (const a of g.opMembers(it.op)) {
@@ -4186,6 +4366,20 @@ class MapView {
                 }
             }
             ctx.globalAlpha = 1;
+        }
+        // De lejos, una ficha por operación en el centro de sus ejércitos: tipo que más pesa, escalón y unidades.
+        if (hexPx < FAR_HEX) for (const it of list) {
+            if (!it.op) continue;
+            const members = g.opMembers(it.op);
+            if (!members.length) continue;
+            const units = emptyUnits();
+            let wx = 0, wy = 0;
+            for (const a of members) { for (const k of UNIT_KEYS) units[k] += a.units[k]; wx += G.cx[a.cell]; wy += G.cy[a.cell]; }
+            const [x, y] = this.toScreen(wx / members.length, wy / members.length), n = countUnits(units);
+            if (x < -40 || y < -40 || x > this.w + 40 || y > this.h + 40) continue;
+            this.drawCounter({ owner: g.player, type: dominantType(units), n, echelon: echelonOf(n).mark, level: 0, mine: true, alpha: 1 }, x, y, 12, font);
+            ctx.strokeStyle = it.color; ctx.lineWidth = 2.5; ctx.strokeRect(x - 15, y - 11, 30, 19);
+            labels.push({ x, y: y + 20, text: it.name, color: it.color });
         }
         // Propuesta de las asistidas: movimientos en blanco discontinuo, ataques en rojo.
         const pr = ui?.proposal;
@@ -4352,7 +4546,10 @@ class GameUI {
         document.addEventListener('input', e => this.onInput(e));
         document.addEventListener('change', e => this.onChange(e));
         document.addEventListener('keydown', e => this.onKey(e));
-        document.addEventListener('toggle', e => { if (e.target.matches?.('[data-tpl-box]')) this.tplOpen = e.target.open; }, true);
+        document.addEventListener('toggle', e => {
+            if (e.target.matches?.('[data-tpl-box]')) this.tplOpen = e.target.open;
+            if (e.target.matches?.('[data-dir-box]')) this.dirOpen = e.target.open;
+        }, true);
         $('#import-file').addEventListener('change', async e => {
             const file = e.target.files[0];
             e.target.value = '';
@@ -4925,6 +5122,16 @@ class GameUI {
             case 'op-end': { const op = g.ops.get(+d.id); if (op) { g.endOp(op, 'terminada por orden tuya'); this.focusOp = null; } break; }
             case 'op-add-near': { const op = g.ops.get(+d.id); if (op) for (const a of g.nearbyFree(op, 4)) g.assignArmy(a, op.id); break; }
             case 'op-unassign': g.assignArmy(g.armies.get(+d.army), 0); break;
+            case 'cmd': g.playerCommand(d.key, d.value); break;
+            case 'op-suggest': {
+                const sg = g.frontSuggestions(g.player).find(x => x.enemy === +d.enemy);
+                if (!sg) return;
+                const op = d.kind === 'defensa' ? g.playerCreateOp('defensa', sg.line) : g.playerCreateOp('ofensiva', sg.attack);
+                if (op) this.focusOp = op.id;
+                break;
+            }
+            case 'goal': g.toggleGoal(g.player, +d.pid); break;
+            case 'open-command': this.tab = 'mando'; this.drawerOpen = true; break;
             case 'tpl-step': { const u = this.tplDraft.units; u[d.unit] = Math.max(0, Math.min(60, u[d.unit] + +d.delta)); this.tplOpen = true; break; }
             case 'tpl-save': if (g.playerSaveTemplate(this.tplDraft.name, this.tplDraft.units)) this.tplDraft = null; this.tplOpen = true; break;
             case 'tpl-del': g.playerDeleteTemplate(+d.index); this.tplOpen = true; break;
@@ -5102,6 +5309,11 @@ class GameUI {
             $('#replay').hidden = true;
         }
         g.finishAiPhase();
+        const myOps = g.opsOf(g.player);
+        if (myOps.length) {
+            const st = myOps.map(op => this.opState(op)), warn = st.filter(([, c]) => c === 'warn').length;
+            this.notify(`Parte de operaciones: ${plural(myOps.length, 'operación', 'operaciones')}${warn ? `, <b>${warn} ${warn === 1 ? 'pide' : 'piden'} atención</b> (${myOps.filter((op, i) => st[i][1] === 'warn').map(op => esc(op.name)).slice(0, 3).join(', ')})` : ', todas en marcha'}.`, 'open-command', 'Ver el mando');
+        }
         for (const t of g.nations[g.player].tech.done) if (!knew.has(t)) this.notify(`${uiIcon('check')} Investigación terminada: <b>${TECH_BY_ID.get(t).name}</b>.`, 'open-research', 'Ver investigación');
         writeSave('auto', g);
         this.select(this.selected);
@@ -5170,6 +5382,19 @@ class GameUI {
         if (e.target.id === 'nation-search') { this.filter = e.target.value; this.renderNationList(); }
         if (e.target.id === 'bloc-name') this.blocName = e.target.value;
         if (e.target.id === 'tpl-name' && this.tplDraft) this.tplDraft.name = e.target.value;
+        if (e.target.dataset.cmd) {   // deslizadores del presupuesto: se actualiza el texto sin redibujar (para poder arrastrar)
+            this.game.playerCommand(e.target.dataset.cmd, e.target.value);
+            const c = this.game.nations[this.game.player].command, total = Object.values(c.budget).reduce((x, y) => x + y, 0) || 1;
+            const spend = Math.floor(Math.max(0, this.game.income(this.game.player)) * c.share / 100);
+            const out = document.querySelector(`label[for="cmd-share"] output`);
+            if (out) out.textContent = `${c.share} % · ${spend} de oro por turno`;
+            for (const k of Object.keys(BUDGET_KEYS)) {
+                const o = document.querySelector(`label[for="cmd-${k}"] output`);
+                if (o) o.textContent = `${Math.round(100 * c.budget[k] / total)} % · ${Math.floor(spend * c.budget[k] / total)} de oro`;
+                const bar = document.querySelector(`.budget-bar .b-${k}`);
+                if (bar) bar.style.flex = c.budget[k];
+            }
+        }
     }
 
     onChange(e) {
@@ -5402,6 +5627,14 @@ class GameUI {
                     <div class="row" style="margin-top:8px"><button class="btn" data-action="spy-send" data-pid="${p.id}" ${g.canSpy(p.id) && g.nations[p0].gold >= g.rules(p0).spyCost ? '' : 'disabled'}>Enviar un espía (${g.rules(p0).spyCost} oro)</button></div>`;
             }
             sections.push(`<section class="sec"><h3>Espionaje</h3>${body}</section>`);
+        }
+
+        // Objetivo estratégico de la directiva
+        if (this.tool === 'command' && g.owner[p.city] !== p0) {
+            const on = g.nations[p0].command.goals.includes(p.id);
+            sections.push(`<section class="sec"><h3>Objetivo estratégico</h3>
+                <div class="row"><button class="btn ${on ? 'on' : ''}" data-action="goal" data-pid="${p.id}">${on ? 'Quitar de los objetivos' : 'Marcar como objetivo'}</button></div>
+                <p class="note">Los objetivos de la directiva se siguen en la pestaña Mando; al tenerlos todos frente a un país, te avisa para proponer la paz.</p></section>`);
         }
 
         // Diplomacia rápida con el dueño de la casilla
@@ -5892,13 +6125,50 @@ class GameUI {
                     <button class="btn ghost" data-action="op-end" data-id="${op.id}">Terminar</button></div>
             </div>`;
         }
+        // Operaciones agrupadas por teatro (país enemigo), con su prioridad; y propuestas para los frentes sin ninguna.
+        const command = g.nations[p0].command, groups = new Map();
+        for (const o of ops) { const f = g.opFront(o); if (!groups.has(f)) groups.set(f, []); groups.get(f).push(o); }
+        const theatre = ([f, list]) => `<div class="theatre"><div class="theatre-head"><span>${f >= 0 ? `Frente con ${this.nationChip(f)}` : 'Sin frente'}</span>
+            ${f >= 0 ? `<div class="seg small-seg">${Object.keys(PRIORITY).map(k => `<button data-action="cmd" data-key="priority" data-value="${f}:${k}" class="${(command.priority[f] ?? 'media') === k ? 'on' : ''}" title="Prioridad ${k}: los refuerzos y la reserva van antes a los frentes de prioridad alta">${k[0].toUpperCase() + k.slice(1)}</button>`).join('')}</div>` : ''}</div>
+            ${list.map(row).join('')}</div>`;
+        const sug = g.frontSuggestions(p0).map(sg => `<div class="suggest"><p class="small">Frente con <b>${g.nm(sg.enemy)}</b> sin operaciones.</p><div class="row">
+            <button class="btn" data-action="op-suggest" data-enemy="${sg.enemy}" data-kind="defensa" ${ops.length >= cap ? 'disabled' : ''}>Línea en la frontera</button>
+            ${sg.attack ? `<button class="btn" data-action="op-suggest" data-enemy="${sg.enemy}" data-kind="ofensiva" ${ops.length >= cap ? 'disabled' : ''}>Ofensiva sobre ${esc(sg.target)}</button>` : ''}</div></div>`).join('');
         body.innerHTML = `
-            <p class="group-title" style="margin-top:0">Operaciones · ${ops.length} de ${cap}</p>
+            ${this.directiveSection()}
+            <p class="group-title">Operaciones · ${ops.length} de ${cap}</p>
             <div class="row">${Object.entries(OP_KINDS).map(([k, v]) => `<button class="btn" data-action="op-new" data-kind="${k}" ${ops.length >= cap ? 'disabled' : ''}>${v.icon.replace('<svg ', '<svg width="15" height="15" aria-hidden="true" ')}${v.name}</button>`).join('')}</div>
-            <div class="op-list">${ops.map(row).join('') || '<p class="note" style="margin:8px">Sin operaciones. Dibuja una flecha de ofensiva, una línea de defensa o una zona de reserva (tecla 5) y asígnale ejércitos: se moverán solos turno a turno.</p>'}</div>
+            ${sug}
+            <div class="op-list">${[...groups].map(theatre).join('') || '<p class="note" style="margin:8px">Sin operaciones. Dibuja una flecha de ofensiva, una línea de defensa o una zona de reserva (tecla 5) y asígnale ejércitos: se moverán solos turno a turno.</p>'}</div>
             ${detail}
             <p class="note" style="margin-top:10px">Tu estado mayor lleva ${cap} operaciones a la vez: ${rules.commandOps} por Doctrina y una más por cada 20 provincias.</p>
             ${this.templatesSection()}`;
+    }
+    // Directiva nacional: postura, objetivos estratégicos, presupuesto opcional y retaguardia.
+    directiveSection() {
+        const g = this.game, p0 = g.player, c = g.nations[p0].command, inc = g.income(p0);
+        const total = Object.values(c.budget).reduce((x, y) => x + y, 0) || 1, spend = Math.floor(Math.max(0, inc) * c.share / 100);
+        const goals = g.goalProgress(p0);
+        return `<details class="tpl-box directive" ${this.dirOpen ? "open" : ""} data-dir-box>
+            <summary>Directiva nacional · ${POSTURES[c.posture].name}</summary>
+            <div class="seg" style="margin:6px 8px 0">${Object.entries(POSTURES).map(([k, v]) => `<button data-action="cmd" data-key="posture" data-value="${k}" class="${c.posture === k ? 'on' : ''}">${v.name}</button>`).join('')}</div>
+            <p class="note" style="margin:4px 8px">${POSTURES[c.posture].desc}</p>
+            <p class="group-title">Objetivos estratégicos</p>
+            ${goals.length ? goals.map(gp => `<div class="goal"><span>${g.nm(gp.nation)}: ${gp.held} de ${plural(gp.total, 'provincia', 'provincias')}</span>
+                <div class="meter"><i style="width:${Math.round(100 * gp.held / gp.total)}%"></i></div></div>`).join('')
+                : '<p class="note" style="margin:0 8px">Sin objetivos. Marca provincias como objetivo desde su ficha («Objetivo estratégico»): al tenerlas todas, te avisará de que es buen momento para la paz.</p>'}
+            <p class="group-title">Presupuesto</p>
+            <label class="check small" style="margin:0 8px"><input type="checkbox" data-action="cmd" data-key="spend" ${c.spend ? 'checked' : ''}><span>La directiva gasta por ti una parte de la renta</span></label>
+            ${c.spend ? `<div class="budget">
+                <label class="small" for="cmd-share">Parte de la renta: <output>${c.share} % · ${spend} de oro por turno</output></label>
+                <input type="range" id="cmd-share" min="0" max="100" step="5" value="${c.share}" data-cmd="share">
+                <div class="budget-bar">${Object.keys(BUDGET_KEYS).map(k => `<i style="flex:${c.budget[k]}" class="b-${k}"></i>`).join('')}</div>
+                ${Object.entries(BUDGET_KEYS).map(([k, label]) => `<label class="small" for="cmd-${k}"><i class="dot b-${k}"></i>${label}: <output>${Math.round(100 * c.budget[k] / total)} % · ${Math.floor(spend * c.budget[k] / total)} de oro</output></label>
+                    <input type="range" id="cmd-${k}" min="0" max="100" step="5" value="${c.budget[k]}" data-cmd="${k}">`).join('')}
+                <p class="note">Reclutar va a los refuerzos de tus operaciones (más a las de prioridad alta y a las que piden ayuda). Investigar elige lo que investigaría la IA en tu lugar; Fortificar, tus ciudades más amenazadas; Carreteras, la ciudad más valiosa sin unir a la capital. Guardado: ${c.pools.research} para investigar, ${c.pools.forts} para fortificar, ${c.pools.roads} para carreteras.</p>
+            </div>` : '<p class="note" style="margin:4px 8px">Apagado: el oro lo gastas tú. Las operaciones usan solo el oro por turno que les des.</p>'}
+            <label class="check small" style="margin:8px"><input type="checkbox" data-action="cmd" data-key="rear" ${c.rear ? 'checked' : ''}><span>Retaguardia: en guerra, lo que sobre en las ciudades sin peligro va a tu reserva (deja una infantería)</span></label>
+        </details>`;
     }
     // Refuerzos de una operación: oro por turno, plantilla y cómo va la formación.
     reinforceSection(op) {

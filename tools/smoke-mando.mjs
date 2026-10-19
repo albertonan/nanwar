@@ -463,6 +463,139 @@ const CHECKS = [
         T.eq(g.nations[es].templates.at(-1), { name: 'Paracaidistas', units: { infantry: 6, tank: 3, artillery: 1 } }, 'plantilla propia guardada');
         T.ok([...document.querySelectorAll(`[data-op-template="${op.id}"] option`)].some(o => o.value === 'c0'), 'y elegible en la operación');
         return true;
+    }],
+    ['F4 · la postura fija la ventaja de las ofensivas nuevas y el reparto del presupuesto', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        const [start, out] = T.border(g, es, fr);
+        T.eq(g.createOp(es, 'ofensiva', [start, out]).ratio, 1.3, 'desgaste: 1,3');
+        g.setPosture(es, 'total');
+        T.eq([g.createOp(es, 'ofensiva', [start, out]).ratio, g.nations[es].command.budget], [1, POSTURES.total.budget], 'guerra total: 1 y su reparto');
+        g.setPosture(es, 'defensa');
+        T.eq(g.createOp(es, 'ofensiva', [start, out]).ratio, 1.8, 'defensa total: 1,8');
+        return true;
+    }],
+    ['F4 · la directiva gasta por ti: fortifica lo amenazado, investiga y da oro a los refuerzos', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        const c = g.nations[es].command;
+        g.nations[es].gold = 100000;
+        g.directive(es);
+        T.eq([c.pools.forts, c.pools.research], [0, 0], 'apagada no hace nada');
+        Object.assign(c, { spend: true, share: 100, budget: { recruit: 0, research: 0, forts: 100, roads: 0 } });
+        const before = g.fortWork.size;
+        for (let i = 0; i < 4; i++) g.directive(es);
+        T.ok(g.fortWork.size > before, 'fortifica una ciudad amenazada');
+        c.budget = { recruit: 0, research: 100, forts: 0, roads: 0 };
+        for (let i = 0; i < 12 && !g.nations[es].tech.current.length; i++) g.directive(es);
+        T.ok(g.nations[es].tech.current.length === 1, 'empieza a investigar');
+        c.budget = { recruit: 100, research: 0, forts: 0, roads: 0 };
+        const [, from] = T.plainPair(g, es);
+        const op = g.createOp(es, 'reserva', [from]);
+        g.directive(es);
+        T.ok(op.extra > 0, `da oro a los refuerzos (${op.extra})`);
+        T.turns(g, es, 1);
+        T.ok(op.form && countUnits(op.form.recruited) > 0, 'y la operación recluta con él');
+        return true;
+    }],
+    ['F4 · objetivos estratégicos: progreso y aviso al cumplirlos', () => {
+        const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+        g.start(es);
+        g.declareWar(es, pt);
+        const targets = PROVINCES.filter(p => p.country === pt).slice(0, 2);
+        for (const p of targets) g.toggleGoal(es, p.id);
+        T.eq(g.goalProgress(es), [{ nation: pt, total: 2, held: 0 }], 'dos provincias de Portugal');
+        g.capture(targets[0].city, es, true);
+        g.directive(es);
+        T.eq(g.goalProgress(es)[0].held, 1, 'una tomada');
+        g.capture(targets[1].city, es, true);
+        g.directive(es);
+        T.ok(g.nations[es].command.goalsMet.includes(pt) && g.logs.some(l => l.msg.includes('Objetivos estratégicos cumplidos')), 'aviso de que es momento de la paz');
+        return true;
+    }],
+    ['F4 · teatros: el frente de cada operación, y la reserva atiende antes a la prioridad alta', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+        g.start(es);
+        g.declareWar(es, fr); g.declareWar(es, pt);
+        const [sf, ff] = T.border(g, es, fr), [sp, pp] = T.border(g, es, pt);
+        const a = g.createOp(es, 'ofensiva', [sf, ff]), b = g.createOp(es, 'ofensiva', [sp, pp]);
+        T.eq([g.opFront(a), g.opFront(b)], [fr, pt], 'frentes');
+        const [, from] = T.plainPair(g, es);
+        T.eq(g.opFront(g.createOp(es, 'defensa', [from])) >= 0, true, 'la defensa toma el enemigo más cercano');
+        g.nations[es].command.priority[pt] = 'alta';
+        T.learn(g, es, 'doctrina1');   // cabe una cuarta operación
+        const res = g.createOp(es, 'reserva', [from]);
+        const r1 = T.army(g, es, from, 5);
+        g.assignArmy(r1, res.id);
+        g.executeOp(res);
+        T.eq(r1.op, b.id, 'el ejército va al frente de prioridad alta');
+        return true;
+    }],
+    ['F4 · retaguardia: lo que sobra en las ciudades sin peligro va a la reserva', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        const city = PROVINCES.filter(p => g.owner[p.city] === es && g.threat(es, p.city) === 0)[0].city;
+        g.armyOn(city).units = { infantry: 4, tank: 1, artillery: 0 };
+        const [, from] = T.plainPair(g, es);
+        const res = g.createOp(es, 'reserva', [from]);
+        g.directive(es);
+        T.eq(!!g.armyOn(city).op, false, 'apagada no toca nada');
+        g.nations[es].command.rear = true;
+        g.directive(es);
+        T.eq(g.armyOn(city).op, res.id, 'encendida, pasa a la reserva');
+        g.executeOp(res);
+        T.eq([g.armyOn(city).units, g.armyOn(city).op], [{ infantry: 1, tank: 0, artillery: 0 }, 0], 'y sale dejando una infantería');
+        return true;
+    }],
+    ['F4 · propuestas para un frente nuevo: línea en la frontera y ofensiva sobre la ciudad más cercana', () => {
+        const g = T.uiStart('es'), es = g.player, pt = T.nation('pt');
+        g.declareWar(es, pt);
+        const sg = g.frontSuggestions(es).find(x => x.enemy === pt);
+        T.ok(sg && sg.line.length > 3 && sg.line.every(c => g.owner[c] === es) && g.owner[sg.attack[1]] === pt, 'propuesta con línea y objetivo');
+        ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        document.querySelector(`[data-action="op-suggest"][data-enemy="${pt}"][data-kind="defensa"]`).click();
+        const op = g.opsOf(es).find(o => o.kind === 'defensa');
+        T.ok(op && g.opFront(op) === pt, 'línea creada en ese frente');
+        T.ok(!g.frontSuggestions(es).some(x => x.enemy === pt), 'el frente ya no pide propuesta');
+        ui.view.draw();
+        return true;
+    }],
+    ['F4 · la directiva se guarda y se carga', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.setPosture(es, 'limitada');
+        Object.assign(g.nations[es].command, { spend: true, share: 35, rear: true, priority: { [fr]: 'baja' } });
+        g.toggleGoal(es, PROVINCES.find(p => p.country === fr).id);
+        const data = JSON.parse(JSON.stringify(g.serialize()));
+        data.nations[es].command.priority['999'] = 'alta';
+        data.nations[es].command.posture = 'rendición';
+        const c = GameEngine.load(data).nations[es].command, o = g.nations[es].command;
+        T.eq([c.posture, c.spend, c.share, c.rear, c.budget, c.goals, c.priority], ['desgaste', true, 35, true, o.budget, o.goals, { [fr]: 'baja' }], 'directiva (lo inválido, descartado)');
+        return true;
+    }],
+    ['F4 · interfaz: directiva, objetivo desde la ficha y vista de mando de lejos', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        document.querySelector('[data-action="cmd"][data-key="posture"][data-value="total"]').click();
+        T.eq(g.nations[es].command.posture, 'total', 'postura desde la pestaña');
+        document.querySelector('[data-action="cmd"][data-key="spend"]').click();
+        T.ok(g.nations[es].command.spend && document.querySelector('#cmd-forts'), 'presupuesto encendido con sus deslizadores');
+        const range = document.querySelector('#cmd-forts');
+        range.value = '40'; range.dispatchEvent(new Event('input', { bubbles: true }));
+        T.eq(g.nations[es].command.budget.forts, 40, 'deslizador');
+        const city = PROVINCES.find(p => g.owner[p.city] === fr).city;
+        ui.select(city);
+        document.querySelector('[data-action="goal"]').click();
+        T.eq(g.nations[es].command.goals.length, 1, 'objetivo marcado desde la ficha');
+        const [start] = T.border(g, es, fr);
+        const op = g.playerCreateOp('ofensiva', [start, city]);
+        if (!g.opMembers(op).length) g.assignArmy(T.army(g, es, T.farCell(g, es, start, 1, 3), 3), op.id);
+        ui.view.scale = 0.2; ui.view.draw();
+        ui.view.scale = 3; ui.view.draw();
+        return true;
     }]
 ];
 
