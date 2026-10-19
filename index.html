@@ -415,6 +415,125 @@ const VICTORY_SETUPS = { 0.5: "Dominar el 50 % de Europa", 0.75: "Dominar el 75 
 
 const UNIT_KEYS = Object.keys(CONFIG.TYPES);
 
+// --- Investigación ---
+// Coste: turnos de renta según el nivel (con un mínimo), un 10 % más caro por cada investigación ya terminada.
+CONFIG.RESEARCH = { TURNS: [6, 10, 15], COST_TURNS: [4, 8, 12], COST_MIN: [80, 160, 240], COST_GROWTH: 0.1 };
+
+// Reglas de partida de una nación sin investigar nada. Cada investigación fija algunos de estos valores (fx).
+const baseRules = () => ({
+    types: Object.fromEntries(UNIT_KEYS.map(k => [k, { atk: CONFIG.TYPES[k].atk, def: CONFIG.TYPES[k].def, speed: CONFIG.TYPES[k].speed }])),
+    terrainCost: Object.fromEntries(Object.entries(CONFIG.TERRAIN).map(([k, t]) => [k, t.cost])),
+    roadMove: { ...CONFIG.ROAD_MOVE },
+    riverCrossing: CONFIG.RIVER_CROSSING,
+    ignoreRiver: false,                 // al atacar, el defensor no tiene la orilla a favor
+    flanked: CONFIG.FLANKED_FACTOR, surrounded: CONFIG.SURROUNDED_FACTOR,
+    siegeTurns: CONFIG.SIEGE_TURNS,
+    winnerLoss: 1,                      // multiplicador de las pérdidas al ganar un combate
+    recruitAll: 0, capitalRecruit: 2, highwayRecruit: 1, recruitMult: 1,
+    researchTurns: 1, researchCost: 1, labs: 1,
+    resIndustry: CONFIG.RESOURCE_INDUSTRY, resIndustryMax: CONFIG.RESOURCE_INDUSTRY_MAX,
+    discountMult: 1, maxDiscount: CONFIG.MAX_DISCOUNT, resIncome: 1,
+    roadCost: 1, supplyRoad: CONFIG.SUPPLY_ROAD_RANGE,
+    fortDefense: CONFIG.FORT_DEFENSE, fortTurns: CONFIG.FORT_TURNS, fortCost: CONFIG.FORT_COST,
+    fortCap: CONFIG.MAX_DEFENSE_BONUS, wallCost: MOVE, fortFlankImmune: false,
+    visionArmy: CONFIG.VISION_ARMY, visionTerritory: CONFIG.VISION_TERRITORY,
+    intelExact: false, intelLevels: false,   // ver tipo y número / galones y fortificaciones de lo que está a la vista
+    spyCost: CONFIG.SPY_COST, spySuccess: CONFIG.SPY_SUCCESS, spySuccessHard: CONFIG.SPY_SUCCESS_HARD,
+    spyCatchBase: CONFIG.SPY_CATCH_BASE, spyCatchPerTurn: CONFIG.SPY_CATCH_PER_TURN, spyCatchMax: CONFIG.SPY_CATCH_MAX,
+    spyWide: false                       // el espía informa también de las provincias vecinas y de galones, muros e investigación
+});
+
+const RESEARCH_AREAS = ['Militar', 'Estado', 'Terreno', 'Inteligencia'];
+const RESEARCH_BRANCHES = [
+    { id: 'infanteria', area: 'Militar', name: 'Infantería', sub: 'Atributos de la infantería', icon: 'inf' },
+    { id: 'blindados', area: 'Militar', name: 'Blindados', sub: 'Atributos del tanque', icon: 'tank' },
+    { id: 'artilleria', area: 'Militar', name: 'Artillería', sub: 'Atributos de la artillería', icon: 'art' },
+    { id: 'doctrina', area: 'Militar', name: 'Doctrina', sub: 'Mando, asedio y bajas', icon: 'doc' },
+    { id: 'movilizacion', area: 'Estado', name: 'Movilización', sub: 'Capacidad de reclutar', icon: 'mob' },
+    { id: 'ciencia', area: 'Estado', name: 'Ciencia', sub: 'Tiempo y coste de investigar', icon: 'sci' },
+    { id: 'industria', area: 'Estado', name: 'Industria', sub: 'Recursos más eficientes', icon: 'ind' },
+    { id: 'infraestructura', area: 'Terreno', name: 'Infraestructura', sub: 'Carreteras que llevan más lejos', icon: 'road' },
+    { id: 'movilidad', area: 'Terreno', name: 'Movilidad', sub: 'Mejor paso por cada terreno', icon: 'mnt' },
+    { id: 'fortificacion', area: 'Terreno', name: 'Fortificación', sub: 'Fortalezas aún más duras', icon: 'fort' },
+    { id: 'reconocimiento', area: 'Inteligencia', name: 'Reconocimiento', sub: 'Ver más sin espías', icon: 'eye' },
+    { id: 'espionaje', area: 'Inteligencia', name: 'Espionaje', sub: 'Espías más baratos y duraderos', icon: 'spy' }
+];
+// Por rama, sus tres niveles: [nombre, efectos, cambios «qué · antes · después» para la interfaz, nota].
+const TECH_TREE = {
+    infanteria: [
+        ['Fusil de asalto moderno', { types: { infantry: { atk: 6 } } }, [['Ataque de la infantería', '5', '6']], 'El ataque de la infantería deja de ser simbólico sin quitar su papel a los tanques.'],
+        ['Defensa en profundidad', { types: { infantry: { def: 8 } } }, [['Defensa de la infantería', '6', '8']], 'La tropa barata para sostener líneas rinde aún más en montaña y con fortificación.'],
+        ['Infantería mecanizada', { types: { infantry: { speed: 5 } } }, [['Velocidad de la infantería', '4', '5']], 'Un ejército va a la velocidad de su unidad más lenta: también acelera los ejércitos mixtos.']
+    ],
+    blindados: [
+        ['Blindaje compuesto', { types: { tank: { def: 18 } } }, [['Defensa del tanque', '15', '18']], 'Los tanques aguantan mejor el contraataque tras romper una línea.'],
+        ['Cañón de 120 mm', { types: { tank: { atk: 24 } } }, [['Ataque del tanque', '20', '24']], 'La mejora de ataque más rentable por oro gastado en tropas.'],
+        ['Motor de turbina', { types: { tank: { speed: 8 } } }, [['Velocidad del tanque', '7', '8']], 'Solo se nota en ejércitos de solo tanques: premia las columnas acorazadas.']
+    ],
+    artilleria: [
+        ['Dirección de tiro digital', { types: { artillery: { atk: 46 } } }, [['Ataque de la artillería', '40', '46']], 'Refuerza su papel de romper ciudades y fortificaciones.'],
+        ['Artillería autopropulsada', { types: { artillery: { speed: 4 } } }, [['Velocidad de la artillería', '3', '4']], 'Deja de frenar al resto: iguala a la infantería sin mecanizar.'],
+        ['Contrabatería', { types: { artillery: { def: 6 } } }, [['Defensa de la artillería', '3', '6']], 'Sigue siendo frágil, pero ya no regala la casilla si la atacan sola.']
+    ],
+    doctrina: [
+        ['Mando y control', { flanked: 0.85, surrounded: 0.65 }, [['Rodeado (3 o más lados)', '×0,75', '×0,85'], ['Cercado (5 o más lados)', '×0,5', '×0,65']], 'Suaviza la penalización de los ejércitos rodeados sin anularla.'],
+        ['Guerra de asedio', { siegeTurns: 2 }, [['Turnos para tomar una ciudad', '3', '2']], 'Las ciudades caen antes de que llegue la ayuda.'],
+        ['Sanidad militar', { winnerLoss: 0.7 }, [['Pérdidas al ganar un combate', '100 %', '70 %']], 'Ganar sale más barato: los ejércitos veteranos duran más campañas.']
+    ],
+    movilizacion: [
+        ['Servicio militar', { recruitAll: 1 }, [['Reclutas por turno en cada provincia', 'base', 'base +1']], 'Aparece como «investigación +1» en el desglose de reclutas.'],
+        ['Academias militares', { capitalRecruit: 4, highwayRecruit: 2 }, [['Extra en la capital', '+2', '+4'], ['Extra con autopista', '+1', '+2']], 'Concentra la capacidad donde ya hay más: capital y ciudades con autopista.'],
+        ['Movilización general', { recruitMult: 1.5 }, [['Cupo de cada provincia', '×1', '×1,5']], 'Se aplica al final, sobre la suma. Solo sirve si hay oro para pagar tanta tropa.']
+    ],
+    ciencia: [
+        ['Universidades', { researchTurns: 0.75 }, [['Turnos por nivel', '6 · 10 · 15', '5 · 8 · 11']], 'Ahorra 7 turnos por rama completa.'],
+        ['Institutos de investigación', { researchCost: 0.7 }, [['Coste de investigar', '100 %', '70 %']], 'Libera oro para tropas en partidas largas.'],
+        ['Programa nacional de I+D', { labs: 2 }, [['Investigaciones a la vez', '1', '2']], 'Duplica el ritmo, pero hay que pagar las dos.']
+    ],
+    industria: [
+        ['Extracción moderna', { resIndustry: 0.08, resIndustryMax: 0.8 }, [['Renta por yacimiento que abastece', '+6 %', '+8 %'], ['Tope por provincia', '60 %', '80 %']], 'Premia a quien ha unido sus yacimientos por carretera.'],
+        ['Producción en cadena', { discountMult: 1.5, maxDiscount: 0.6 }, [['Descuento de cada yacimiento', '×1', '×1,5'], ['Tope de descuento', '50 %', '60 %']], 'Tanques y artillería más baratos donde llegan petróleo, hierro y carbón.'],
+        ['Refinerías', { resIncome: 1.5 }, [['Renta directa de los yacimientos', '×1', '×1,5']], 'Hace más valiosos, y más codiciados, los yacimientos.']
+    ],
+    infraestructura: [
+        ['Ingeniería civil', { roadCost: 0.7 }, [['Oro por construir carreteras y autopistas', '100 %', '70 %']], 'Abarata extender la red y, con ella, la renta y el suministro.'],
+        ['Firme de asfalto', { roadMove: { 1: 4 } }, [['Movimiento por tramo de carretera', '½ punto', '⅓ punto']], 'Una infantería recorre 12 tramos de carretera en vez de 8.'],
+        ['Autopistas de alta capacidad', { roadMove: { 2: 3 }, supplyRoad: 6 }, [['Movimiento por tramo de autopista', '⅓ punto', '¼ punto'], ['Suministro desde la red', '4 casillas', '6 casillas']], 'Un tanque recorre 28 tramos de autopista en vez de 21 y abastece frentes más lejanos.']
+    ],
+    movilidad: [
+        ['Tropas de montaña', { terrainCost: { mountain: 2, hills: 1.5 } }, [['Entrar en montaña', '3', '2'], ['Entrar en colinas', '2', '1,5']], 'Clave en los Alpes, los Pirineos, los Cárpatos o los Balcanes.'],
+        ['Tropas de bosque y pantano', { terrainCost: { forest: 1.5, marsh: 2 } }, [['Entrar en bosque', '2', '1,5'], ['Entrar en pantano', '3', '2']], 'Pensada para Escandinavia, el Báltico y las marismas de Polesia.'],
+        ['Pontoneros', { riverCrossing: 0, terrainCost: { lake: 2 }, ignoreRiver: true }, [['Cruzar un río sin puente', '+½', '+0'], ['Cruzar un lago', '4', '2'], ['Defensa del río frente a ti', '×1,25', '×1']], 'Al atacar, el defensor pierde su orilla.']
+    ],
+    fortificacion: [
+        ['Hormigón armado', { fortDefense: 2, fortTurns: 2 }, [['Defensa en casilla fortificada', '×1,75', '×2'], ['Turnos de obra', '3', '2']], 'En montaña o en una capital ya pasa del tope ×3: por eso el nivel 2 lo sube.'],
+        ['Búnkeres', { fortCap: 3.5, wallCost: 2 * MOVE }, [['Tope de defensa si está fortificada', '×3', '×3,5'], ['Cruzar tu muro (el enemigo)', '+1 punto', '+2 puntos']], 'El coste del muro lo pagan los demás según tus reglas.'],
+        ['Casamatas', { fortFlankImmune: true, fortCost: 25 }, [['Rodeado en tu fortificación', '×0,75 / ×0,5', '×1'], ['Oro por casilla fortificada', '40', '25']], 'Una línea fortificada aguanta aunque la envuelvan.']
+    ],
+    reconocimiento: [
+        ['Patrullas de reconocimiento', { visionArmy: 4, visionTerritory: 3 }, [['Visión alrededor de tus ejércitos', '3', '4'], ['Visión más allá de tu territorio', '2', '3']], 'Ves venir los ataques un turno antes. Sin niebla de guerra no tiene efecto.'],
+        ['Inteligencia de señales', { intelExact: true }, [['Ejércitos enemigos a la vista', 'escalón', 'tipo y unidades'], ['Previsión de combate', 'sin porcentaje', 'exacta']], 'Sin ella, la ficha enemiga va vacía con su escalón.'],
+        ['Reconocimiento aéreo', { visionArmy: 6, intelLevels: true }, [['Visión alrededor de tus ejércitos', '4', '6'], ['Galones y fortificaciones a la vista', 'ocultos', 'visibles']], 'Sabes si una línea es de sacos terreros o de casamatas antes de atacarla.']
+    ],
+    espionaje: [
+        ['Red de informantes', { spyCost: 40, spySuccess: 0.8, spySuccessHard: 0.65 }, [['Coste de un espía', '60', '40'], ['Probabilidad de informar', '70 %', '80 %']], 'Da para tener uno en cada provincia fronteriza en guerra.'],
+        ['Tapaderas', { spyCatchBase: 0.04, spyCatchPerTurn: 0.02, spyCatchMax: 0.35 }, [['Riesgo de captura el primer turno', '8 %', '4 %'], ['Aumento por turno', '+4 %', '+2 %'], ['Riesgo máximo', '60 %', '35 %']], 'Un espía dura de media unos 7 turnos en vez de 4.'],
+        ['Agentes dobles', { spyWide: true }, [['Lo que cubre el informe', 'su provincia', 'y las vecinas del mismo país'], ['De qué informa', 'tropas', 'también galones, muros e investigación']], 'Desde cualquier provincia se sabe qué investiga el enemigo.']
+    ]
+};
+const TECHS = RESEARCH_BRANCHES.flatMap(b => TECH_TREE[b.id].map(([name, fx, changes, note], i) => ({ id: `${b.id}${i + 1}`, branch: b.id, tier: i + 1, name, fx, changes, note })));
+const TECH_BY_ID = new Map(TECHS.map(t => [t.id, t]));
+const BRANCH_BY_ID = new Map(RESEARCH_BRANCHES.map(b => [b.id, b]));
+// Rama cuyo nivel muestran los galones de cada tipo de tropa.
+const UNIT_BRANCH = { infantry: 'infanteria', tank: 'blindados', artillery: 'artilleria' };
+const mergeFx = (into, fx) => {
+    for (const [k, v] of Object.entries(fx)) {
+        if (v && typeof v === 'object') mergeFx(into[k], v);
+        else into[k] = v;
+    }
+    return into;
+};
+
 // Generador aleatorio con estado en rng.state, para poder guardar y reanudar la partida exactamente.
 function mulberry32(seed) {
     const rng = () => {
@@ -557,6 +676,8 @@ class GameEngine {
         this.roadVersion = 0;   // cambia al construir
         this.blocVersion = 0;   // cambia con las alianzas
         this.econCache = [];
+        this.techVersion = 0;       // cambia al terminar cualquier investigación
+        this.rulesCache = [];
         this.dev = new Uint16Array(PROVINCES.length);   // desarrollo de cada provincia, en milésimas de su renta
         this.devVersion = 0;
         this.supplyCache = [];
@@ -580,7 +701,8 @@ class GameEngine {
         this.nations = E.countries.map((c, id) => ({
             id, key: c.key, name: c.name, color: c.color,
             capitalCell: PROVINCES[c.capital].city, capitalName: PROVINCES[c.capital].cityName,
-            gold: 0, alive: true, recruited: new Map(), overlord: -1
+            gold: 0, alive: true, recruited: new Map(), overlord: -1,
+            tech: { done: new Set(), progress: new Map(), current: [] }   // investigación: hechas, turnos invertidos, en curso
         }));
         const n = this.nations.length;
         this.relations = Array.from({ length: n }, () => []);
@@ -643,7 +765,8 @@ class GameEngine {
             forts: G.land.filter(i => this.fort[i]), fortWork: [...this.fortWork].map(([c, w]) => [c, w.owner, w.left]),
             spies: [...this.spies].map(([pid, s]) => [pid, s.since, s.revealedTurn]),
             sieges: [...this.sieges].map(([c, s]) => [c, s.by, s.prev, s.held]),
-            nations: this.nations.map(n => ({ gold: n.gold, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord })),
+            nations: this.nations.map(n => ({ gold: n.gold, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord,
+                tech: { done: [...n.tech.done], progress: [...n.tech.progress], current: [...n.tech.current] } })),
             relations,
             armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used]),
             nextArmyId: this.nextArmyId,
@@ -712,11 +835,25 @@ class GameEngine {
         g.spies = new Map(list(data.spies).map(x => [provIdx(x?.[0]), { since: int(x?.[1], 0, 1e6, 0), revealedTurn: int(x?.[2], -1, 1e6, -1) }]));
         g.sieges = new Map(list(data.sieges).map(x => [cellIdx(x?.[0]), { by: nat(x?.[1]), prev: nat(x?.[2]), held: int(x?.[3], 0, CONFIG.SIEGE_TURNS, 0) }])
             .filter(([c]) => CITY_OF[c] >= 0));
+        // Investigación: solo identificadores conocidos, cada nivel con el anterior hecho y progresos posibles.
+        const techOf = v => {
+            const ids = new Set(list(v?.done).map(x => str(x, 40)));
+            const done = new Set(), ready = t => t.tier === 1 || done.has(t.branch + (t.tier - 1));
+            for (const t of TECHS) if (ids.has(t.id) && ready(t)) done.add(t.id);
+            const progress = new Map();
+            for (const x of list(v?.progress)) {
+                const t = TECH_BY_ID.get(str(x?.[0], 40)), p = Number(x?.[1]);
+                if (t && !done.has(t.id) && ready(t) && Number.isInteger(p) && p >= 0 && p < CONFIG.RESEARCH.TURNS[t.tier - 1]) progress.set(t.id, p);
+            }
+            const current = [...new Set(list(v?.current).map(x => str(x, 40)))].filter(x => progress.has(x)).slice(0, done.has('ciencia3') ? 2 : 1);
+            return { done, progress, current };
+        };
         list(data.nations).slice(0, NN).forEach((n, i) => Object.assign(g.nations[i], {
             gold: int(n?.gold, -1e9, 1e12, 0),
             alive: !!n?.alive,
             recruited: new Map(list(n?.recruited).map(x => [provIdx(x?.[0]), int(x?.[1], 0, 1e6, 0)])),
-            overlord: natOrNone(n?.overlord ?? -1)
+            overlord: natOrNone(n?.overlord ?? -1),
+            tech: techOf(n?.tech)
         }));
         for (const row of g.relations) for (const r of row) if (r) Object.assign(r, { state: 'paz', since: 0, truceUntil: 0 });
         for (const x of list(data.relations)) {
@@ -1553,6 +1690,74 @@ class GameEngine {
         this.log(`Retiras a tu espía de ${PROVINCES[pid].name}.`);
     }
 
+    // --- Investigación ---
+    // Reglas de la nación: las de CONFIG con lo que ha investigado encima.
+    rules(id) {
+        const c = this.rulesCache[id];
+        if (c && c.v === this.techVersion) return c.r;
+        const r = baseRules(), done = this.nations[id].tech.done;
+        for (const t of TECHS) if (done.has(t.id)) mergeFx(r, t.fx);
+        this.rulesCache[id] = { v: this.techVersion, r };
+        return r;
+    }
+    techLevel(id, branch) { const d = this.nations[id].tech.done; return d.has(`${branch}3`) ? 3 : d.has(`${branch}2`) ? 2 : d.has(`${branch}1`) ? 1 : 0; }
+    techTurns(id, techId) { return Math.max(1, Math.round(CONFIG.RESEARCH.TURNS[TECH_BY_ID.get(techId).tier - 1] * this.rules(id).researchTurns)); }
+    techProgress(id, techId) { return this.nations[id].tech.progress.get(techId) ?? 0; }
+    // Oro de una investigación: turnos de renta según el nivel, un 10 % más por cada una ya terminada.
+    researchCost(id, techId) {
+        const R = CONFIG.RESEARCH, i = TECH_BY_ID.get(techId).tier - 1;
+        const base = Math.max(R.COST_MIN[i], this.income(id) * R.COST_TURNS[i]);
+        return Math.round(base * (1 + R.COST_GROWTH * this.nations[id].tech.done.size) * this.rules(id).researchCost);
+    }
+    techState(id, techId) {
+        const s = this.nations[id].tech, t = TECH_BY_ID.get(techId);
+        if (s.done.has(techId)) return 'done';
+        if (s.current.includes(techId)) return 'current';
+        if (s.progress.has(techId)) return 'paused';
+        if (t.tier > 1 && !s.done.has(`${t.branch}${t.tier - 1}`)) return 'locked';
+        return 'open';
+    }
+    // Empieza (pagando) o reanuda (gratis) una investigación. Sin laboratorio libre, la más antigua en curso queda en pausa.
+    startResearch(id, techId) {
+        const t = TECH_BY_ID.get(techId), n = this.nations[id], s = n.tech;
+        if (!t || this.over) return false;
+        const st = this.techState(id, techId);
+        if (st === 'open') {
+            const cost = this.researchCost(id, techId);
+            if (n.gold < cost) return false;
+            n.gold -= cost;
+            s.progress.set(techId, 0);
+            if (id === this.player) this.log(`Empiezas a investigar ${t.name} (${cost} oro, ${plural(this.techTurns(id, techId), 'turno', 'turnos')}).`);
+        } else if (st === 'paused') {
+            if (id === this.player) this.log(`Reanudas ${t.name}.`);
+        } else return false;
+        if (s.current.length >= this.rules(id).labs) {
+            const old = s.current.shift();
+            if (id === this.player) this.log(`${TECH_BY_ID.get(old).name} queda en pausa.`);
+        }
+        s.current.push(techId);
+        return true;
+    }
+    pauseResearch(id, techId) {
+        const s = this.nations[id].tech;
+        if (!s.current.includes(techId)) return;
+        s.current = s.current.filter(x => x !== techId);
+        if (id === this.player) this.log(`${TECH_BY_ID.get(techId).name} queda en pausa.`);
+    }
+    // Al empezar el turno de la nación, cada investigación en curso avanza un turno.
+    advanceResearch(id) {
+        const s = this.nations[id].tech;
+        for (const techId of [...s.current]) {
+            const p = (s.progress.get(techId) ?? 0) + 1;
+            if (p < this.techTurns(id, techId)) { s.progress.set(techId, p); continue; }
+            s.progress.delete(techId);
+            s.current = s.current.filter(x => x !== techId);
+            s.done.add(techId);
+            this.techVersion++;
+            if (id === this.player) this.log(`Investigación terminada: ${TECH_BY_ID.get(techId).name}.`);
+        }
+    }
+
     // --- Reclutamiento ---
     // Coste de una unidad para una nación: sus yacimientos abaratan el material.
     // Coste de una unidad reclutada en la provincia `pid`: la abaratan los yacimientos que abastecen a esa provincia.
@@ -1603,6 +1808,7 @@ class GameEngine {
 
     beginNationTurn(id) {
         for (const a of this.armies.values()) if (a.owner === id) a.used = 0;
+        this.advanceResearch(id);
         let done = 0;
         for (const [c, w] of this.fortWork) {
             if (w.owner !== id) continue;
