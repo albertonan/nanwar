@@ -46,6 +46,19 @@ const setup = () => {
             for (const c of G.land) if (g.owner[c] === owner && T.free(g, c) && f.to(c) >= min * MOVE && f.dist[c] <= max * MOVE) return c;
             throw new Error('no hay casilla a esa distancia');
         },
+        // Casilla libre de `a` junto a la frontera con `b`, y la de `b` de al lado.
+        border(g, a, b, skip = 0) {
+            for (const c of G.land) {
+                if (g.owner[c] !== a || !T.free(g, c)) continue;
+                for (let d = 0; d < 6; d++) { const j = G.nb[c * 6 + d]; if (j >= 0 && isLand(j) && g.owner[j] === b && skip-- <= 0) return [c, j]; }
+            }
+            throw new Error('no hay frontera');
+        },
+        // Ciudad de `b` más cerca (por tierra) de la casilla dada.
+        nearestCity(g, owner, b, cell) {
+            const steps = g.field(owner, [cell]);
+            return PROVINCES.filter(p => g.owner[p.city] === b).sort((x, y) => steps[x.city] - steps[y.city])[0].city;
+        },
         // Pasa turnos solo para `owner`: cumple sus órdenes y le devuelve el movimiento.
         turns(g, owner, n) { for (let i = 0; i < n; i++) { g.executeOrders(owner); g.turn++; for (const a of g.armies.values()) if (a.owner === owner) a.used = 0; } },
         // Empieza una partida en la interfaz con el país dado y devuelve su motor.
@@ -212,6 +225,165 @@ const CHECKS = [
         ui.select(a.cell);
         ui.clickCell(dest, true);
         T.eq(a.order?.kind, 'march', 'Mayúsculas + clic da la orden de marchar');
+        return true;
+    }],
+    ['F2 · una ofensiva automática avanza, ataca y termina al tomar su objetivo', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        const [start] = T.border(g, es, fr);
+        const obj = T.nearestCity(g, es, fr, start);
+        const op = g.createOp(es, 'ofensiva', [start, obj]);
+        T.ok(op && op.name.startsWith('Ofensiva sobre'), 'creada con nombre del objetivo');
+        let n = 0;
+        for (const c of g.nearCells(start, 2).keys()) if (n < 3 && T.free(g, c) && g.owner[c] === es) { g.assignArmy(T.army(g, es, c, 4, 16, 2), op.id); n++; }
+        T.eq(g.opMembers(op).length, 3, 'tres ejércitos asignados');
+        const steps0 = Math.min(...g.opMembers(op).map(a => g.field(es, [obj])[a.cell]));
+        T.turns(g, es, 1);
+        const steps1 = Math.min(...g.opMembers(op).map(a => g.field(es, [obj])[a.cell]));
+        T.ok(steps1 < steps0, `se acercan al objetivo (${steps0} → ${steps1})`);
+        for (let i = 0; i < 25 && g.ops.has(op.id); i++) T.turns(g, es, 1);
+        T.eq([g.owner[obj], g.ops.has(op.id)], [es, false], 'objetivo tomado y operación terminada');
+        return true;
+    }],
+    ['F2 · sin ventaja espera, pide ayuda y la reserva le manda un ejército', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        const [fcell, mine] = T.plainPair(g, es);
+        g.owner[fcell] = fr; g.legal[fcell] = fr; g.version++;
+        T.army(g, fr, fcell, 20);
+        const op = g.createOp(es, 'ofensiva', [mine, fcell], { ratio: 1.3 });
+        const weak = T.army(g, es, mine, 1);
+        g.assignArmy(weak, op.id);
+        g.executeOp(op);
+        T.eq([weak.cell, op.waiting, g.opNeed(op)], [mine, 1, 1], 'espera y pide ayuda');
+        const zone = T.farCell(g, es, mine, 4, 8);
+        const res = g.createOp(es, 'reserva', [zone]);
+        const big = T.army(g, es, zone, 0, 20);
+        g.assignArmy(big, res.id);
+        g.executeOp(res);
+        T.eq(big.op, op.id, 'la reserva lo pasa a la ofensiva');
+        return true;
+    }],
+    ['F2 · una línea de defensa se cubre empezando por lo más amenazado, y fortifica', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        const [a0] = T.border(g, es, fr), [a1] = T.border(g, es, fr, 6);
+        const plan = g.planFort(es, a0, a1);
+        T.ok(plan && plan.path.length >= 2, 'línea por tu territorio');
+        const op = g.createOp(es, 'defensa', plan.path, { fortify: true });
+        g.nations[es].gold = 5000;
+        const spots = [...g.nearCells(plan.path[0], 4).keys()].filter(c => T.free(g, c) && g.owner[c] === es && !plan.path.includes(c));
+        for (const c of spots.slice(0, plan.path.length)) g.assignArmy(T.army(g, es, c, 6), op.id);
+        for (let i = 0; i < 8; i++) T.turns(g, es, 1);
+        T.eq(g.opNeed(op), 0, `línea cubierta (${plan.path.length} casillas)`);
+        T.ok(plan.path.some(c => g.fortWork.has(c) || g.fort[c]), 'fortifica la línea');
+        return true;
+    }],
+    ['F2 · capacidad de mando: 3 operaciones, 4 con Doctrina 1', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        const [, from] = T.plainPair(g, es);
+        T.eq(g.commandCap(es), 3 + Math.floor(g.citiesOf(es).length / 20), 'base');
+        for (let i = 0, n = g.commandCap(es); i < n; i++) T.ok(g.createOp(es, 'reserva', [from]), `operación ${i + 1}`);
+        T.eq(g.createOp(es, 'reserva', [from]), null, 'no cabe una más');
+        T.learn(g, es, 'doctrina1');
+        T.ok(g.createOp(es, 'reserva', [from]), 'con Doctrina 1 cabe otra');
+        return true;
+    }],
+    ['F2 · manual no mueve; asistida solo al pedirla, y la vista previa no cambia la partida', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        const [, from] = T.plainPair(g, es);
+        const dest = T.farCell(g, es, from, 10);
+        const zone = g.createOp(es, 'reserva', [dest], { auto: 'manual' });
+        const a = T.army(g, es, from, 3);
+        g.assignArmy(a, zone.id);
+        g.executeOrders(es);
+        T.eq(a.cell, from, 'manual: quieto');
+        zone.auto = 'asistida';
+        g.executeOrders(es);
+        T.eq(a.cell, from, 'asistida: quieta al terminar el turno sin confirmar');
+        const v = g.armyVersion, ghost = g.previewOps(es, [zone.id]);
+        T.ok(ghost.length === 1 && ghost[0].kind === 'move' && ghost[0].id === a.id, 'propone un movimiento');
+        T.eq([a.cell, g.armyVersion], [from, v], 'la vista previa no toca la partida');
+        g.executeOps(es, [zone.id]);
+        T.eq(a.cell, ghost[0].cells.at(-1), 'al confirmar hace lo propuesto');
+        return true;
+    }],
+    ['F2 · un ejército con orden propia o movido a mano no lo mueve su operación', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        const [next, from] = T.plainPair(g, es), [, from2] = T.plainPair(g, es, 3);
+        const zone = g.createOp(es, 'reserva', [T.farCell(g, es, from, 10)]);
+        const a = T.army(g, es, from, 3), b = T.army(g, es, from2, 3);
+        g.assignArmy(a, zone.id); g.assignArmy(b, zone.id);
+        g.setOrder(b, { kind: 'hold' });
+        const moved = g.playerMove(a, { ...a.units }, next);
+        g.executeOps(es, [zone.id]);
+        T.eq([moved.cell, b.cell], [next, from2], 'los dos se quedan');
+        return true;
+    }],
+    ['F2 · las operaciones y sus ejércitos se guardan y se cargan', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        const [start, out] = T.border(g, es, fr);
+        const op = g.createOp(es, 'ofensiva', [start, out], { ratio: 1.8, auto: 'asistida' });
+        const a = T.army(g, es, T.farCell(g, es, start, 1, 3), 2);
+        g.assignArmy(a, op.id);
+        const data = JSON.parse(JSON.stringify(g.serialize()));
+        data.ops.push({ id: 77, owner: es, kind: 'invasión', cells: [start, out] }, { id: 78, owner: es, kind: 'reserva', cells: [start, out] });
+        data.armyOps.push([a.id, 77]);
+        const h = GameEngine.load(data);
+        const ho = h.ops.get(op.id);
+        T.eq([ho.kind, ho.cells, ho.ratio, ho.auto, ho.name], ['ofensiva', [start, out], 1.8, 'asistida', op.name], 'operación');
+        T.eq([h.ops.size, h.armies.get(a.id).op], [1, op.id], 'las inválidas se descartan y el ejército sigue en la suya');
+        return true;
+    }],
+    ['F2 · interfaz: herramienta Operación, pestaña Mando y propuesta de la asistida al terminar el turno', async () => {
+        const g = T.uiStart('es'), es = g.player;
+        ui.prefs.watch = 'directo';
+        const [, from] = T.plainPair(g, es);
+        const zone = T.farCell(g, es, from, 6);
+        T.army(g, es, from, 3);
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: '5' }));
+        T.eq(ui.tool, 'op', 'tecla 5');
+        document.querySelector('[data-action="op-kind"][data-kind="reserva"]').click();
+        ui.clickCell(zone);
+        document.querySelector('[data-action="op-create"]').click();
+        const op = g.opsOf(es)[0];
+        T.ok(op && op.kind === 'reserva', 'operación creada');
+        T.eq([ui.tool, ui.tab, ui.focusOp], ['command', 'mando', op.id], 'abierta en la pestaña Mando');
+        T.ok(document.querySelector('#drawer-body').textContent.includes(op.name), 'aparece en la pestaña');
+        const a = g.armyOn(from);
+        if (a.op !== op.id) g.assignArmy(a, op.id);
+        document.querySelector('[data-action="op-set"][data-key="auto"][data-value="asistida"]').click();
+        T.eq(op.auto, 'asistida', 'automatización desde la pestaña');
+        ui.view.draw();
+        const turn = g.turn;
+        await ui.endTurnFlow();
+        T.ok(ui.proposal && !document.querySelector('#confirm').hidden, 'propuesta a la vista');
+        T.eq([g.turn, a.cell], [turn, from], 'aún no ha terminado el turno');
+        ui.view.draw();
+        document.querySelector('[data-action="assist-yes"]').click();
+        for (let i = 0; i < 100 && g.turn === turn; i++) await new Promise(r => setTimeout(r, 50));
+        T.ok(g.turn === turn + 1 && g.armies.get(a.id).cell !== from, 'confirmada: se mueve y pasa el turno');
+        return true;
+    }],
+    ['F2 · al salir de una ciudad para su operación deja una infantería de guarnición', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        const city = PROVINCES.find(p => g.owner[p.city] === es && CAPITAL_OF[p.city] < 0).city;
+        const a = g.armyOn(city);
+        a.units = { infantry: 5, tank: 2, artillery: 0 };
+        const zone = g.createOp(es, 'reserva', [T.farCell(g, es, city, 6)]);
+        g.assignArmy(a, zone.id);
+        g.executeOp(zone);
+        const stay = g.armyOn(city), gone = [...g.armies.values()].find(x => x.op === zone.id);
+        T.eq([stay.units, stay.op], [{ infantry: 1, tank: 0, artillery: 0 }, 0], 'guarnición sin operación');
+        T.ok(gone && gone.cell !== city && countUnits(gone.units) === 6, 'el resto sale con la operación');
         return true;
     }]
 ];
