@@ -596,6 +596,57 @@ const CHECKS = [
         ui.view.scale = 0.2; ui.view.draw();
         ui.view.scale = 3; ui.view.draw();
         return true;
+    }],
+    ['F5 · la IA en guerra crea una ofensiva si es más fuerte y una línea si es más débil, con sus ejércitos', () => {
+        const g = T.game(), is = T.nation('is'), es = T.nation('es'), pt = T.nation('pt');
+        g.start(is);
+        g.declareWar(es, pt);
+        g.aiCommand(es);
+        g.aiCommand(pt);
+        const off = g.opsOf(es).find(o => o.kind === 'ofensiva'), line = g.opsOf(pt).find(o => o.kind === 'defensa');
+        T.ok(off && g.opFront(off) === pt && g.owner[off.cells[1]] === pt, 'España ataca Portugal');
+        T.ok(line && line.cells.every(c => g.owner[c] === pt), 'Portugal traza su línea');
+        T.ok(g.opMembers(off).length > 0 || [...g.armies.values()].some(a => a.form === off.id), 'la ofensiva tiene ejércitos');
+        const members = g.opMembers(off).map(a => [a.id, a.cell]);
+        const used = new Map(members.map(([id]) => [id, g.armies.get(id).used]));
+        g.aiArmies(es);
+        T.ok(members.every(([id]) => !g.armies.has(id) || g.armies.get(id).used === used.get(id)), 'aiArmies no mueve a los de la operación');
+        return true;
+    }],
+    ['F5 · al firmar la paz, la IA termina las operaciones de ese frente', () => {
+        const g = T.game(), is = T.nation('is'), es = T.nation('es'), pt = T.nation('pt');
+        g.start(is);
+        g.declareWar(es, pt);
+        g.aiCommand(es);
+        T.ok(g.opsOf(es).length > 0, 'con operaciones en guerra');
+        g.makePeace(es, pt, true);
+        g.aiCommand(es);
+        T.eq(g.opsOf(es).length, 0, 'sin operaciones en paz');
+        T.ok(![...g.armies.values()].some(a => a.owner === es && (a.op || a.form)), 'sus ejércitos quedan libres');
+        return true;
+    }],
+    ['F5 · las ofensivas enemigas se ven con un espía en su salida o con Reconocimiento aéreo', () => {
+        const g = T.game(7, true), fr = T.nation('pt'), es = T.nation('es');
+        g.start(fr);
+        g.declareWar(es, fr);
+        g.aiCommand(es);
+        const off = g.opsOf(es).find(o => o.kind === 'ofensiva' && g.opFront(o) === fr);
+        T.ok(off, 'España prepara una ofensiva contra Portugal');
+        T.eq(g.knownEnemyOps(fr).length, 0, 'sin información no se ve');
+        g.spies.set(G.prov[off.cells[0]], { since: g.turn, revealedTurn: g.turn }); g.spyVersion++;
+        T.eq(g.knownEnemyOps(fr).map(o => o.id), [off.id], 'con un espía en su salida, sí');
+        return true;
+    }],
+    ['F5 · una partida con la IA mandando operaciones se juega y se guarda sin errores', () => {
+        const g = T.game(3), is = T.nation('is');
+        g.configure({ aggression: 'caos', alliances: 'reales', victory: 1, fog: true });
+        g.start(is);
+        for (let i = 0; i < 12 && !g.over; i++) g.endTurn();
+        T.ok(g.ops.size > 0, `la IA tiene operaciones (${g.ops.size})`);
+        const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+        T.eq([h.ops.size, [...h.armies.values()].filter(a => a.op).length], [g.ops.size, [...g.armies.values()].filter(a => a.op && g.ops.has(a.op)).length], 'se cargan igual');
+        h.endTurn();
+        return true;
     }]
 ];
 
