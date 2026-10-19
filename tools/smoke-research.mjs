@@ -543,6 +543,30 @@ const CHECKS = [
         const fx = g.combatFactors(fr, { infantry: 1, tank: 0, artillery: 0 }, from, { owner: pt, units: { infantry: 1, tank: 0, artillery: 0 } }, cell);
         T.eq(fx.parts.find(([n]) => n === 'fortificación')[1], 2, 'un aliado en tu muro de hormigón');
         return true;
+    }],
+    ['Revisión · carretera y autopista son una sola herramienta con la casilla «Autopista»', () => {
+        const g = T.uiStart('es'), es = T.nation('es');
+        const key = k => document.dispatchEvent(new KeyboardEvent('keydown', { key: k }));
+        T.ok(!document.querySelector('[data-tool="highway"]'), 'ya no hay herramienta Autopista aparte');
+        T.ok(!document.querySelector('[data-action="highway"]'), 'la casilla solo sale con la carretera');
+        key('a');
+        T.eq([ui.tool, ui.highway], ['road', true], 'A activa la carretera con la casilla marcada');
+        T.eq(document.querySelector('[data-action="highway"]').getAttribute('aria-pressed'), 'true', 'casilla marcada');
+        const [from, cell] = T.plainPair(g, es);
+        ui.anchor = from;
+        const hw = ui.planTo(cell);
+        T.eq([hw.cls, hw.cost], [2, Math.round(g.roadEdgeCost(from, G.dirTo(from, cell), 2, g.rules(es).roadCost))], 'autopista nueva');
+        document.querySelector('[data-action="highway"]').click();
+        T.eq([ui.tool, ui.highway, ui.planTo(cell).cls], ['road', false, 1], 'desmarcada: carretera');
+        g.buildRoad(es, ui.planTo(cell));
+        key('a');
+        T.eq(ui.anchor, from, 'cambiar la casilla no pierde el trazado empezado');
+        const up = ui.planTo(cell);
+        T.eq([up.cls, up.cost < hw.cost, up.cost], [2, true, Math.round(g.roadEdgeCost(from, G.dirTo(from, cell), 2, g.rules(es).roadCost))], 'sobre una carretera solo se paga la mejora');
+        key('3');
+        T.eq(ui.tool, 'fort', 'la tecla 3 es ahora Fortificar');
+        T.ok(!document.querySelector('[data-action="highway"]'), 'la casilla se esconde fuera de la carretera');
+        return true;
     }]
 ];
 

@@ -107,6 +107,9 @@
         .tool.on { color: var(--ink); background: var(--signal); }
         .tool:disabled { opacity: 0.35; cursor: not-allowed; }
         .tool kbd { font-size: 10px; }
+        .tool.tick { gap: 2px; padding: 4px 2px 6px; margin-top: -2px; font-size: 11px; }
+        .tool.tick kbd { display: none; }
+        .tool.tick .box { width: 13px; height: 13px; border: 1.5px solid currentColor; border-radius: 3px; display: grid; place-items: center; font-size: 10px; line-height: 1; }
         #tools hr { width: 70%; border: 0; border-top: 1px solid var(--line); margin: 6px auto; }
 
         #stage { position: relative; min-width: 0; overflow: hidden; }
@@ -2728,10 +2731,9 @@ const moveFraction = sub => ({ [MOVE / 2]: '½', [MOVE / 3]: '⅓', [MOVE / 4]: 
 
 const TOOLS = [
     { id: 'command', label: 'Mando', key: '1', icon: ICONS.command, title: 'Seleccionar y dar órdenes' },
-    { id: 'road', label: 'Carretera', key: '2', icon: ICONS.road, cls: 1, title: r => `Construir carretera (${decimal(CONFIG.ROAD_COST * r.roadCost)} de oro por tramo, más en terreno difícil)` },
-    { id: 'highway', label: 'Autopista', key: '3', icon: ICONS.highway, cls: 2, title: r => `Convertir en autopista (+${decimal(CONFIG.HIGHWAY_COST * r.roadCost)} de oro por tramo)` },
-    { id: 'fort', label: 'Fortificar', key: '4', icon: ICONS.fort, title: r => `Fortificar casillas (${r.fortCost} de oro cada una, ${r.fortTurns} turnos)` },
-    { id: 'cities', label: 'Ciudades', key: '5', icon: ICONS.cities, title: 'Seleccionar varias ciudades para reclutar o fortificar en todas a la vez' }
+    { id: 'road', label: 'Carretera', key: '2', icon: ICONS.road, title: r => `Construir carretera (${decimal(CONFIG.ROAD_COST * r.roadCost)} de oro por tramo, más en terreno difícil)` },
+    { id: 'fort', label: 'Fortificar', key: '3', icon: ICONS.fort, title: r => `Fortificar casillas (${r.fortCost} de oro cada una, ${r.fortTurns} turnos)` },
+    { id: 'cities', label: 'Ciudades', key: '4', icon: ICONS.cities, title: 'Seleccionar varias ciudades para reclutar o fortificar en todas a la vez' }
 ];
 
 // Símbolo OTAN de cada tipo de unidad (SVG para el panel; el mapa lo dibuja en canvas).
@@ -3307,6 +3309,7 @@ class GameUI {
         this.reachInfo = null;
         this.choice = null;          // nación elegida antes de empezar
         this.tool = 'command';
+        this.highway = false;          // casilla «Autopista» de la herramienta Carretera
         this.anchor = -1;            // origen de la obra que se está trazando
         this.tab = 'paises';
         this.drawerOpen = !isMobile();
@@ -3463,14 +3466,12 @@ class GameUI {
         requestAnimationFrame(() => { this.drawPending = false; this.view.draw(); });
     }
 
-    toolDef() { return TOOLS.find(t => t.id === this.tool); }
-
     planTo(cell) {
-        const g = this.game, t = this.toolDef();
+        const g = this.game;
         if (this.tool === 'command' || this.tool === 'cities' || this.anchor < 0 || cell < 0 || !isLand(cell) || g.owner[cell] !== g.player) return null;
         if (this.tool === 'fort') return g.planFort(g.player, this.anchor, cell);
         if (cell === this.anchor) return null;
-        return g.planRoad(g.player, this.anchor, c => c === cell, t.cls);
+        return g.planRoad(g.player, this.anchor, c => c === cell, this.highway ? 2 : 1);
     }
 
     hover(e) {
@@ -3658,6 +3659,17 @@ class GameUI {
         this.render();
     }
 
+    // Casilla «Autopista» de la herramienta Carretera: el mismo trazado se construye (o se mejora) como autopista.
+    toggleHighway() {
+        if (this.game.player === null || this.game.over) return;
+        this.highway = !this.highway;
+        if (this.tool !== 'road') { this.setTool('road'); return; }
+        this.pending = null;
+        const plan = this.planTo(this.view.hoverCell);
+        this.view.preview = plan ? { ...plan, affordable: plan.cost <= this.game.nations[this.game.player].gold } : null;
+        this.render();
+    }
+
     cancel() {
         if (this.pending) { this.pending = null; this.view.preview = null; this.render(); return; }
         if (this.tool !== 'command') {
@@ -3768,6 +3780,7 @@ class GameUI {
             case 'confirm-build': this.confirmBuild(); return;
             case 'cancel-build': this.cancel(); return;
             case 'stop-build': this.setTool('command'); return;
+            case 'highway': this.toggleHighway(); return;
             case 'open-drawer': this.drawerOpen = true; break;
             case 'tool': this.setTool(d.tool === this.tool && d.tool !== 'command' ? 'command' : d.tool); return;
             case 'supply': this.view.showSupply = !this.view.showSupply; break;
@@ -3950,6 +3963,7 @@ class GameUI {
         const tool = TOOLS.find(t => t.key === e.key);
         if (tool) { this.setTool(tool.id); return; }
         if (e.key === 'i' || e.key === 'I') { this.openResearch(); return; }
+        if (e.key === 'a' || e.key === 'A') { this.toggleHighway(); return; }
         if (e.key === 'l' || e.key === 'L') { this.view.showSupply = !this.view.showSupply; this.render(); }
         else if (e.key === 'n' || e.key === 'N') this.nextArmy();
         else if (e.key === 'Enter') { e.preventDefault(); $('#end-turn').click(); }
@@ -4011,9 +4025,14 @@ class GameUI {
 
     renderTools() {
         const playing = this.game.player !== null && !this.game.over;
+        const r = this.myRules();
+        // Con la carretera activa aparece la casilla «Autopista»: mismo trazado, más caro y más rápido.
+        const highway = () => this.tool !== 'road' ? '' : `
+            <button class="tool tick ${this.highway ? 'on' : ''}" data-action="highway" aria-pressed="${this.highway}" title="Construir como autopista, o mejorar a autopista la carretera que ya haya (+${decimal(CONFIG.HIGHWAY_COST * r.roadCost)} de oro por tramo). Tecla A" ${playing ? '' : 'disabled'}>
+                <span class="box" aria-hidden="true">${this.highway ? '✓' : ''}</span>Autopista<kbd>A</kbd></button>`;
         $('#tools').innerHTML = TOOLS.map(t => `
-            <button class="tool ${this.tool === t.id ? 'on' : ''}" data-action="tool" data-tool="${t.id}" title="${typeof t.title === 'function' ? t.title(this.myRules()) : t.title}" ${playing ? '' : 'disabled'}>
-                ${t.icon}${t.label}<kbd>${t.key}</kbd></button>`).join('') + `<hr>
+            <button class="tool ${this.tool === t.id ? 'on' : ''}" data-action="tool" data-tool="${t.id}" title="${typeof t.title === 'function' ? t.title(r) : t.title}" ${playing ? '' : 'disabled'}>
+                ${t.id === 'road' && this.highway ? ICONS.highway : t.icon}${t.label}<kbd>${t.key}</kbd></button>${t.id === 'road' ? highway() : ''}`).join('') + `<hr>
             <button class="tool ${this.view.showSupply ? 'on' : ''}" data-action="supply" title="Mostrar en naranja tu territorio sin suministro" ${playing ? '' : 'disabled'}>
                 ${ICONS.supply}Logística<kbd>L</kbd></button>
             <button class="tool ${this.prefs.view === 'realista' ? 'on' : ''}" data-action="view-mode" title="Vista realista: relieve, bosques y ríos reales, ejércitos en miniatura (V)">
@@ -4415,7 +4434,7 @@ class GameUI {
         else if (g.over) text = '';
         else if (this.tool === 'cities') text = 'Ciudades: haz clic en tus provincias para añadirlas o quitarlas de la selección.';
         else if (this.tool === 'fort') text = this.anchor < 0 ? 'Fortificar: haz clic en una casilla tuya.' : 'Clic en otra casilla para fortificar la línea, o en la misma para solo esa. Clic derecho para terminar.';
-        else if (this.tool !== 'command') text = this.anchor < 0 ? `${this.toolDef().label}: haz clic en una casilla tuya para empezar.` : 'Haz clic donde termina el tramo; se construye el camino más barato. Clic derecho para terminar.';
+        else if (this.tool !== 'command') text = this.anchor < 0 ? `${this.highway ? 'Autopista (A para quitarla)' : 'Carretera (A para autopista)'}: haz clic en una casilla tuya para empezar.` : 'Haz clic donde termina el tramo; se construye el camino más barato. Clic derecho para terminar.';
         else if (this.reachInfo) text = `${this.view.isRealistic() ? 'Zona clara: mover' : 'Verde: mover'}. Rojo: atacar. Clic derecho o Esc para cancelar.`;
         else text = 'Clic en un ejército tuyo para darle órdenes, o en una provincia para ver qué puedes hacer.';
         el.textContent = text;
@@ -4651,7 +4670,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.19-113711';
+const APP_VERSION = '2026.10.19-120016';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
