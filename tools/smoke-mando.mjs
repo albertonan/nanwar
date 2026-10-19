@@ -597,7 +597,7 @@ const CHECKS = [
         T.eq([g.armyOn(city).units, g.armyOn(city).op], [{ infantry: 1, tank: 0, artillery: 0 }, 0], 'y sale dejando una infantería');
         return true;
     }],
-    ['F4 · propuestas para un frente nuevo: línea en la frontera y ofensiva sobre la ciudad más cercana', () => {
+    ['F4 · propuestas para un frente nuevo: línea propuesta y ofensiva sobre la ciudad más cercana', () => {
         const g = T.uiStart('es'), es = g.player, pt = T.nation('pt');
         g.declareWar(es, pt);
         const sg = g.frontSuggestions(es).find(x => x.enemy === pt);
@@ -1003,6 +1003,43 @@ const CHECKS = [
         T.eq([op.cells.join(), op.state], [s.line.join(), 'aguanta'], 'asistida: no cambia sin confirmar, ni con la vista previa');
         g.executeOps(es, [op.id]);
         T.eq(op.state, 'repliega', 'al confirmar, se repliega');
+        return true;
+    }],
+    ['L4 · la línea propuesta cubre solo el tramo amenazado y busca el terreno', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.declareWar(es, fr);
+        const s = T.sector(g, es, fr);
+        for (let k = 0; k < 3; k++) T.army(g, fr, s.front(k), 0, 2);
+        for (const c of s.back.slice(0, 6)) T.army(g, es, c, 3);
+        const plan = g.frontPlan(es, fr);
+        T.ok(plan && plan.line.length >= 3, 'hay línea');
+        T.ok(plan.line.every(c => g.nearCells(s.center, 9).has(c)), 'solo el tramo por donde aprieta, no toda la frontera');
+        const mean = cells => cells.reduce((t, c) => t + g.defBonus(es, c), 0) / cells.length;
+        T.ok(mean(plan.line) >= mean(s.line), `terreno igual o mejor que la frontera (${mean(plan.line).toFixed(2)})`);
+        T.ok(plan.lineInfo && typeof plan.lineInfo.label === 'string' && plan.lineInfo.rel > 0, 'con su descripción y relación prevista');
+        return true;
+    }],
+    ['L4 · aviso de frente sin línea, una sola vez por guerra', () => {
+        const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+        g.start(es);
+        g.declareWar(es, pt);
+        g.executeOrders(es); g.turn++; g.executeOrders(es);
+        const warned = () => g.logs.filter(l => l.msg.includes('sin línea de defensa')).length;
+        T.eq(warned(), 1, 'una vez');
+        const data = JSON.parse(JSON.stringify(g.serialize())), h = GameEngine.load(data);
+        h.turn++; h.executeOrders(es);
+        T.eq(h.logs.filter(l => l.msg.includes('sin línea de defensa')).length, 1, 'tampoco tras cargar');
+        return true;
+    }],
+    ['L4 · la IA crea su línea con la búsqueda', () => {
+        const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+        g.start(es);
+        g.declareWar(es, pt);
+        const plan = g.frontPlan(pt, es);
+        g.aiCommand(pt);
+        const op = g.opsOf(pt).find(o => o.kind === 'defensa');
+        T.ok(op && op.drawn.join() === plan.line.join(), 'la línea de la IA es la propuesta');
         return true;
     }],
     ['Mapa · vista y capas en un solo panel, recordadas en el dispositivo', () => {

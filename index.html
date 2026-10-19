@@ -625,7 +625,7 @@ const POSTURES = {
 };
 const BUDGET_KEYS = { recruit: 'Reclutar', research: 'Investigar', forts: 'Fortificar', roads: 'Carreteras' };
 const PRIORITY = { alta: 3, media: 2, baja: 1 };
-const newCommand = () => ({ posture: 'desgaste', spend: false, budget: { ...POSTURES.desgaste.budget }, share: 60, pools: { research: 0, forts: 0, roads: 0 },
+const newCommand = () => ({ warned: [], posture: 'desgaste', spend: false, budget: { ...POSTURES.desgaste.budget }, share: 60, pools: { research: 0, forts: 0, roads: 0 },
     goals: [], goalsMet: [], priority: {}, rear: false });
 
 // --- Investigación ---
@@ -1118,6 +1118,7 @@ class GameEngine {
                 out.goalsMet = [...new Set(list(c.goalsMet).map(nat))];
                 for (const [k, v] of Object.entries(c.priority ?? {})) if (Object.hasOwn(PRIORITY, v) && Number.isInteger(+k) && +k >= 0 && +k < NN) out.priority[+k] = v;
                 out.rear = !!c.rear;
+                out.warned = [...new Set(list(c.warned).map(nat))];
                 return out;
             })(),
             templates: list(n?.templates).slice(0, 12).map(t => ({ name: str(t?.name, 40) || 'Plantilla', units: { infantry: int(t?.units?.infantry, 0, 99, 0), tank: int(t?.units?.tank, 0, 99, 0), artillery: int(t?.units?.artillery, 0, 99, 0) } }))
@@ -2594,6 +2595,18 @@ class GameEngine {
     // Lo que hace la directiva cada turno, antes de los refuerzos de las operaciones.
     directive(id) {
         const n = this.nations[id], c = n.command;
+        // Frente en guerra sin línea de defensa: se avisa una vez por guerra (y se olvida al firmar la paz).
+        if (id === this.player) {
+            const enemies = this.enemiesOf(id);
+            c.warned = (c.warned ?? []).filter(e => enemies.includes(e));
+            const covered = new Set(this.opsOf(id).filter(o => o.kind === 'defensa').map(o => this.opFront(o)));
+            for (const e of enemies) {
+                if (covered.has(e) || c.warned.includes(e)) continue;
+                if (!G.land.some(x => this.owner[x] === id && [0, 1, 2, 3, 4, 5].some(d => { const j = G.nb[x * 6 + d]; return j >= 0 && isLand(j) && this.owner[j] === e; }))) continue;
+                c.warned.push(e);
+                this.log(`Frente con ${this.nm(e)} sin línea de defensa: hay una propuesta en Mando.`);
+            }
+        }
         // Objetivos cumplidos frente a un país en guerra: se avisa una vez.
         for (const gp of this.goalProgress(id)) {
             const met = gp.total > 0 && gp.held === gp.total;
@@ -2659,15 +2672,20 @@ class GameEngine {
         const fronts = new Set(this.opsOf(id).map(op => this.opFront(op)));
         return this.enemiesOf(id).filter(e => !fronts.has(e)).map(e => this.frontPlan(id, e)).filter(Boolean);
     }
-    // Plan para el frente con `e`: la frontera encadenada como línea de defensa y una ofensiva sobre su ciudad más cercana.
+    // Plan para el frente con `e`: una línea de defensa sobre el tramo de frontera por donde aprieta (sus ejércitos a 3
+    // casillas o menos, con 2 de margen a cada lado; si no hay ninguno, frente a su ciudad más cercana), llevada al mejor
+    // terreno a 3 casillas o menos, y una ofensiva sobre esa ciudad. El resto del frente queda a las guarniciones.
     frontPlan(id, e) {
+        const key = `${this.turn}:${this.version}:${this.armyVersion}:${id}:${e}`;
+        if ((this._plans ??= new Map()).has(key)) return this._plans.get(key);
+        if (this._plans.size > 200) this._plans.clear();
         const border = G.land.filter(c => this.owner[c] === id && [0, 1, 2, 3, 4, 5].some(d => { const j = G.nb[c * 6 + d]; return j >= 0 && isLand(j) && this.owner[j] === e; }));
-        if (!border.length) return null;
+        if (!border.length) { this._plans.set(key, null); return null; }
         // Encadena las casillas de la frontera de vecina en vecina, empezando por un extremo.
-        const left = new Set(border), line = [];
+        const left = new Set(border), chain = [];
         let cur = border.reduce((m, c) => (G.cx[c] + G.cy[c] < G.cx[m] + G.cy[m] ? c : m), border[0]);
-        while (cur !== undefined && line.length < 40) {
-            line.push(cur); left.delete(cur);
+        while (cur !== undefined && chain.length < 400) {
+            chain.push(cur); left.delete(cur);
             let next, nd = Infinity;
             for (const c of left) { const d = (G.cx[c] - G.cx[cur]) ** 2 + (G.cy[c] - G.cy[cur]) ** 2; if (d < nd) { nd = d; next = c; } }
             cur = next;
@@ -2680,7 +2698,44 @@ class GameEngine {
             for (let i = 0; i < border.length; i += Math.max(1, Math.floor(border.length / 12))) { const d = d2(p.city, border[i]); if (d < cd) { cd = d; city = p; } }
         }
         const start = city ? border.reduce((m, c) => (d2(c, city.city) < d2(m, city.city) ? c : m), border[0]) : border[0];
-        return { enemy: e, line, attack: city ? [start, city.city] : null, target: city?.cityName };
+        // Tramo amenazado: los trozos de la cadena con ejércitos enemigos cerca (huecos de 2 casillas o menos), el de más ataque.
+        const foesNear = c => { const out = []; for (const x of this.nearCells(c, 3).keys()) { const a = this.armyOn(x); if (a && a.owner === e && this.sees(id, x)) out.push(a); } return out; };
+        const power = chain.map(c => foesNear(c).reduce((t, a) => t + this.seenPower(id, a, 'atk'), 0));
+        let i0 = -1, i1 = -1;
+        if (power.some(x => x > 0)) {
+            let best = -1, g0 = -1, last = -9, sum = 0;
+            const close = () => { if (g0 >= 0 && sum > best) { best = sum; i0 = g0; i1 = last; } };
+            power.forEach((x, i) => {
+                if (!x) return;
+                if (i - last > 3 || d2(chain[i], chain[Math.max(0, last)]) > (3 * G.W) ** 2) { close(); g0 = i; sum = 0; }
+                sum += x; last = i;
+            });
+            close();
+        } else {
+            i0 = i1 = chain.reduce((m, c, i) => (d2(c, start) < d2(chain[m], start) ? i : m), 0);
+        }
+        i0 = Math.max(0, i0 - 2); i1 = Math.min(chain.length - 1, i1 + 2);
+        // Une el tramo por tu territorio, sin saltos.
+        const ref = [chain[i0]];
+        for (let i = i0 + 1; i <= i1; i++) {
+            if (d2(chain[i], ref[ref.length - 1]) > (4 * G.W) ** 2) break;
+            const p = this.planFort(id, ref[ref.length - 1], chain[i]);
+            if (!p) break;
+            for (const c of p.path.slice(1)) if (!ref.includes(c)) ref.push(c);
+        }
+        // La mejor línea a 3 casillas o menos, con los ejércitos libres cercanos y el ataque enemigo de ese tramo.
+        const near = new Set();
+        for (const c of ref) for (const x of this.nearCells(c, 4).keys()) near.add(x);
+        const forces = [...this.armies.values()].filter(a => a.owner === id && !a.op && !a.order && !a.form && near.has(a.cell) && this.armyOn(a.cell) === a && !(CITY_OF[a.cell] >= 0 && countUnits(a.units) <= 1));
+        const foes = new Set();
+        for (const c of ref) for (const a of foesNear(c)) foes.add(a);
+        const enemy = [...foes].reduce((t, a) => t + this.seenPower(id, a, 'atk'), 0), cap = this.nations[id].capitalCell;
+        const res = this.bestLine(id, { ref, forces, enemy, dir: this.lineDir(id, ref), limit: 3, steps: true, keep: this.owner[cap] === id ? cap : -1 });
+        const line = res ? res.cells : ref;
+        const plan = { enemy: e, line, attack: city ? [start, city.city] : null, target: city?.cityName,
+            lineInfo: { label: this.lineLabel(id, line), rel: res?.rel ?? null, front: (res?.front ?? []).map(c => this.placeName(c)), forces: forces.length } };
+        this._plans.set(key, plan);
+        return plan;
     }
 
     // Movimientos que haría una operación asistida, sin hacerlos: se juegan en una copia de la partida.
@@ -6709,8 +6764,9 @@ class GameUI {
             ${f >= 0 ? `<div class="seg small-seg">${Object.keys(PRIORITY).map(k => `<button data-action="cmd" data-key="priority" data-value="${f}:${k}" class="${(command.priority[f] ?? 'media') === k ? 'on' : ''}" title="Prioridad ${k}: los refuerzos y la reserva van antes a los frentes de prioridad alta">${k[0].toUpperCase() + k.slice(1)}</button>`).join('')}</div>` : ''}</div>
             ${list.map(row).join('')}</div>`;
         const sug = g.frontSuggestions(p0).map(sg => `<div class="suggest"><p class="small">Frente con <b>${g.nm(sg.enemy)}</b> sin operaciones.</p><div class="row">
-            <button class="btn" data-action="op-suggest" data-enemy="${sg.enemy}" data-kind="defensa" ${ops.length >= cap ? 'disabled' : ''}>Línea en la frontera</button>
-            ${sg.attack ? `<button class="btn" data-action="op-suggest" data-enemy="${sg.enemy}" data-kind="ofensiva" ${ops.length >= cap ? 'disabled' : ''}>Ofensiva sobre ${esc(sg.target)}</button>` : ''}</div></div>`).join('');
+            <button class="btn" data-action="op-suggest" data-enemy="${sg.enemy}" data-kind="defensa" data-preview="${sg.enemy}" ${ops.length >= cap ? 'disabled' : ''}>Línea propuesta</button>
+            ${sg.attack ? `<button class="btn" data-action="op-suggest" data-enemy="${sg.enemy}" data-kind="ofensiva" ${ops.length >= cap ? 'disabled' : ''}>Ofensiva sobre ${esc(sg.target)}</button>` : ''}</div>
+            <p class="small muted">Línea: ${esc(sg.lineInfo.label)} · ${sg.lineInfo.rel === null ? 'sin enemigos a la vista' : `${decimal(sg.lineInfo.rel)} a 1 prevista${sg.lineInfo.rel < 1 ? ', no basta: hacen falta refuerzos' : ''}`}${sg.lineInfo.front.length ? ` · deja delante ${esc(sg.lineInfo.front.join(', '))} (con guarnición)` : ''}</p></div>`).join('');
         body.innerHTML = `
             ${this.directiveSection()}
             <p class="group-title">Operaciones · ${ops.length} de ${cap}</p>
