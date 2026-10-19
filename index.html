@@ -324,7 +324,7 @@
 
 const E = window.EUROPA;
 
-const MOVE = 6;   // subpuntos por punto de movimiento (las carreteras cuestan fracciones)
+const MOVE = 12;  // subpuntos por punto de movimiento (las carreteras cuestan fracciones: ½, ⅓, ¼…)
 const CONFIG = {
     INCOME_PER_MILLION: 3,     // oro por turno por millón de habitantes × productividad
     START_GOLD_TURNS: 2,
@@ -333,7 +333,7 @@ const CONFIG = {
     TRUCE_TURNS: 6,
     RECRUIT_PER_MILLION: 1 / 1.5,   // reclutas por turno y provincia: 1 + población/1,5 M
     ROAD_BONUS: 0.25,               // +25 % de renta en provincias unidas por carretera a la capital
-    ROAD_MOVE: { 1: 3, 2: 2 },      // coste en subpuntos por tramo: carretera ½, autopista ⅓
+    ROAD_MOVE: { 1: 6, 2: 4 },      // coste en subpuntos por tramo: carretera ½, autopista ⅓
     ROAD_COST: 15,                  // oro por tramo de carretera (× coste del terreno)
     HIGHWAY_COST: 30,               // oro extra por convertir un tramo en autopista
     FORT_COST: 40,                  // oro por casilla fortificada
@@ -388,7 +388,7 @@ const CONFIG = {
         marsh:    { name: "Pantano", cost: 3, def: 1.2 },
         lake:     { name: "Lago",    cost: 4, def: 1 }     // se cruza en barca: lento y sin protección
     },
-    RIVER_CROSSING: 3,              // subpuntos extra por cruzar un río sin puente (medio punto de movimiento)
+    RIVER_CROSSING: 6,              // subpuntos extra por cruzar un río sin puente (medio punto de movimiento)
     RIVER_DEFENSE: 1.25,            // defensa de quien es atacado desde la otra orilla
     TYPES: {
         infantry:  { name: "Infantería", short: "I", cost: 50,  atk: 5,  def: 6,  speed: 4 },
@@ -636,7 +636,7 @@ class GameEngine {
             if (r.state !== 'paz' || r.since || r.truceUntil) relations.push([a, b, r.state, r.since, r.truceUntil]);
         }
         return {
-            format: 'eurowar-1', map: `${G.land.length}:${PROVINCES.length}`,
+            format: 'eurowar-1', map: `${G.land.length}:${PROVINCES.length}`, move: MOVE,
             seed: this.seed, rng: this.rng.state, turn: this.turn, player: this.player, over: this.over, won: this.won,
             settings: this.settings, logs: this.logs.slice(-150), proposals: this.proposals, proposed: [...this.proposedThisTurn],
             owner: runs, legal: compress(this.legal), dev: Array.from(this.dev), roads: this.roadEdges(),
@@ -726,10 +726,12 @@ class GameEngine {
         }
         g.armies = new Map();
         g.armyAt = new Int32Array(G.N);
+        // Las partidas de antes de los doceavos contaban el movimiento en sextos: el gastado se duplica.
+        const moveScale = data.move === MOVE ? 1 : MOVE / 6;
         for (const x of list(data.armies)) {
             const id = int(x?.[0], 1, 1e9, 1), cell = cellIdx(x?.[2]);
             if (!isLand(cell) || g.armyAt[cell] || g.armies.has(id)) continue;
-            g.armies.set(id, { id, owner: nat(x?.[1]), cell, units: { infantry: int(x?.[3], 0, 1e6, 0), tank: int(x?.[4], 0, 1e6, 0), artillery: int(x?.[5], 0, 1e6, 0) }, used: int(x?.[6], 0, 999, 0) });
+            g.armies.set(id, { id, owner: nat(x?.[1]), cell, units: { infantry: int(x?.[3], 0, 1e6, 0), tank: int(x?.[4], 0, 1e6, 0), artillery: int(x?.[5], 0, 1e6, 0) }, used: Math.min(999, int(x?.[6], 0, 999, 0) * (x?.[6] >= 999 ? 1 : moveScale)) });
             g.armyAt[cell] = id;
         }
         g.nextArmyId = Math.max(int(data.nextArmyId, 1, 1e9, 1), ...[...g.armies.keys()].map(x => x + 1), 1);
