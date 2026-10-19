@@ -2255,6 +2255,7 @@ class GameEngine {
     aiTurn(id) {
         const powers = this.powers();
         this.aiDiplomacy(id, powers);
+        this.aiResearch(id);
         this.aiForts(id);   // antes de reclutar: en guerra el reclutamiento gasta todo el oro
         this.aiRecruit(id);
         this.aiArmies(id);
@@ -2314,7 +2315,57 @@ class GameEngine {
         return dist;
     }
 
-    aiReserve(id) { return this.enemiesOf(id).length ? 0 : this.income(id) * 4; }
+    // En paz guarda cuatro turnos de renta, o lo que cueste la próxima investigación si tiene el laboratorio libre.
+    aiReserve(id) {
+        if (this.enemiesOf(id).length) return 0;
+        const base = this.income(id) * 4, next = this.aiTechChoice(id);
+        return next && this.techState(id, next) === 'open' ? Math.max(base, this.researchCost(id, next)) : base;
+    }
+
+    // Qué investigaría la nación ahora: lo que tenga en pausa o la investigación disponible con más peso.
+    // En guerra pesan su tipo de tropa, Doctrina y Fortificación; en paz, Ciencia, Industria, Infraestructura y
+    // Movilización; Movilidad si su tierra es abrupta. La IA juega sin niebla: no investiga Inteligencia.
+    // El desempate es fijo por nación (no consume azar), así ahorra para el mismo objetivo turno tras turno.
+    aiTechChoice(id) {
+        const key = `${this.turn}:${this.techVersion}:${this.version}:${this.blocVersion}`, s = this.nations[id].tech;
+        if (s.aiChoice?.key === key) return s.aiChoice.tech;
+        let tech = TECHS.find(t => this.techState(id, t.id) === 'paused')?.id ?? null;
+        if (!tech) {
+            const war = this.enemiesOf(id).length > 0, fierce = ['agresiva', 'caos'].includes(this.settings.aggression);
+            const troops = emptyUnits();
+            for (const a of this.armies.values()) if (a.owner === id) for (const k of UNIT_KEYS) troops[k] += a.units[k] * CONFIG.TYPES[k].cost;
+            let land = 0, rough = 0;
+            for (const i of G.land) if (this.owner[i] === id) { land++; if (['mountain', 'hills', 'forest', 'marsh'].includes(CELL_TERRAIN[i])) rough++; }
+            const main = UNIT_BRANCH[UNIT_KEYS.reduce((b, k) => (troops[k] > troops[b] ? k : b), 'infantry')];
+            const weight = {
+                infanteria: 1, blindados: 1, artilleria: 1, doctrina: war ? 2 : 0.6,
+                movilizacion: war ? 1 : 2, ciencia: war ? 0.5 : 3, industria: war ? 0.5 : 2.5, infraestructura: war ? 0.5 : 2,
+                movilidad: rough > land * 0.3 ? 2 : 0.5, fortificacion: war ? 2 : 0.5, reconocimiento: 0, espionaje: 0
+            };
+            weight[main] += war ? 2 : 0.5;
+            if (fierce) for (const b of ['infanteria', 'blindados', 'artilleria', 'doctrina']) weight[b] *= 1.5;
+            let best = 0;
+            TECHS.forEach((t, k) => {
+                if (this.techState(id, t.id) !== 'open') return;
+                const score = weight[t.branch] / t.tier * (1 + ((id * 7919 + k * 104729) % 1000) / 2000);
+                if (score > best) { best = score; tech = t.id; }
+            });
+        }
+        s.aiChoice = { key, tech };
+        return tech;
+    }
+    // Empieza la investigación elegida si tiene laboratorio libre y oro: en guerra, solo si aun así le quedan tres
+    // turnos de renta para reclutar.
+    aiResearch(id) {
+        const n = this.nations[id];
+        if (n.tech.current.length >= this.rules(id).labs) return;
+        const tech = this.aiTechChoice(id);
+        if (!tech) return;
+        if (this.techState(id, tech) === 'paused') { this.startResearch(id, tech); return; }
+        const cost = this.researchCost(id, tech);
+        const keep = this.enemiesOf(id).length ? this.income(id) * 3 : 0;
+        if (n.gold >= cost + keep) this.startResearch(id, tech);
+    }
 
     aiRecruit(id) {
         const n = this.nations[id];

@@ -326,6 +326,27 @@ const CHECKS = [
         const b = PROVINCES.filter(p => p.country === es)[2].city;
         T.eq(g.planFort(es, b, b).cost, 25, 'fortificar cuesta 25');
         return true;
+    }],
+
+    ['F3 · la IA investiga sin desarmarse y la partida es reproducible', () => {
+        const run = () => {
+            const g = new GameEngine(5);
+            g.configure({ aggression: 'agresiva', alliances: 'reales', victory: 1, fog: false });
+            g.start(T.nation('ru'));
+            for (let t = 0; t < 40 && !g.over; t++) g.endTurn();
+            return g;
+        };
+        const g = run();
+        const alive = g.nations.filter(n => n.alive && n.id !== g.player);
+        const idle = alive.filter(n => !n.tech.done.size && !n.tech.current.length);
+        T.ok(idle.length <= alive.length / 10, `sin investigar: ${idle.map(n => n.key).join(', ')}`);
+        const unarmed = alive.filter(n => g.citiesOf(n.id).length && ![...g.armies.values()].some(a => a.owner === n.id));   // sin ciudades no se puede reclutar
+        T.ok(!unarmed.length, `sin ejército: ${unarmed.map(n => `${n.key} oro ${n.gold} guerra ${g.enemiesOf(n.id).length} ciudades ${g.citiesOf(n.id).length} hechas ${n.tech.done.size} curso ${n.tech.current}`).join('; ')}`);
+        T.ok(alive.every(n => n.gold >= 0), 'nadie en números rojos');
+        T.ok(!alive.some(n => [...n.tech.done].some(t => TECH_BY_ID.get(t).branch === 'reconocimiento' || TECH_BY_ID.get(t).branch === 'espionaje')), 'la IA no investiga inteligencia');
+        const total = alive.reduce((s, n) => s + n.tech.done.size, 0);
+        T.eq(JSON.stringify(run().serialize()), JSON.stringify(g.serialize()), 'misma semilla, misma partida');
+        return total > 0 || 'nadie terminó nada';
     }]
 ];
 
