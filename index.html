@@ -610,6 +610,7 @@ const TEMPLATES = {
     division: { name: 'División', units: { infantry: 20, tank: 8, artillery: 4 }, why: 'Tres brigadas juntas: el escalón XX.' }
 };
 const OP_GOLD = [0, 50, 100, 200, 400];   // oro por turno que se puede dar a una operación para refuerzos
+const OP_GATHER_TURNS = 3;   // una ofensiva reúne los ejércitos libres a este número de turnos de marcha o menos
 // Directiva nacional: la postura fija la ventaja con la que atacan las ofensivas nuevas y un reparto de la renta.
 const POSTURES = {
     defensa: { name: 'Defensa total', ratio: 1.8, budget: { recruit: 45, research: 10, forts: 35, roads: 5 }, desc: 'Ofensivas nuevas en «cauta» (1,8 a 1). Mucho oro para fortificar.' },
@@ -1923,12 +1924,45 @@ class GameEngine {
         this.orderVersion++;
         return op;
     }
-    // Ejércitos sin operación ni orden cerca del punto de partida (no saca de su ciudad a una guarnición de una unidad).
+    // Ejércitos sin operación ni orden cerca de la operación (no saca de su ciudad a una guarnición de una unidad).
+    // Una ofensiva reúne fuerzas de toda la región, no solo de la ciudad de salida: ver offensiveFree.
     nearbyFree(op, radius) {
+        if (op.kind === 'ofensiva') return this.offensiveFree(op);
         const near = new Set();
         for (const c of op.kind === 'ofensiva' ? [op.cells[0]] : op.cells) for (const x of this.nearCells(c, radius).keys()) near.add(x);
         return [...this.armies.values()].filter(a => a.owner === op.owner && !a.op && !a.order && !a.form && near.has(a.cell) && this.armyOn(a.cell) === a
             && !(CITY_OF[a.cell] >= 0 && countUnits(a.units) <= 1));
+    }
+    // Fuerzas para una ofensiva: los ejércitos libres de cualquier ciudad o casilla que lleguen al punto de partida en
+    // OP_GATHER_TURNS turnos de marcha o menos por territorio propio o aliado, del más cercano al más lejano. Deja la
+    // guarnición de una unidad de cada ciudad (al salir de las demás deja una infantería, ver detach) y a quien tenga
+    // otro enemigo a 2 casillas o menos, que ya guarda otro frente.
+    offensiveFree(op) {
+        const id = op.owner, rules = this.rules(id), start = op.cells[0], target = this.owner[op.cells[op.cells.length - 1]];
+        const fastest = Math.max(...UNIT_KEYS.map(k => rules.types[k].speed));
+        const cost = this.marchCosts(id, start, OP_GATHER_TURNS * MOVE * fastest);
+        const otherFront = a => { for (const c of this.nearCells(a.cell, 2).keys()) { const e = this.armyOn(c); if (e && e.owner !== target && this.atWar(id, e.owner)) return true; } return false; };
+        return [...this.armies.values()].filter(a => a.owner === id && !a.op && !a.order && !a.form && this.armyOn(a.cell) === a
+            && cost.get(a.cell) <= OP_GATHER_TURNS * MOVE * speedOf(a.units, rules)
+            && !(CITY_OF[a.cell] >= 0 && countUnits(a.units) <= 1) && !otherFront(a))
+            .sort((x, y) => cost.get(x.cell) - cost.get(y.cell) || x.id - y.id);
+    }
+    // Coste de marcha hasta `dest` desde cada casilla propia o aliada a `limit` subpuntos o menos: como orderField
+    // pero acotado, para buscar fuerzas sin recorrer el mapa entero.
+    marchCosts(owner, dest, limit) {
+        const dist = new Map([[dest, 0]]), heap = new MinHeap();
+        heap.push(0, dest);
+        while (heap.size) {
+            const [k, v] = heap.pop();
+            if (k > dist.get(v)) continue;
+            for (let d = 0; d < 6; d++) {
+                const u = G.nb[v * 6 + d];
+                if (u < 0 || !isLand(u) || !(this.owner[u] === owner || this.allied(owner, this.owner[u]))) continue;
+                const c = k + this.stepCost(owner, u, (d + 3) % 6, false);
+                if (c <= limit && c < (dist.get(u) ?? Infinity)) { dist.set(u, c); heap.push(c, u); }
+            }
+        }
+        return dist;
     }
     assignArmy(a, opId) {
         if (!a) return;
@@ -3253,7 +3287,8 @@ class GameEngine {
         if (!op) return null;
         const got = this.nearbyFree(op, kind === 'reserva' ? 2 : 3);
         for (const a of got) this.assignArmy(a, op.id);
-        this.log(`Nueva operación: ${op.name}${got.length ? `, con ${plural(got.length, 'ejército', 'ejércitos')}` : ''}.`);
+        const from = new Set(got.map(a => G.prov[a.cell])).size;
+        this.log(`Nueva operación: ${op.name}${got.length ? `, con ${plural(got.length, 'ejército', 'ejércitos')}${kind === 'ofensiva' && from > 1 ? ` de ${from} provincias` : ''}` : ''}.`);
         return op;
     }
     playerRedrawOp(op, cells) {
@@ -3875,7 +3910,7 @@ function arrowOutline(c, w0, w1, headL, headW) {
 const OP_COLORS = ['#f0c419', '#62aede', '#e8dcc0', '#c9a0dc', '#8fd16b', '#ff9f7a'];
 const opColor = op => OP_COLORS[(op.id - 1) % OP_COLORS.length];
 const OP_KINDS = {
-    ofensiva: { name: 'Ofensiva', icon: ICONS.op, how: 'Haz clic en el punto de partida y luego en el objetivo; los clics de en medio marcan el eje. Sus ejércitos avanzan hacia el objetivo y atacan cuando tienen la ventaja que marques.' },
+    ofensiva: { name: 'Ofensiva', icon: ICONS.op, how: `Haz clic en el punto de partida y luego en el objetivo; los clics de en medio marcan el eje. Reúne los ejércitos libres a ${OP_GATHER_TURNS} turnos de marcha del punto de partida, de todas sus ciudades; avanzan hacia el objetivo y atacan cuando tienen la ventaja que marques.` },
     defensa: { name: 'Defensa', icon: ICONS.line, how: 'Haz clic a lo largo de tu territorio para trazar la línea. Sus ejércitos ocupan las casillas más amenazadas primero, contraatacan y, si quieres, fortifican.' },
     reserva: { name: 'Reserva', icon: ICONS.zone, how: 'Haz clic en la zona de reunión. Sus ejércitos esperan allí y acuden a las operaciones que pidan ayuda.' }
 };
@@ -6346,7 +6381,7 @@ class GameUI {
                 <div class="op-members">${members.map(a => `<div class="op-member"><button class="link" data-action="goto" data-cell="${a.cell}">${esc(g.placeName(a.cell))}</button>
                     <span class="small muted">${units(a)}${a.order ? ' · con orden propia' : ''}</span>
                     <button class="btn ghost" data-action="op-unassign" data-army="${a.id}" title="Sacarlo de la operación" aria-label="Quitar">✕</button></div>`).join('') || '<p class="note">Sin ejércitos. Añade los cercanos o asígnalos desde su ficha.</p>'}</div>
-                <button class="btn" style="margin-top:6px" data-action="op-add-near" data-id="${op.id}" ${near ? '' : 'disabled'}>Añadir los ${near || ''} cercanos sin operación</button>
+                <button class="btn" style="margin-top:6px" data-action="op-add-near" data-id="${op.id}" ${near ? '' : 'disabled'}>Añadir los ${near || ''} ${op.kind === 'ofensiva' ? `libres a ${OP_GATHER_TURNS} turnos de marcha` : 'cercanos sin operación'}</button>
                 ${op.kind === 'reserva' ? '' : `<p class="group-title">Postura</p><div class="seg">${OP_STANCES.map(([v, l, t]) => `<button data-action="op-set" data-id="${op.id}" data-key="ratio" data-value="${v}" class="${op.ratio === v ? 'on' : ''}" title="${t}">${l}</button>`).join('')}</div>`}
                 <p class="group-title">Automatización</p>
                 <div class="seg">${OP_AUTO.map(([v, l, t]) => `<button data-action="op-set" data-id="${op.id}" data-key="auto" data-value="${v}" class="${op.auto === v ? 'on' : ''}" title="${t}">${l}</button>`).join('')}</div>

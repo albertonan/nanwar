@@ -246,6 +246,25 @@ const CHECKS = [
         T.eq([g.owner[obj], g.ops.has(op.id)], [es, false], 'objetivo tomado y operación terminada');
         return true;
     }],
+    ['F2 · una ofensiva nueva reúne los ejércitos libres de toda la zona, no solo los de la ciudad de salida', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+        g.start(es);
+        g.declareWar(es, fr); g.declareWar(es, pt);
+        const [start] = T.border(g, es, fr);
+        const near = T.army(g, es, T.farCell(g, es, start, 1, 3), 3);
+        const mid = T.army(g, es, T.farCell(g, es, start, 6, 9), 3);
+        const far = T.army(g, es, T.farCell(g, es, start, 16, 40), 3);
+        const f = g.orderField(es, start), apart = c => [near, mid].every(a => !g.nearCells(a.cell, 4).has(c));
+        const gc = G.land.find(c => g.owner[c] === es && T.free(g, c) && f.to(c) >= 4 * MOVE && f.dist[c] <= 10 * MOVE && apart(c)
+            && G.nb.slice(c * 6, c * 6 + 6).some(j => j >= 0 && T.free(g, j)));
+        const guard = T.army(g, es, gc, 3);
+        const foe = G.nb.slice(gc * 6, gc * 6 + 6).find(c => c >= 0 && T.free(g, c));
+        T.army(g, pt, foe, 2);   // un portugués junto a él: guarda otro frente
+        const op = g.playerCreateOp('ofensiva', [start, T.nearestCity(g, es, fr, start)]);
+        T.eq([near.op, mid.op, far.op, guard.op].map(x => x === op.id), [true, true, false, false], 'cerca y a dos turnos sí; lejos y en otro frente, no');
+        T.ok(g.opMembers(op).every(a => !(CITY_OF[a.cell] >= 0 && countUnits(a.units) <= 1)), 'no se lleva guarniciones de una unidad');
+        return true;
+    }],
     ['F2 · sin ventaja espera, pide ayuda y la reserva le manda un ejército', () => {
         const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
         g.start(es);
