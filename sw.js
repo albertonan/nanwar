@@ -3,7 +3,7 @@
 // siempre llega la última versión; sin conexión salen de la copia guardada. Iconos y tipografía no cambian: caché.
 // version.json nunca se guarda: la página lo consulta para saber si hay una versión nueva.
 // VERSION la escribe tools/release.mjs en cada publicación (cambiarla hace que el navegador instale este worker de nuevo).
-const VERSION = '2026.10.19-152839';
+const VERSION = '2026.10.19-164329';
 const CACHE = `nanwar-${VERSION}`;
 const SHELL = [
     './',
