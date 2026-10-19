@@ -76,10 +76,40 @@ function addPoly(path, pts, closed) {
     for (let k = 1; k < pts.length; k++) path.lineTo(pts[k][0], pts[k][1]);
     if (closed) path.closePath();
 }
+const smoothChains = (edges, it = 2) => chainEdges(edges).filter(c => c.pts.length > 1).map(c => ({ pts: chaikin(c.pts, c.closed, it), closed: c.closed }));
 function smoothRegion(edges, it = 2) {
     const p = new Path2D();
-    for (const c of chainEdges(edges)) if (c.pts.length > 1) addPoly(p, chaikin(c.pts, c.closed, it), c.closed);
+    for (const c of smoothChains(edges, it)) addPoly(p, c.pts, c.closed);
     return p;
+}
+// Líneas repartidas en trozos de CHUNK unidades del mapa, para trazar solo las que caen en lo que se pinta: costa,
+// fronteras y ríos del mundo entero son trazados enormes, y trazarlos enteros en cada tesela era lo que más costaba.
+const CHUNK = 16;
+function chunkLines(chains) {
+    const out = new Map();
+    for (const { pts, closed } of chains) {
+        const n = closed ? pts.length : pts.length - 1;
+        let path = null, cur = null;
+        for (let k = 0; k < n; k++) {
+            const a = pts[k], b = pts[(k + 1) % pts.length];
+            const key = `${Math.floor((a[0] + b[0]) / 2 / CHUNK)},${Math.floor((a[1] + b[1]) / 2 / CHUNK)}`;
+            if (key !== cur) {
+                cur = key;
+                path = out.get(key) ?? out.set(key, new Path2D()).get(key);
+                path.moveTo(a[0], a[1]);
+            }
+            path.lineTo(b[0], b[1]);
+        }
+    }
+    return out;
+}
+// Traza los trozos que tocan `rect` (ampliado en `m` unidades, para el grosor de la línea).
+function strokeChunks(x, chunks, rect, m = 2) {
+    for (let cy = Math.floor((rect[1] - m) / CHUNK); cy <= Math.floor((rect[3] + m) / CHUNK); cy++)
+        for (let cx = Math.floor((rect[0] - m) / CHUNK); cx <= Math.floor((rect[2] + m) / CHUNK); cx++) {
+            const p = chunks.get(`${cx},${cy}`);
+            if (p) x.stroke(p);
+        }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -234,6 +264,8 @@ const PAINT = {
 };
 const BASE_RES = window.MAPA?.paintRes ?? 3;   // píxeles del lienzo del terreno por unidad del mapa (el del mundo, menos: es muy grande)
 const TILE = 512;          // lado en píxeles de las teselas del mundo pintado
+const MAX_TILES = 64;      // teselas guardadas (1 MB cada una): una pantalla grande con zoom entero y algo de margen
+const PAINT_MS = 8;        // tiempo máximo por fotograma pintando teselas nuevas (siempre al menos una)
 const SEA_COLOR = '#2a5670';
 
 class RealisticMap {
@@ -301,14 +333,17 @@ class RealisticMap {
             if (CELL_TERRAIN[i] === 'lake') continue;
             for (let d = 0; d < 6; d++) if (water(G.nb[i * 6 + d])) coast.push([i, d]);
         }
-        this.landPath = smoothRegion(coast, 3);
-        this.lakeCells = new Path2D();
-        this.rivers = { 1: new Path2D(), 2: new Path2D(), 3: new Path2D() };
+        const chains = smoothChains(coast, 3);
+        this.landPath = new Path2D();
+        for (const c of chains) addPoly(this.landPath, c.pts, c.closed);
+        this.coastChunks = chunkLines(chains);
+        const rivers = { 1: [], 2: [], 3: [] };
         for (const r of E.rivers ?? []) {
             const pts = [];
             for (let k = 1; k + 1 < r.length; k += 2) pts.push([r[k], r[k + 1]]);
-            addPoly(this.rivers[r[0]], chaikin(pts, false, 2), false);
+            rivers[r[0]].push({ pts: chaikin(pts, false, 2), closed: false });
         }
+        this.rivers = Object.fromEntries(Object.entries(rivers).map(([w, list]) => [w, chunkLines(list)]));
     }
 
     // Lienzo del terreno: color por usos del suelo y altura, sombreado y una textura de parcelas.
@@ -410,6 +445,7 @@ class RealisticMap {
             items.push({ k: 6, x: G.cx[i] + m[0] * (1 + 1.3 / L * G.S), y: G.cy[i] + m[1] * (1 + 1.3 / L * G.S), s: 0.6 + hash2(i, d, 52) * 0.4 });
         }
         items.sort((p, q) => p.y - q.y);
+        items.forEach((it, k) => { it.r = hash2(k, 7, 61); });   // para aclarar árboles y olas de lejos sin que parpadeen
         this.items = items;
         this.buckets = new Map();
         items.forEach((it, idx) => {
@@ -496,7 +532,7 @@ class RealisticMap {
             for (const [i] of edges) { x0 = Math.min(x0, G.cx[i]); y0 = Math.min(y0, G.cy[i]); x1 = Math.max(x1, G.cx[i]); y1 = Math.max(y1, G.cy[i]); }
             this.nations.set(o, { path: smoothRegion(edges, 3), bbox: [x0 - 3, y0 - 3, x1 + 3, y1 + 3] });
         }
-        this.borders = smoothRegion(border, 3);
+        this.borders = chunkLines(smoothChains(border, 3));
         this.ownerKey = g.version;
     }
 
@@ -526,8 +562,8 @@ class RealisticMap {
         const meets = bb => !(bb[2] < wx0 || bb[0] > wx1 || bb[3] < wy0 || bb[1] > wy1);
         x.fillStyle = SEA_COLOR; x.fillRect(wx0, wy0, wx1 - wx0, wy1 - wy0);
         x.lineJoin = 'round'; x.lineCap = 'round';
-        x.strokeStyle = 'rgba(96,156,176,0.45)'; x.lineWidth = 3.2; x.stroke(this.landPath);
-        x.strokeStyle = 'rgba(140,190,200,0.5)'; x.lineWidth = 1.2; x.stroke(this.landPath);
+        x.strokeStyle = 'rgba(96,156,176,0.45)'; x.lineWidth = 3.2; strokeChunks(x, this.coastChunks, rect, 2);
+        x.strokeStyle = 'rgba(140,190,200,0.5)'; x.lineWidth = 1.2; strokeChunks(x, this.coastChunks, rect, 2);
 
         x.save();
         x.clip(this.landPath, 'evenodd');
@@ -541,10 +577,13 @@ class RealisticMap {
         for (const [o, n] of this.nations) if (meets(n.bbox)) { x.fillStyle = g.nations[o].color; x.fill(n.path, 'evenodd'); }
         x.globalAlpha = 1;
         x.strokeStyle = '#4a86a0';
-        for (const [w, wl] of [[1, 0.24], [2, 0.36], [3, 0.5]]) { x.lineWidth = Math.max(wl, 0.9 / b); x.stroke(this.rivers[w]); }
+        for (const [w, wl] of [[1, 0.24], [2, 0.36], [3, 0.5]]) { x.lineWidth = Math.max(wl, 0.9 / b); strokeChunks(x, this.rivers[w], rect, 1); }
         x.restore();
 
-        // Árboles, montañas, colinas, juncos, casas y olas
+        // Árboles, montañas, colinas, juncos, casas y olas. Nivel de detalle: los árboles y las olas, pequeños y muchísimos,
+        // solo de cerca y aclarándose al alejarse (el color del bosque ya está en el lienzo del terreno); montañas, colinas,
+        // juncos y casas desde un poco antes.
+        const trees = smoothstep(6, 12, b), waves = smoothstep(6, 10, b);
         if (detail > 0.01) {
             x.globalAlpha = detail;
             const m = 3;
@@ -555,7 +594,11 @@ class RealisticMap {
                     if (list) idx.push(...list);
                 }
                 idx.sort((p, q) => p - q);   // ya ordenados por y: así se solapan bien
-                for (const k of idx) this.drawItem(x, this.items[k]);
+                for (const k of idx) {
+                    const it = this.items[k];
+                    if (it.k <= 1 ? it.r >= trees : it.k === 6 && it.r >= waves) continue;
+                    this.drawItem(x, it);
+                }
             }
             x.globalAlpha = 1;
         }
@@ -570,13 +613,14 @@ class RealisticMap {
         const band = Math.max(0.55, 4 / b);
         for (const [o, n] of this.nations) {
             if (!meets(n.bbox)) continue;
+            const r = [Math.max(wx0, n.bbox[0]), Math.max(wy0, n.bbox[1]), Math.min(wx1, n.bbox[2]), Math.min(wy1, n.bbox[3])];
             x.save(); x.clip(n.path, 'evenodd');
-            x.strokeStyle = rgbaHex(g.nations[o].color, 0.9); x.lineWidth = band * 2; x.stroke(this.borders);
+            x.strokeStyle = rgbaHex(g.nations[o].color, 0.9); x.lineWidth = band * 2; strokeChunks(x, this.borders, r, band + 1);
             x.restore();
         }
         x.strokeStyle = 'rgba(40,30,18,0.85)'; x.lineWidth = 1.3 / b;
-        x.setLineDash([6 / b, 3 / b]); x.stroke(this.borders); x.setLineDash([]);
-        x.strokeStyle = 'rgba(40,52,58,0.55)'; x.lineWidth = 0.9 / b; x.stroke(this.landPath);
+        x.setLineDash([6 / b, 3 / b]); strokeChunks(x, this.borders, rect); x.setLineDash([]);
+        x.strokeStyle = 'rgba(40,52,58,0.55)'; x.lineWidth = 0.9 / b; strokeChunks(x, this.coastChunks, rect);
     }
 
     // Capa del mundo: una vista general de todo el mapa y, al acercarse, teselas guardadas a la resolución de la pantalla.
@@ -600,28 +644,45 @@ class RealisticMap {
         if (eff <= 1.9) return;
         const b = 2 ** Math.max(1, Math.min(6, Math.round(Math.log2(eff)))), span = TILE / b;
         const [wx0, wy0] = v.toWorld(0, 0), [wx1, wy1] = v.toWorld(v.w, v.h);
-        let budget = 4, pending = false;
+        // Mientras se pintan las de este nivel, debajo van las ya pintadas de los niveles vecinos (al hacer zoom quedan
+        // así un momento algo borrosas o afiladas, pero sin huecos ni saltos al mapa general).
+        for (const lb of [b / 4, b / 2, b * 2]) {
+            if (lb < 2 || lb > 64) continue;
+            const ls = TILE / lb;
+            for (let ty = Math.floor(wy0 / ls); ty <= Math.floor(wy1 / ls); ty++)
+                for (let tx = Math.floor(wx0 / ls); tx <= Math.floor(wx1 / ls); tx++) {
+                    const t = this.tiles.get(`${lb}:${tx}:${ty}`);
+                    if (t && t.ver === ver) ctx.drawImage(t.c, tx * ls, ty * ls, ls, ls);
+                }
+        }
+        // Las de este nivel: se pintan las que falten, del centro de la pantalla hacia fuera, hasta gastar PAINT_MS
+        // por fotograma (al menos una); las demás, en los siguientes.
+        const need = [], ccx = (wx0 + wx1) / 2, ccy = (wy0 + wy1) / 2;
         for (let ty = Math.floor(wy0 / span); ty <= Math.floor(wy1 / span); ty++)
-            for (let tx = Math.floor(wx0 / span); tx <= Math.floor(wx1 / span); tx++) {
-                const key = `${b}:${tx}:${ty}`;
-                let t = this.tiles.get(key);
-                if (!t || t.ver !== ver) {
-                    if (budget > 0) {
-                        budget--;
-                        const c = t?.c ?? document.createElement('canvas');
-                        c.width = c.height = TILE;
-                        const x = c.getContext('2d');
-                        x.setTransform(b, 0, 0, b, -tx * span * b, -ty * span * b);
-                        this.paintWorld(x, b, [tx * span, ty * span, (tx + 1) * span, (ty + 1) * span]);
-                        t = { c, ver };
-                    } else pending = true;
-                }
-                if (t) {
-                    this.tiles.delete(key); this.tiles.set(key, t);   // LRU: al final
-                    ctx.drawImage(t.c, tx * span, ty * span, span, span);
-                }
+            for (let tx = Math.floor(wx0 / span); tx <= Math.floor(wx1 / span); tx++) need.push([tx, ty]);
+        need.sort((p, q) => Math.hypot((p[0] + 0.5) * span - ccx, (p[1] + 0.5) * span - ccy) - Math.hypot((q[0] + 0.5) * span - ccx, (q[1] + 0.5) * span - ccy));
+        const t0 = performance.now();
+        let painted = 0, pending = false;
+        for (const [tx, ty] of need) {
+            const key = `${b}:${tx}:${ty}`;
+            let t = this.tiles.get(key);
+            if (!t || t.ver !== ver) {
+                if (painted === 0 || performance.now() - t0 < PAINT_MS) {
+                    painted++;
+                    const c = t?.c ?? document.createElement('canvas');
+                    c.width = c.height = TILE;
+                    const x = c.getContext('2d');
+                    x.setTransform(b, 0, 0, b, -tx * span * b, -ty * span * b);
+                    this.paintWorld(x, b, [tx * span, ty * span, (tx + 1) * span, (ty + 1) * span]);
+                    t = { c, ver };
+                } else { pending = true; t = null; }
             }
-        while (this.tiles.size > 40) this.tiles.delete(this.tiles.keys().next().value);
+            if (t) {
+                this.tiles.delete(key); this.tiles.set(key, t);   // LRU: al final
+                ctx.drawImage(t.c, tx * span, ty * span, span, span);
+            }
+        }
+        while (this.tiles.size > MAX_TILES) this.tiles.delete(this.tiles.keys().next().value);
         if (pending) v.requestFrame();
     }
 

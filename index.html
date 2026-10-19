@@ -865,7 +865,7 @@ class GameEngine {
             if (p.forces) for (const k of UNIT_KEYS) units[k] += p.forces[k] ?? 0;
             this.settle(this.newArmy(p.country, p.city, units, 0));
         }
-        this.configure({ aggression: 'normal', alliances: 'reales', victory: 0.5, fog: false });
+        this.configure({ aggression: 'normal', alliances: 'reales', victory: 0.5, fog: true });
         for (const nat of this.nations) nat.gold = this.income(nat.id) * CONFIG.START_GOLD_TURNS;
         this.log("SISTEMA DE COMANDO ONLINE. Configura la partida y elige tu nación.");
     }
@@ -956,7 +956,7 @@ class GameEngine {
             aggression: Object.prototype.hasOwnProperty.call(AGGRESSION, s.aggression) ? s.aggression : 'normal',
             alliances: ['reales', 'ninguna'].includes(s.alliances) ? s.alliances : 'reales',
             victory: [0.5, 0.75, 1].includes(Number(s.victory)) ? Number(s.victory) : 0.5,
-            fog: !!s.fog
+            fog: true   // la niebla de guerra es obligatoria (también en partidas guardadas sin ella)
         };
         g.ai = AGGRESSION[g.settings.aggression];
 
@@ -2806,6 +2806,18 @@ function readPrefs() {
 }
 function writePrefs(p) { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch { /* sin almacenamiento */ } }
 
+const FAR_HEX = 5;   // por debajo de estos píxeles por casilla, el mapa se ve «de lejos» (solo capitales)
+// Trozos de CHUNK_CELLS × CHUNK_CELLS casillas: las capas planas (colores, niebla, fronteras) se guardan por trozo para
+// dibujar solo los que caen en pantalla.
+const CHUNK_CELLS = 16;
+const CHUNKS = (() => {
+    const cols = Math.ceil(G.cols / CHUNK_CELLS), rows = Math.ceil(G.rows / CHUNK_CELLS), of = new Int32Array(G.N);
+    for (let i = 0; i < G.N; i++) of[i] = Math.floor(Math.floor(i / G.cols) / CHUNK_CELLS) * cols + Math.floor((i % G.cols) / CHUNK_CELLS);
+    return { cols, rows, n: cols * rows, of, all: Array.from({ length: cols * rows }, (_, k) => k) };
+})();
+// De lejos, esas capas se dibujan desde una imagen del mapa entero a FLAT_RES píxeles por unidad (como mucho 4096 de lado).
+const FLAT_RES = Math.min(4, 4096 / G.width, 4096 / G.height);
+
 class MapView {
     constructor(game, canvas) {
         this.game = game;
@@ -2864,8 +2876,10 @@ class MapView {
     cellAtScreen(px, py) { const [x, y] = this.toWorld(px, py); return G.cellAt(x, y); }
 
     zoomAt(px, py, factor) {
-        const hexPx = G.S * this.scale * factor;
-        if (hexPx < 1.5 || hexPx > 60) return;
+        // Entre 1,5 y 60 píxeles por casilla: en el límite se ajusta a él en vez de ignorar el gesto.
+        const hexPx = Math.min(60, Math.max(1.5, G.S * this.scale * factor));
+        factor = hexPx / (G.S * this.scale);
+        if (Math.abs(factor - 1) < 1e-6) return;
         const [x, y] = this.toWorld(px, py);
         this.scale *= factor;
         this.ox = px - x * this.scale;
@@ -2893,13 +2907,14 @@ class MapView {
     }
 
     buildStatic() {
-        this.provBorders = new Path2D();
-        this.coast = new Path2D();
+        this.provBorders = [];
+        this.coast = [];
         for (const i of G.land) {
+            const k = CHUNKS.of[i];
             for (let d = 0; d < 6; d++) {
                 const j = G.nb[i * 6 + d];
-                if (j < 0 || !isLand(j)) this.edge(this.coast, i, d);
-                else if (d < 3 && G.prov[j] !== G.prov[i]) this.edge(this.provBorders, i, d);
+                if (j < 0 || !isLand(j)) this.edge(this.coast[k] ??= new Path2D(), i, d);
+                else if (d < 3 && G.prov[j] !== G.prov[i]) this.edge(this.provBorders[k] ??= new Path2D(), i, d);
             }
         }
     }
@@ -2965,22 +2980,24 @@ class MapView {
 
     buildDynamic() {
         const g = this.game;
-        this.fills = new Map();
-        this.stripes = new Map();   // ocupante → casillas en disputa
-        this.borders = new Path2D();
+        // Por trozo: color de cada dueño legal, rayas del ocupante en las casillas en disputa y fronteras.
+        this.fills = Array.from({ length: CHUNKS.n }, () => new Map());
+        this.stripes = Array.from({ length: CHUNKS.n }, () => new Map());
+        this.borders = [];
         const sums = g.nations.map(() => [0, 0, 0]);
         for (const i of G.land) {
-            const o = g.owner[i];
+            const o = g.owner[i], k = CHUNKS.of[i], fills = this.fills[k];
             const base = g.legal[i] !== o ? g.legal[i] : o;
-            if (!this.fills.has(base)) this.fills.set(base, new Path2D());
-            this.hexPath(this.fills.get(base), i);
+            if (!fills.has(base)) fills.set(base, new Path2D());
+            this.hexPath(fills.get(base), i);
             if (base !== o) {
-                if (!this.stripes.has(o)) this.stripes.set(o, new Path2D());
-                this.hexPath(this.stripes.get(o), i);
+                const st = this.stripes[k];
+                if (!st.has(o)) st.set(o, new Path2D());
+                this.hexPath(st.get(o), i);
             }
             for (let d = 0; d < 3; d++) {
                 const j = G.nb[i * 6 + d];
-                if (j >= 0 && isLand(j) && g.owner[j] !== o) this.edge(this.borders, i, d);
+                if (j >= 0 && isLand(j) && g.owner[j] !== o) this.edge(this.borders[k] ??= new Path2D(), i, d);
             }
             sums[o][0] += G.cx[i]; sums[o][1] += G.cy[i]; sums[o][2]++;
         }
@@ -2989,8 +3006,70 @@ class MapView {
         this.builtVersion = g.version;
     }
 
+    // Trozos que caen en pantalla (con una casilla de margen).
+    visibleChunks() {
+        const [wx0, wy0] = this.toWorld(0, 0), [wx1, wy1] = this.toWorld(this.w, this.h), STEP = 1.5 * G.S;
+        const r0 = Math.max(0, Math.floor(((wy0 - G.y0) / STEP - 1) / CHUNK_CELLS)), r1 = Math.min(CHUNKS.rows - 1, Math.floor(((wy1 - G.y0) / STEP + 1) / CHUNK_CELLS));
+        const c0 = Math.max(0, Math.floor(((wx0 - G.x0) / G.W - 1) / CHUNK_CELLS)), c1 = Math.min(CHUNKS.cols - 1, Math.floor(((wx1 - G.x0) / G.W + 1) / CHUNK_CELLS));
+        const ids = [];
+        for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) ids.push(r * CHUNKS.cols + c);
+        return ids;
+    }
+
+    // Niebla de guerra por trozos; devuelve si hay niebla que dibujar.
+    updateFog() {
+        const g = this.game;
+        if (!g.settings.fog || g.player === null) { this.fogKey = null; return false; }
+        const vis = g.visibleCells(g.player);
+        if (this.fogKey !== g.visCache.key) {
+            this.fog = [];
+            for (const i of G.land) if (!vis[i]) this.hexPath(this.fog[CHUNKS.of[i]] ??= new Path2D(), i);
+            this.fogKey = g.visCache.key;
+        }
+        return true;
+    }
+
+    // Capas planas de los trozos `ids`: colores de país (vista sencilla), zonas en disputa, niebla y, en la sencilla,
+    // costa y fronteras. `px` es lo que mide un píxel de pantalla en unidades del mapa.
+    drawLayers(ctx, ids, real, fog, px) {
+        const g = this.game;
+        if (!real) {
+            ctx.globalAlpha = 0.86;
+            for (const k of ids) for (const [o, path] of this.fills[k]) { ctx.fillStyle = g.nations[o].color; ctx.fill(path); }
+            ctx.globalAlpha = 1;
+        }
+        for (const k of ids) for (const [o, path] of this.stripes[k]) {
+            const pat = this.stripePattern(g.nations[o].color, ctx);
+            pat.setTransform(new DOMMatrix([px, 0, 0, px, 0, 0]));   // franjas del mismo grosor a cualquier zoom
+            ctx.fillStyle = pat;
+            ctx.fill(path);
+        }
+        if (fog) {
+            ctx.fillStyle = 'rgba(12,16,14,0.5)';
+            for (const k of ids) if (this.fog[k]) ctx.fill(this.fog[k]);
+        }
+        if (real) return;
+        const stroke = (list, style, w) => { ctx.strokeStyle = style; ctx.lineWidth = w * px; for (const k of ids) if (list[k]) ctx.stroke(list[k]); };
+        stroke(this.coast, '#5c8197', 1);
+        stroke(this.borders, INK, 1.9);
+    }
+
+    // Imagen del mapa entero con las capas planas, para dibujarlas de lejos de una vez. Se rehace cuando cambian los
+    // dueños, la niebla o la vista.
+    flatLayer(real, fog) {
+        const key = `${this.builtVersion}:${fog ? this.fogKey : '-'}:${real}:${this.dpr}`;
+        if (this.flat?.key === key) return this.flat.c;
+        const c = this.flat?.c ?? document.createElement('canvas');
+        c.width = Math.ceil(G.width * FLAT_RES); c.height = Math.ceil(G.height * FLAT_RES);
+        const x = c.getContext('2d');
+        x.setTransform(FLAT_RES, 0, 0, FLAT_RES, -(G.x0 - G.W / 2) * FLAT_RES, -(G.y0 - G.S) * FLAT_RES);
+        this.drawLayers(x, CHUNKS.all, real, fog, this.dpr / FLAT_RES);
+        this.flat = { key, c };
+        return c;
+    }
+
     // Rayas diagonales del color del ocupante, con un filete oscuro para que se lean sobre cualquier color.
-    stripePattern(color) {
+    stripePattern(color, ctx = this.ctx) {
         this.patterns ??= new Map();
         if (!this.patterns.has(color)) {
             const c = document.createElement('canvas');
@@ -3003,7 +3082,7 @@ class MapView {
             };
             line(4.6, 'rgba(21,26,18,0.55)');
             line(3, color);
-            this.patterns.set(color, this.ctx.createPattern(c, 'repeat'));
+            this.patterns.set(color, ctx.createPattern(c, 'repeat'));
         }
         return this.patterns.get(color);
     }
@@ -3031,26 +3110,17 @@ class MapView {
 
         ctx.setTransform(dpr * s, 0, 0, dpr * s, dpr * this.ox, dpr * this.oy);
         if (real) this.realistic.drawWorld(ctx, now);
-        else {
-            ctx.globalAlpha = 0.86;
-            for (const [o, path] of this.fills) { ctx.fillStyle = g.nations[o].color; ctx.fill(path); }
-            ctx.globalAlpha = 1;
-        }
-        for (const [o, path] of this.stripes) {
-            const pat = this.stripePattern(g.nations[o].color);
-            pat.setTransform(new DOMMatrix([1 / s, 0, 0, 1 / s, 0, 0]));   // franjas del mismo grosor a cualquier zoom
-            ctx.fillStyle = pat;
-            ctx.fill(path);
-        }
-        if (g.settings.fog && g.player !== null) {
-            const vis = g.visibleCells(g.player);
-            if (this.fogKey !== g.visCache.key) {
-                this.fogPath = new Path2D();
-                for (const i of G.land) if (!vis[i]) this.hexPath(this.fogPath, i);
-                this.fogKey = g.visCache.key;
-            }
-            ctx.fillStyle = 'rgba(12,16,14,0.5)';
-            ctx.fill(this.fogPath);
+        // Colores, disputas, niebla y fronteras: de lejos, desde la imagen del mapa entero; de cerca, solo los trozos a la vista.
+        const fog = this.updateFog();
+        if (s * dpr <= FLAT_RES * 1.3) {
+            const c = this.flatLayer(real, fog);
+            ctx.imageSmoothingEnabled = true;
+            ctx.drawImage(c, G.x0 - G.W / 2, G.y0 - G.S, c.width / FLAT_RES, c.height / FLAT_RES);
+        } else this.drawLayers(ctx, this.visibleChunks(), real, fog, 1 / s);
+        // Límites de provincia (vista sencilla), aparte porque solo se ven a partir de cierto zoom.
+        if (!real && hexPx >= 3) {
+            ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 0.7 / s;
+            for (const k of this.visibleChunks()) if (this.provBorders[k]) ctx.stroke(this.provBorders[k]);
         }
         if (this.hoverNation >= 0) { ctx.fillStyle = 'rgba(255,255,255,0.28)'; ctx.fill(this.nationPath(this.hoverNation)); }
 
@@ -3082,14 +3152,6 @@ class MapView {
         }
 
         if (!real) {
-        if (hexPx >= 3) {
-            ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-            ctx.lineWidth = 0.7 / s;
-            ctx.stroke(this.provBorders);
-        }
-        ctx.strokeStyle = '#5c8197'; ctx.lineWidth = 1 / s; ctx.stroke(this.coast);
-        ctx.strokeStyle = INK; ctx.lineWidth = 1.9 / s; ctx.stroke(this.borders);
-
         // Carreteras
         ctx.lineCap = 'round'; ctx.lineJoin = 'round';
         ctx.strokeStyle = 'rgba(21,26,18,0.6)'; ctx.lineWidth = Math.min(3.6, 1.4 + hexPx * 0.12) / s;
@@ -3160,7 +3222,10 @@ class MapView {
         const visible = (x, y, m = 40) => x > -m && y > -m && x < this.w + m && y < this.h + m;
         const font = (size, weight = 600) => `${weight} ${size}px 'Barlow Semi Condensed', Bahnschrift, 'Arial Narrow', sans-serif`;
 
-        for (const r of RESOURCES) {
+        // De lejos (casillas de menos de FAR_HEX píxeles) solo se ven las capitales: ni ciudades, ni yacimientos, ni
+        // más ejércitos que los tuyos, los de tus enemigos en guerra y los que se están moviendo.
+        const far = hexPx < FAR_HEX;
+        if (!far) for (const r of RESOURCES) {
             const [x, y] = this.toScreen(G.cx[r.cell], G.cy[r.cell]);
             if (!visible(x, y)) continue;
             const rad = Math.max(4, Math.min(11, hexPx * 0.9));
@@ -3183,14 +3248,14 @@ class MapView {
                 ctx.font = `bold ${Math.max(11, Math.min(17, hexPx * 1.6))}px sans-serif`;
                 ctx.lineWidth = 3; ctx.strokeStyle = INK; ctx.strokeText('★', x, y);
                 ctx.fillStyle = SIGNAL; ctx.fillText('★', x, y);
-            } else if (hexPx >= 2.5 && !(real && hexPx >= 9)) {   // en la vista realista, de cerca se ven sus casas
+            } else if (!far && !(real && hexPx >= 9)) {   // en la vista realista, de cerca se ven sus casas
                 ctx.beginPath(); ctx.arc(x, y, Math.max(1.6, Math.min(3.5, hexPx * 0.35)), 0, Math.PI * 2);
                 ctx.fillStyle = '#fff'; ctx.fill(); ctx.lineWidth = 1; ctx.strokeStyle = INK; ctx.stroke();
             }
         }
 
         // Asedios: anillo rojo discontinuo y turnos que lleva
-        for (const [c, sg] of g.sieges) {
+        if (g.player !== null) for (const [c, sg] of g.sieges) {
             if (!g.sees(g.player, c)) continue;
             const [x, y] = this.toScreen(G.cx[c], G.cy[c]);
             if (!visible(x, y)) continue;
@@ -3219,10 +3284,14 @@ class MapView {
         // Ejércitos: fichas OTAN en la vista sencilla, miniaturas en la realista. Mientras se mueven, siguen su camino.
         const tokens = [];
         const seen = (wx, wy, cell) => { const c = G.cellAt(wx, wy); return g.sees(g.player, c >= 0 && isLand(c) ? c : cell); };
-        for (const a of g.armies.values()) {
+        // Antes de elegir país no se enseñan las fuerzas de nadie.
+        if (g.player !== null) for (const a of g.armies.values()) {
             if (g.armyOn(a.cell) !== a) continue;
             const pose = this.motion.pose(a.id, now);
             const wx = pose ? pose.x : G.cx[a.cell], wy = pose ? pose.y : G.cy[a.cell];
+            const [sx, sy] = this.toScreen(wx, wy);
+            if (!visible(sx, sy)) continue;
+            if (far && !pose?.moving && a.owner !== g.player && !g.atWar(g.player, a.owner)) continue;
             if (!seen(wx, wy, a.cell)) continue;
             const mine = a.owner === g.player;
             const view = g.armyView(g.player, a);
@@ -3231,7 +3300,7 @@ class MapView {
                 flanked: g.hostileSides(a.owner, a.cell) >= CONFIG.FLANKED_SIDES, selected: a.cell === this.selectedCell && !pose?.moving,
                 moving: !!pose?.moving, facing: this.motion.facingOf(a.id, pose), alpha: 1 });
         }
-        for (const gh of this.motion.ghosts(now)) {
+        if (g.player !== null) for (const gh of this.motion.ghosts(now)) {
             if (!seen(gh.p.x, gh.p.y, gh.tr.cells[gh.tr.cells.length - 1])) continue;
             const k = g.intel(g.player, gh.tr.owner, gh.tr.cells[gh.tr.cells.length - 1]);
             tokens.push({ id: gh.id, owner: gh.tr.owner, type: k.exact ? gh.tr.type : null, n: k.exact ? gh.tr.n : null, echelon: echelonOf(gh.tr.n).mark,
@@ -3471,7 +3540,8 @@ class GameUI {
                     this.requestDraw();
                 }
             }
-            if (e.pointerType === 'mouse') this.hover(e);
+            if (e.pointerType === 'mouse' && !drag?.moved) this.hover(e);   // arrastrando, sin información bajo el puntero
+            else if (drag?.moved) $('#tooltip').hidden = true;
         });
         const end = e => {
             const tap = drag && !drag.moved && !pinch && pointers.size === 1 && e.type === 'pointerup';
@@ -3490,7 +3560,10 @@ class GameUI {
         c.addEventListener('wheel', e => {
             e.preventDefault();
             const r = c.getBoundingClientRect();
-            this.view.zoomAt(e.clientX - r.left, e.clientY - r.top, e.deltaY < 0 ? 1.2 : 1 / 1.2);
+            // Zoom proporcional al giro: un paso de rueda (~100 px) es ×1,2; el touchpad, que manda muchos pasos
+            // pequeños, hace un zoom suave en vez de saltos.
+            const dy = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1);
+            this.view.zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-Math.max(-300, Math.min(300, dy)) * 0.00182));
             this.requestDraw();
         }, { passive: false });
         c.addEventListener('pointerleave', e => {
@@ -3515,11 +3588,7 @@ class GameUI {
         return this.view.cellAtScreen(e.clientX - r.left, e.clientY - r.top);
     }
 
-    requestDraw() {
-        if (this.drawPending) return;
-        this.drawPending = true;
-        requestAnimationFrame(() => { this.drawPending = false; this.view.draw(); });
-    }
+    requestDraw() { this.view.requestFrame(); }   // un solo dibujo por fotograma, lo pida quien lo pida
 
     planTo(cell) {
         const g = this.game;
@@ -3558,7 +3627,8 @@ class GameUI {
         if (sg) lines.push(`<span class="warn-text">Asediada por ${g.nm(sg.by)}: ${sg.held} de ${g.rules(sg.by).siegeTurns} turnos</span>`);
         if (g.fort[cell]) { const lv = g.fortLevel(g.player, cell); lines.push(lv === null ? 'Fortificada (no sabes de qué nivel)' : `Fortificada con ${FORT_LEVELS[lv]}: defensa ×${decimal(ownerRules.fortDefense)}`); }
         else if (g.fortWork.has(cell)) lines.push(`Fortificando: ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}`);
-        if (!g.sees(g.player, cell)) lines.push('<span class="muted">Niebla de guerra: no sabes qué tropas hay</span>');
+        if (g.player === null) { /* antes de elegir país no se enseñan las fuerzas de nadie */ }
+        else if (!g.sees(g.player, cell)) lines.push('<span class="muted">Niebla de guerra: no sabes qué tropas hay</span>');
         else if (a) {
             const view = g.armyView(g.player, a), ech = ECHELONS.find(x => x.mark === view.echelon);
             lines.push(view.n === null ? `Ejército de ${g.nm(a.owner)}: ${ech.name} sin identificar (${ech.range} unidades)` : `Ejército de ${g.nm(a.owner)}: ${this.unitsLong(a.units)}`);
@@ -3781,7 +3851,7 @@ class GameUI {
         if (this.replaying && !['skip-replay', 'watch', 'speed'].includes(d.action)) return;
         const p = this.selected >= 0 ? PROVINCES[G.prov[this.selected]] : null;
         switch (d.action) {
-            case 'setting': g.configure({ ...g.settings, [d.key]: d.key === 'victory' ? +d.value : d.key === 'fog' ? d.value === 'si' : d.value }); break;
+            case 'setting': g.configure({ ...g.settings, [d.key]: d.key === 'victory' ? +d.value : d.value }); break;
             case 'spy-send': g.playerSendSpy(+d.pid); break;
             case 'call-war': {
                 const sel = document.querySelector(`select[data-call-war="${d.target}"]`);
@@ -4107,13 +4177,12 @@ class GameUI {
         const sorted = [...g.nations].sort((a, b) => a.name.localeCompare(b.name, 'es'));
         let pick = '<p class="note">Haz clic en un país del mapa o elígelo en la lista.</p>';
         if (c !== null) {
-            const e = g.economy(c), lands = g.landCounts(), powers = g.powers();
+            const e = g.economy(c), lands = g.landCounts();
             pick = `<div class="pick" style="border-left-color:${g.nations[c].color}">
                 <h3>${g.nm(c)}</h3>
                 <dl class="facts" style="margin-top:8px">
                     <dt>Capital</dt><dd>${esc(g.nations[c].capitalName)}</dd>
                     <dt>Territorio</dt><dd>${plural(g.citiesOf(c).length, 'provincia', 'provincias')}, ${(100 * lands[c] / G.land.length).toFixed(1)} % ${MAP.of}</dd>
-                    <dt>Ejército</dt><dd>fuerza ${powers[c]}</dd>
                     <dt>Economía</dt><dd>${e.total} de oro por turno, ${g.nations[c].gold} en el tesoro</dd>
                     <dt>Recursos</dt><dd>${[...e.resources, ...e.looseResources].map(r => `${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}`).join(', ') || 'ninguno'}${e.resources.length ? '<br><span class="small muted">Cada uno abastece a su provincia; con carretera, también a las ciudades que una.</span>' : ''}</dd>
                     <dt>Alianzas</dt><dd>${g.blocsOf(c).map(b => esc(b.name)).join(', ') || 'ninguna'}</dd>
@@ -4129,10 +4198,7 @@ class GameUI {
                 ${seg('aggression', Object.fromEntries(Object.entries(AGGRESSION).map(([k, v]) => [k, v.name])), s.aggression)}
                 <p class="note">${g.ai.desc}</p></div>
             <div class="field"><span>Alianzas al empezar</span>${seg('alliances', { reales: 'OTAN y OTSC', ninguna: 'Ninguna' }, s.alliances)}</div>
-            <div class="field"><span>Niebla de guerra</span>${seg('fog', [['no', 'Ver todo'], ['si', 'Solo lo que ves']], s.fog ? 'si' : 'no')}
-                <p class="note">${s.fog
-                    ? `Solo ves las tropas en tu territorio y el de tus aliados, en una franja de ${this.myRules().visionTerritory} casillas alrededor y a ${this.myRules().visionArmy} de tus ejércitos. Puedes enviar espías.`
-                    : `Ves todas las tropas ${MAP.of}.`}</p></div>
+            <p class="note">Niebla de guerra: solo ves las tropas en tu territorio y el de tus aliados, en una franja de ${this.myRules().visionTerritory} casillas alrededor y a ${this.myRules().visionArmy} de tus ejércitos. Puedes enviar espías.</p>
             <div class="field"><span>Para ganar</span>${seg('victory', [['0.5', `50 % ${MAP.of}`], ['0.75', '75 %'], ['1', MAP.all]], s.victory)}</div>
             <div class="field"><span>Tu país</span>
                 <select id="nation-select"><option value="" ${c === null ? 'selected' : ''} disabled>Elige un país…</option>
@@ -4734,7 +4800,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.19-122342';
+const APP_VERSION = '2026.10.19-124326';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {

@@ -22,6 +22,8 @@ El mapa tiene dos vistas, que se cambian en cualquier momento con el botón «Re
 - **Sencilla:** colores planos por país, casillas y fichas OTAN.
 - **Realista:** el relieve, los bosques, los ríos y las ciudades reales pintados a mano alzada, casillas casi invisibles y ejércitos en miniatura que avanzan por su camino. Al alejarte se ve como un mapa político.
 
+De lejos solo se ven las capitales y, de los ejércitos, los tuyos, los de tus enemigos en guerra y los que se están moviendo; al acercarte aparecen ciudades, yacimientos y el resto de tropas, y en la vista realista los árboles y las olas.
+
 El terreno de cada casilla sale de datos reales y cuenta en las reglas (coste de mover y defensa): llanura 1, urbano 1 (×1,4), bosque 2 (×1,25), colinas 2 (×1,3), montaña 3 (×1,6), pantano 3 (×1,2) y lago 4. Cruzar un río sin carretera cuesta medio punto más, y quien defiende al otro lado tiene ×1,25.
 
 Las partidas se guardan en el propio dispositivo (autoguardado al final de cada turno y tres ranuras por mapa). Para pasar una partida a otro dispositivo, usa «Partida → Exportar a archivo» e «Importar archivo». Cargar o importar una partida del otro mapa cambia a ese mapa.
@@ -39,7 +41,7 @@ Cada investigación se paga al empezar (entre 4 y 12 turnos de renta según el n
 
 En el mapa, los galones bajo la ficha (o el borde de bronce, plata u oro de la peana en la vista realista) indican el nivel investigado en la rama de su tipo de tropa, y las fortificaciones cambian de material con el nivel de su dueño: sacos terreros, hormigón, búnkeres y casamatas.
 
-Con niebla de guerra, de un ejército enemigo a la vista solo se sabe de quién es y su tamaño aproximado, con el escalón de la OTAN sobre una ficha vacía (II batallón, III regimiento, X brigada, XX división). Su tipo y su número se conocen con Reconocimiento 2 o con un espía en la provincia; sus galones y el nivel de sus fortificaciones, con Reconocimiento 3 o con Agentes dobles.
+La niebla de guerra es obligatoria (y antes de elegir país no se ve ningún ejército): de un ejército enemigo a la vista solo se sabe de quién es y su tamaño aproximado, con el escalón de la OTAN sobre una ficha vacía (II batallón, III regimiento, X brigada, XX división). Su tipo y su número se conocen con Reconocimiento 2 o con un espía en la provincia; sus galones y el nivel de sus fortificaciones, con Reconocimiento 3 o con Agentes dobles.
 
 ## Archivos
 
@@ -58,6 +60,7 @@ Con niebla de guerra, de un ejército enemigo a la vista solo se sabe de quién 
 | `tools/build-terrain.mjs` | Añade al `europa-data.js` existente el terreno real por casilla y los ríos, y genera `relieve.png`. Descarga los datos la primera vez a `tools/cache/` (unos 50 s). |
 | `tools/smoke-research.mjs` | Pruebas del motor y de la interfaz en el navegador (Playwright): investigación, sus efectos en las reglas, la IA, la inteligencia y las insignias. |
 | `tools/smoke-vista.mjs` | Prueba en el navegador (Playwright): empieza una partida, comprueba la vista realista y las animaciones y guarda capturas. |
+| `tools/perf-mapa.mjs` | Mide cuánto cuesta dibujar el mapa al arrastrar y al hacer zoom, en las dos vistas y los dos mapas. |
 | `tools/smoke-mundo.mjs` | Prueba en el navegador (Playwright) del selector de mapas y del mapa del mundo: relieve, turnos de la IA, fotogramas y cargar una partida del otro mapa. |
 | `tools/release.mjs` | Marca una versión nueva (`index.html`, `sw.js`, `version.json`) antes de publicar. |
 | `tools/resources.json` | Yacimientos (petróleo, gas, carbón, hierro, minerales), editable a mano. |
