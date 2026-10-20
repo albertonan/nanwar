@@ -347,6 +347,15 @@ const CHECKS = [
     T.ok(g.exposedAtSea(es, s), 'expuesta');
     return true;
 }],
+['5 · un barco enemigo cerca de la costa cuenta como amenaza', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(es, fr);
+    const [c, s] = T.coast(g, es);
+    const before = g.threat(es, c);
+    T.embark(g, fr, s, 3);
+    T.ok(g.threat(es, c) > before, `amenaza ${before} → ${g.threat(es, c)}`);
+    return true;
+}],
 ['M · la IA ataca un barco enemigo que tiene a tiro', () => {
     const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
     g.start(es); g.declareWar(fr, es);
@@ -355,6 +364,35 @@ const CHECKS = [
     const boat = T.embark(g, es, s, 3);
     g.aiArmies(fr);
     T.ok(!g.armies.has(boat.id) || g.armies.get(boat.id).cell !== s, 'el barco ha caído o se ha retirado');
+    return true;
+}],
+['M · una paz entre otros dos países deja en su sitio un barco en el mar', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), de = T.nation('de');
+    g.start(es); g.declareWar(fr, de);
+    const [, s] = T.coast(g, es), [, t] = T.coast(g, fr);
+    const mine = T.embark(g, es, s, 3), theirs = T.embark(g, fr, t, 3);
+    g.settlePeace(fr, de, { mode: 'white' });
+    T.eq([g.armies.get(mine.id)?.cell, g.armies.get(theirs.id)?.cell], [s, t], 'los dos barcos siguen en el mar');
+    return true;
+}],
+['M · un barco de la IA en paz vuelve a su costa', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es);
+    T.eq(g.enemiesOf(fr), [], 'precondición: Francia en paz');
+    const [, s] = T.coast(g, fr);
+    const nbs = j => [0, 1, 2, 3, 4, 5].map(d => G.nb[j * 6 + d]).filter(x => x >= 0);
+    const far = [...g.nearCells(s, 3)].find(([j, d]) => d === 3 && T.seaFree(g, j) && nbs(j).every(x => !isLand(x)))?.[0];
+    T.ok(far !== undefined, 'no hay alta mar cerca');
+    const a = T.embark(g, fr, far, 3);
+    const cells = [];
+    for (let t = 0; t < 4; t++) {
+        g.beginNationTurn(fr); g.aiArmies(fr);
+        const b = g.armies.get(a.id);
+        cells.push(b?.cell);
+        if (b && isLand(b.cell)) break;
+    }
+    const b = g.armies.get(a.id);
+    T.ok(b && isLand(b.cell) && g.owner[b.cell] === fr, `casillas: ${cells.map(j => (j === undefined ? '—' : afloat(j) ? 'mar' : PROVINCES[G.prov[j]].name)).join(', ')}`);
     return true;
 }],
 ['M · el espía de la provincia de la costa ve el barco', () => {
@@ -512,6 +550,30 @@ const CHECKS = [
     T.ok(/Mar: .*navega 6 casillas.*×0,25.*asalto anfibio ×0,5.*se hunde/.test(txt()), 'entrada Mar: ' + txt());
     T.learn(g, es, 'naval1', 'naval2'); ui.render();
     T.ok(/navega 8 casillas.*asalto anfibio ×0,65/.test(txt()), 'con Transporte naval');
+    return true;
+}],
+['6 · el panel Mando se dibuja con un ejército de una operación en el mar', () => {
+    const g = T.uiStart('es'), es = g.player;
+    const [c, s] = T.coast(g, es);
+    const a = T.embark(g, es, s, 3);
+    const op = g.createOp(es, 'reserva', [c], { noCap: true });
+    a.op = op.id;
+    ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+    T.ok(/el mar junto a/.test($('#drawer-body').textContent), 'el miembro sale en el mar: ' + $('#drawer-body').textContent.slice(0, 300));
+    return true;
+}],
+['6 · con niebla, navegar de una casilla de mar a otra deja un trazo animado', () => {
+    const g = T.uiStart('es', true), es = g.player;
+    const [, s] = T.coast(g, es);
+    const a = T.embark(g, es, s, 3);
+    const r = g.reach(es, s, g.mp(a));
+    const v = [...r.exp].find(([j, e]) => !isLand(j) && e.cost === 2 * MOVE && !g.armyAt[j])[0];
+    g.motion.length = 0; ui.view.motion.clear();
+    g.moveArmy(a, v, r);
+    ui.view.motion.consume(performance.now());
+    const has = ui.view.motion.tracks.has(a.id);
+    ui.view.motion.clear();   // que el trazo no pase a las pruebas siguientes (otra partida reusa los números de ejército)
+    T.ok(has, 'sin trazo para el barco');
     return true;
 }],
 ['6 · en la vista sencilla el barco tiene t.afloat y el ejército de tierra no', () => {

@@ -886,7 +886,7 @@ const G = (() => {
         width: W * (cols + 0.5), height: STEP * (rows - 1) + 2 * S, x0, y0 };
 })();
 const isLand = i => G.prov[i] >= 0;
-const afloat = i => !isLand(i);   // en el mar (o en un lago): donde solo se navega
+const afloat = i => !isLand(i);   // en el mar, donde solo se navega (los lagos son tierra)
 // Clave canónica de un tramo (los dos sentidos comparten): casilla de índice menor * 6 + su dirección.
 const edgeKey = (u, d) => { const v = G.nb[u * 6 + d]; return v >= 0 && v < u ? v * 6 + (d + 3) % 6 : u * 6 + d; };
 
@@ -1770,6 +1770,7 @@ class GameEngine {
     // el ejército únicamente puede dar el paso mínimo garantizado de reach() (una casilla por turno) o atacar a un vecino.
     // Lados de la casilla con ejércitos de países en guerra con `owner`.
     hostileSides(owner, cell) {
+        if (afloat(cell)) return 0;   // en el mar no se rodea
         let n = 0;
         for (let d = 0; d < 6; d++) {
             const j = G.nb[cell * 6 + d];
@@ -1920,9 +1921,9 @@ class GameEngine {
         if (f) return f;
         const dist = new Float64Array(G.N).fill(Infinity), next = new Int32Array(G.N).fill(-1), done = new Uint8Array(G.N), heap = new MinHeap();
         const open = c => {
-            if (c === dest || !isLand(c)) return true;
+            if (c === dest) return true;
             const o = this.owner[c];
-            if (!(o === owner || this.allied(owner, o) || this.atWar(owner, o))) return false;
+            if (isLand(c) && !(o === owner || this.allied(owner, o) || this.atWar(owner, o))) return false;
             const id = this.armyAt[c];
             return !id || this.armies.get(id).owner === owner;
         };
@@ -2208,7 +2209,10 @@ class GameEngine {
     opsOf(id) { return [...this.ops.values()].filter(op => op.owner === id); }
     opMembers(op) { const out = []; for (const a of this.armies.values()) if (a.op === op.id && a.owner === op.owner && this.armyOn(a.cell) === a) out.push(a); return out; }
     commandCap(id) { return this.rules(id).commandOps + Math.floor(this.citiesOf(id).length / 20); }
-    placeName(c) { const p = PROVINCES[G.prov[c]]; return CITY_OF[c] >= 0 ? p.cityName : p.name; }
+    placeName(c) {
+        if (afloat(c)) return `el mar junto a ${PROVINCES[SEA_PROV[c]].name}`;   // en el mar, la costa más cercana
+        const p = PROVINCES[G.prov[c]]; return CITY_OF[c] >= 0 ? p.cityName : p.name;
+    }
     // Casillas a `k` pasos o menos (tierra y mar), con su distancia.
     nearCells(cell, k) {
         const seen = new Map([[cell, 0]]), queue = [cell];
@@ -2219,13 +2223,14 @@ class GameEngine {
         }
         return seen;
     }
-    // Peligro de una casilla para `owner`: tierra enemiga y ejércitos enemigos a 2 casillas o menos.
+    // Peligro de una casilla para `owner`: tierra enemiga y ejércitos enemigos a 2 casillas o menos (también en el mar).
     threat(owner, cell) {
         let t = 0;
         for (const c of this.nearCells(cell, 2).keys()) {
-            if (!isLand(c) || !this.atWar(owner, this.owner[c])) continue;
-            t++;
             const id = this.armyAt[c];
+            if (!isLand(c)) { if (id && this.atWar(owner, this.armies.get(id).owner)) t += 4; continue; }
+            if (!this.atWar(owner, this.owner[c])) continue;
+            t++;
             if (id && this.atWar(owner, this.armies.get(id).owner)) t += 4;
         }
         return t;
@@ -3995,8 +4000,10 @@ class GameEngine {
         this.version++;
     }
     // Tras un tratado, los ejércitos que han quedado en territorio de un país en paz vuelven a la casilla propia más cercana.
+    // Los que están en el mar se quedan: en paz, la IA los lleva a su costa (aiSailHome).
     evictArmies() {
         for (const a of [...this.armies.values()]) {
+            if (afloat(a.cell)) continue;   // el mar no es de nadie
             const o = this.owner[a.cell];
             if (o === a.owner || this.allied(a.owner, o) || this.atWar(a.owner, o)) continue;
             const seen = new Set([a.cell]), queue = [a.cell];
@@ -4492,9 +4499,9 @@ class GameEngine {
     // es para atacar.
     aiArmies(id) {
         const enemies = this.enemiesOf(id);
-        if (!enemies.length) return;
+        if (!enemies.length) { this.aiSailHome(id); return; }
         const targets = PROVINCES.filter(p => enemies.includes(this.owner[p.city])).map(p => p.city);
-        if (!targets.length) return;
+        if (!targets.length) { this.aiSailHome(id); return; }
         const land = this.landSteps(id, targets);
         let sea = null;   // pasos contando el mar: solo si algún ejército no tiene camino por tierra
         const mine = [...this.armies.values()].filter(a => a.owner === id && this.mp(a) > 0 && !a.op && !a.form)
@@ -4536,6 +4543,32 @@ class GameEngine {
             if (best.kind === 'attack') this.attack(army, best.from, best.target, r);
             else this.moveArmy(army, best.target, r);
         }
+    }
+
+    // Sin enemigos a los que ir, los ejércitos que han quedado en el mar navegan hacia la costa propia libre más cercana.
+    aiSailHome(id) {
+        for (const a of [...this.armies.values()]) {
+            if (this.over) return;
+            if (a.owner !== id || !afloat(a.cell) || !this.armies.has(a.id) || this.armyOn(a.cell) !== a || this.mp(a) <= 0) continue;
+            const home = this.nearestCoast(id, a.cell);
+            if (home >= 0) this.advance(a, home, this.reach(id, a.cell, this.mp(a), a.used === 0));
+        }
+    }
+    // Casilla de tierra propia y libre más cercana a la casilla de mar `cell`, navegando sin cruzar barcos ajenos, o −1.
+    nearestCoast(id, cell) {
+        const seen = new Uint8Array(G.N), queue = [cell];
+        seen[cell] = 1;
+        for (let i = 0; i < queue.length; i++) {
+            for (let d = 0; d < 6; d++) {
+                const v = G.nb[queue[i] * 6 + d];
+                if (v < 0 || seen[v]) continue;
+                seen[v] = 1;
+                const other = this.armyAt[v];
+                if (isLand(v)) { if (this.owner[v] === id && !other) return v; continue; }
+                if (!other || this.armies.get(other).owner === id) queue.push(v);
+            }
+        }
+        return -1;
     }
 
     // Cada ejército que pasa hambre y no tiene una orden en marcha (aguantar no cuenta) intenta salir de la bolsa hacia
@@ -5392,7 +5425,7 @@ class MapView {
 
         // Ejércitos: fichas OTAN en la vista sencilla, miniaturas en la realista. Mientras se mueven, siguen su camino.
         const tokens = [];
-        const seen = (wx, wy, cell) => { const c = G.cellAt(wx, wy); return g.sees(g.player, c >= 0 && isLand(c) ? c : cell); };
+        const seen = (wx, wy, cell) => { const c = G.cellAt(wx, wy); return g.sees(g.player, c >= 0 ? c : cell); };
         // Embarcado según la casilla donde se dibuja: a medio camino, la ficha cambia al entrar o salir del mar.
         const onSea = (wx, wy, cell) => { const c = G.cellAt(wx, wy); return afloat(c >= 0 ? c : cell); };
         // Antes de elegir país no se enseñan las fuerzas de nadie.
@@ -6033,7 +6066,7 @@ class GameUI {
             lines.push(`Tu ataque ${Math.round(fx.atk)}${fx.attState.parts.length + fx.attParts.length ? ` (${state([...fx.attState.parts, ...fx.attParts]).join(', ')})` : ''} contra su defensa ${Math.round(dfn)}${factors ? ` (${factors})` : ''}`);
             lines.push(`Si ganas te quedan unas ${winLeft} de ${n}; si pierdes, unas ${loseLeft}`);
         } else if (this.reachInfo?.attacks.has(cell)) lines.push('<b style="color:#ff8a78">Clic para atacar</b>');
-        else if (this.reachInfo?.moves.has(cell)) lines.push('<b style="color:#a8e38a">Clic para mover aquí</b>');
+        else if (this.reachInfo?.moves.has(cell)) lines.push(`<b style="color:#a8e38a">${afloat(cell) && isLand(this.selectedArmy()?.cell ?? -1) ? 'Clic para embarcar' : 'Clic para mover aquí'}</b>`);
         const prev = this.view.preview;
         if (prev && cell === this.view.hoverCell) {
             const what = prev.cls === 'fort' ? `Fortificar ${plural(prev.cells.length, 'casilla', 'casillas')}` : `${plural(prev.path.length - 1, 'tramo', 'tramos')} de ${prev.cls === 2 ? 'autopista' : 'carretera'}`;

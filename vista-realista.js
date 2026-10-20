@@ -142,7 +142,7 @@ class ArmyMotion {
     visible(cells) {
         const g = this.view.game;
         if (g.player === null || !g.settings.fog) return true;
-        return cells.some(c => isLand(c) && g.sees(g.player, c));
+        return cells.some(c => g.sees(g.player, c));
     }
     consume(now) {
         const g = this.view.game;
