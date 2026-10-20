@@ -843,6 +843,102 @@ const CHECKS = [
     ui.setSheet('media');
     T.ok(mini <= 90 && big >= m.stage * 0.8, `tamaños de la hoja: ${mini}, ${big} de ${m.stage}`);
     return true;
+}],
+['6 · el mapa enseña tus aeródromos y antiaéreos y los aeródromos de todos; el antiaéreo enemigo, solo si lo conoces', () => {
+    const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr');
+    ui.view.draw();
+    const marks = ui.view.airMarks, own = c => marks.some(m => m.cell === c && m.owner === es);
+    T.ok([...g.airfields].filter(([, f]) => f.owner === es).every(([c]) => own(c)), 'tus aeródromos');
+    T.ok(marks.some(m => m.kind === 'field' && m.owner === fr && m.n === null), 'los franceses, sin saber cuántos');
+    T.ok(!marks.some(m => m.kind === 'aa' && m.owner === fr), 'su antiaéreo no');
+    return true;
+}],
+['6 · niebla en el mapa: el antiaéreo, cuando lo conoces; los escuadrones de un aeródromo ajeno, con información exacta; la patrulla enemiga, solo a la vista y con información exacta', () => {
+    const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr');
+    g.declareWar(es, fr); T.bare(g);
+    const [base, target] = T.pair(g, es, fr), paris = g.nations[fr].capitalCell;
+    T.airfield(g, es, base); const [s] = T.squad(g, es, base, 1); g.fort[target] = 2; g.fortVersion++; T.site(g, fr, target);
+    T.airfield(g, fr, paris); const foes = T.squad(g, fr, paris, 2);
+    const at = (kind, c) => { ui.view.draw(); return ui.view.airMarks.filter(m => m.kind === kind && m.cell === c); };
+    T.ok(!at('aa', target).length, 'antiaéreo que no conoces: sin marca');
+    T.eq([at('field', paris).map(m => m.n), at('sq', paris).length], [[null], 0], 'aeródromo que no ves: sin escuadrones');
+    T.luck(g, 0.2); g.airMission(es, [s.id], 'fort', target);
+    T.eq(at('aa', target).map(m => m.down), [false], 'te ha disparado: ya lo conoces');
+    g.spies.set(G.prov[paris], { since: g.turn, revealedTurn: g.turn }); g.spyVersion++;
+    T.eq([at('field', paris).map(m => m.n), at('sq', paris).map(m => m.n)], [[2], [2]], 'con un espía, cuántos');
+    const [, j] = T.border(g, es, fr);
+    for (const q of foes) q.patrol = j;
+    g.airVersion++;
+    T.ok(g.sees(es, j) && !at('patrol', j).length, 'patrulla enemiga a la vista, sin información: no se enseña');
+    g.airSeen.set(es * G.N + j, g.turn); g.airVersion++;
+    T.eq(at('patrol', j).map(m => [m.owner, m.n]), [[fr, 2]], 'con información exacta, sí');
+    return true;
+}],
+['6 · cada marca propia lleva su nivel: Aviación en aeródromos, escuadrones y patrullas, Defensa aérea en el antiaéreo', () => {
+    const g = T.uiStart('es'), es = g.player, cap = g.nations[es].capitalCell;
+    T.learn(g, es, 'aviacion1', 'aviacion2', 'antiaerea1');
+    g.squadronsAt(cap)[0].patrol = cap; g.airVersion++;
+    ui.view.draw();
+    const mine = ui.view.airMarks.filter(m => m.owner === es), kinds = new Set(mine.map(m => m.kind));
+    T.eq([...kinds].sort(), ['aa', 'field', 'patrol', 'sq'], 'las cuatro clases');
+    T.ok(mine.every(m => m.level === (m.kind === 'aa' ? 1 : 2)), `niveles: ${JSON.stringify(mine.map(m => [m.kind, m.level]))}`);
+    return true;
+}],
+['6 · la animación de una misión: un trazo de la base al blanco en las dos vistas', () => {
+    const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+    g.declareWar(es, fr); T.bare(g);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const [s] = T.squad(g, es, base, 1); g.fort[target] = 2; T.luck(g, 0.99);
+    for (const mode of ['sencilla', 'realista']) {
+        ui.view.setMode(mode); g.turn++; g.airHits.clear();
+        g.airMission(es, [s.id], 'fort', target); ui.view.draw();
+        T.ok(ui.view.motion.air.some(t => t.cell === target && t.from.includes(base)), `trazo en ${mode}`);
+    }
+    ui.view.setMode('sencilla');
+    return true;
+}],
+['6 · con niebla, la misión enemiga contra lo que no ves no se anima', () => {
+    const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr'), it = T.nation('it');
+    g.declareWar(fr, it); T.bare(g);
+    const [base, target] = T.pair(g, fr, it, (a, b) => !g.sees(es, a) && !g.sees(es, b));
+    T.airfield(g, fr, base); const [s] = T.squad(g, fr, base, 1); g.fort[target] = 2; T.luck(g, 0.99);
+    ui.view.motion.clear(); g.airMission(fr, [s.id], 'fort', target); ui.view.draw();
+    T.eq(ui.view.motion.air.length, 0, 'sin trazo');
+    return true;
+}],
+['6 · la ficha de un ejército desorganizado lo dice', () => {
+    const g = T.uiStart('es'), es = g.player;
+    const [, c] = T.plainPair(g, es), a = T.army(g, es, c, 4); a.disorgUntil = g.turn + 1;
+    T.ok(ui.wearLines(a).some(l => /Desorganizado ×0,8/.test(l)), 'línea');
+    return true;
+}],
+['6 · la tarjeta del ratón: aeródromo, inservible, antiaéreo dañado y casilla protegida', () => {
+    const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr'), cap = g.nations[es].capitalCell, paris = g.nations[fr].capitalCell;
+    const n = g.squadronsAt(cap).length;
+    g.airfields.get(cap).downUntil = g.turn + 1; g.aaSites.get(cap).hits = 1;
+    g.squadronsAt(cap)[0].patrol = cap; g.airVersion++;
+    const t = T.hover(cap);
+    T.ok(t.includes(`Aeródromo de ${g.nm(es)}: ${n} escuadrones`) && t.includes(`Inservible hasta el turno ${g.turn + 1}`), `aeródromo: ${t}`);
+    T.ok(t.includes('Antiaéreo fijo (dañado)') && t.includes('Protegida por tus escuadrones'), `antiaéreo y patrulla: ${t}`);
+    T.ok(/no sabes cuántos/.test(T.hover(paris)) && !/Antiaéreo/.test(T.hover(paris)), 'el francés, sin saber cuántos ni su antiaéreo');
+    return true;
+}],
+['6 · la leyenda trae los símbolos de la aviación', () => {
+    T.uiStart('es');
+    const t = document.querySelector('#legend').textContent;
+    T.ok(/Escuadrón/.test(t) && /Aeródromo/.test(t) && /Antiaéreo/.test(t), 'leyenda');
+    return true;
+}],
+['6 · móvil: la hoja grande solo se estira entera con la ficha de Aviación', () => {
+    const g = T.uiStart('es'), cap = g.nations[g.player].capitalCell, min = () => getComputedStyle(document.querySelector('#card')).minHeight;
+    ui.setSheet('grande'); ui.setTool('command'); ui.clickCell(cap);
+    const other = min();
+    ui.setTool('air'); ui.clickCell(cap);
+    const air = min();
+    ui.setSheet('media'); ui.setTool('command');
+    T.ok(other === 'auto' || other === '0px', `otra ficha: ${other}`);
+    T.ok(parseFloat(air) > 0, `ficha de Aviación: ${air}`);
+    return true;
 }]
 ];
 
@@ -901,6 +997,61 @@ try {
         }
         if (errors.length) { failed++; console.log(`FALLA ${SHOTS}\n      ${errors.join('\n      ')}`); }
         else console.log(`ok    ${SHOTS} (${join(out, 'aviacion-ficha.png')}, aviacion-ficha-movil.png)`);
+    }
+    // Capturas del mapa con la aviación de España en las dos vistas: sus aeródromos y antiaéreos, un antiaéreo francés
+    // conocido, una patrulla propia, la herramienta con un blanco y una misión a medio vuelo.
+    const MAP_SHOTS = '6 · capturas de la aviación en las dos vistas';
+    if (!filter || MAP_SHOTS.includes(filter)) {
+        ran++;
+        const out = join(root, 'tools/cache/smoke');
+        mkdirSync(out, { recursive: true });
+        const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+        page.errors = [];
+        page.on('pageerror', e => page.errors.push(e.message));
+        await page.goto(`http://localhost:${port}/?seed=7&mapa=europa`);
+        await page.waitForFunction(() => typeof GameEngine === 'function' && typeof ui === 'object');
+        await page.evaluate(setup);
+        await page.evaluate(() => {
+            const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr');
+            g.declareWar(es, fr);
+            // Una base propia con su antiaéreo, cerca de dos ciudades francesas con aeródromo (de las que no sabes cuántos
+            // escuadrones tienen) y fortificación; un antiaéreo francés conocido junto a la primera.
+            const [base, target] = T.pair(g, es, fr);
+            if (!g.airfields.has(base)) T.airfield(g, es, base);
+            if (!g.aaSites.has(base)) T.site(g, es, base);
+            T.squad(g, es, base, 4 - g.squadronsAt(base).length);
+            const other = PROVINCES.filter(p => g.owner[p.city] === fr && p.city !== target && hexDist(base, p.city) <= g.airRange(es))
+                .sort((a, b) => hexDist(target, a.city) - hexDist(target, b.city))[0]?.city ?? target;
+            for (const c of [target, other]) { g.fort[c] = 2; if (!g.airfields.has(c)) T.airfield(g, fr, c); }
+            g.fortVersion++;
+            const site = [0, 1, 2, 3, 4, 5].map(d => G.nb[target * 6 + d]).find(j => j >= 0 && isLand(j) && g.owner[j] === fr && CITY_OF[j] < 0);
+            T.site(g, fr, site).known.add(es);
+            const path = flightPath(base, target), guard = path.filter(c => g.owner[c] === es).pop() ?? base;
+            g.squadronsAt(base)[0].patrol = guard; g.airVersion++;
+            ui.setTool('air'); ui.clickCell(base); ui.clickCell(target);
+            window.SHOT = { base, other, mid: path[Math.floor(path.length / 2)] };
+        });
+        await page.waitForFunction(() => ui.view.realistic.state === 'ready' || ui.view.realistic.state === 'failed', null, { timeout: 60000 });
+        // La misión a medio vuelo va contra la otra ciudad, para que su trazo no se confunda con el camino de la herramienta.
+        const shot = async (name, mode) => {
+            await page.evaluate(m => new Promise(r => {
+                const g = ui.game, { base, other, mid } = SHOT;
+                ui.view.setMode(m); ui.view.scale = 1; ui.view.centerOn(mid, 18); ui.view.ox += 170;   // a la derecha de la ficha
+                g.turn++; g.airHits.clear(); T.luck(g, 0.99);
+                ui.view.motion.clear(); ui.view.motion.speed = 4;   // solo esta misión, y que la captura pille el avión a medio camino
+                const ready = g.squadronsAt(base).filter(q => g.canFly(q) && q.patrol < 0);
+                g.airMission(g.player, [ready[ready.length - 1].id], 'fort', other);
+                ui.render(); ui.view.draw(); requestAnimationFrame(() => requestAnimationFrame(r));
+            }), mode);
+            await page.waitForTimeout(1500);
+            await page.screenshot({ path: join(out, `${name}.png`) });
+        };
+        await shot('aviacion-sencilla', 'sencilla');
+        await shot('aviacion-realista', 'realista');
+        const state = await page.evaluate(() => ui.view.realistic.state);
+        if (state !== 'ready' || page.errors.length) { failed++; console.log(`FALLA ${MAP_SHOTS}\n      vista realista: ${state}; ${page.errors.join('; ')}`); }
+        else console.log(`ok    ${MAP_SHOTS} (${join(out, 'aviacion-sencilla.png')}, aviacion-realista.png)`);
+        await page.close();
     }
     for (const page of pages.values()) if (page.errors.length) { failed++; console.log(`FALLA errores en la página:\n      ${page.errors.join('\n      ')}`); }
 } finally {

@@ -113,13 +113,15 @@ function strokeChunks(x, chunks, rect, m = 2) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Animación de ejércitos. El motor apunta en game.motion lo que pasa ({kind:'move', cells...} y {kind:'battle'...});
-// la vista lo reproduce encadenado por ejército. La partida ya está resuelta: esto solo enseña cómo ha ocurrido.
+// Animación de ejércitos. El motor apunta en game.motion lo que pasa ({kind:'move', cells...}, {kind:'battle'...} y las
+// misiones aéreas, {kind:'air', from, cell, result...}); la vista lo reproduce encadenado por ejército. La partida ya
+// está resuelta: esto solo enseña cómo ha ocurrido.
 class ArmyMotion {
     constructor(view) {
         this.view = view;
         this.tracks = new Map();   // id → [tramos pendientes o en curso]
         this.fx = [];              // combates
+        this.air = [];             // misiones aéreas: un trazo de cada base al blanco
         this.particles = [];
         this.busy = new Map();     // id → instante en que queda libre
         this.speed = 1;            // multiplicador de duración (velocidad de la repetición de la IA)
@@ -129,7 +131,7 @@ class ArmyMotion {
         if (pose?.moving) this.facings.set(id, pose.facing);
         return this.facings.get(id) ?? 1;
     }
-    clear() { this.tracks.clear(); this.fx = []; this.particles = []; this.busy.clear(); }
+    clear() { this.tracks.clear(); this.fx = []; this.air = []; this.particles = []; this.busy.clear(); }
     stepMs(u, v) {
         if (!this.view.isRealistic()) return 70 * this.speed;
         const g = this.view.game, d = G.dirTo(u, v);
@@ -167,6 +169,9 @@ class ArmyMotion {
                 const dur = 900 * Math.max(0.5, this.speed);
                 this.fx.push({ ...ev, start, end: start + dur, last: 0 });
                 this.busy.set(ev.att, start + dur); this.busy.set(ev.def, start + dur);
+            } else if (ev.kind === 'air') {   // se ve si es del jugador o si ve el blanco
+                if (ev.owner !== g.player && !this.visible([ev.cell])) continue;
+                this.air.push({ from: ev.from, cell: ev.cell, owner: ev.owner, result: ev.result, mission: ev.mission, start: now, end: now + 900 * this.speed, done: false });
             }
         }
     }
@@ -201,15 +206,19 @@ class ArmyMotion {
         let end = now;
         for (const q of this.tracks.values()) for (const t of q) end = Math.max(end, t.end);
         for (const f of this.fx) end = Math.max(end, f.end);
+        for (const t of this.air) end = Math.max(end, t.end);
         return end - now;
     }
     active(now) {
         this.fx = this.fx.filter(f => now < f.end + 600);
+        this.air = this.air.filter(t => now < t.end + 700);
         this.particles = this.particles.filter(p => now - p.t0 < p.life);
-        return this.tracks.size > 0 || this.fx.length > 0 || this.particles.length > 0;
+        return this.tracks.size > 0 || this.fx.length > 0 || this.air.length > 0 || this.particles.length > 0;
     }
     spawn(kind, x, y, extra = {}) { this.particles.push({ kind, x, y, t0: performance.now(), life: 600, vx: 0, vy: 0, ...extra }); }
-    // Polvo tras las miniaturas y fogonazos y humo en los combates (vista realista); un aro rojo en la sencilla.
+    // Polvo tras las miniaturas y fogonazos y humo en los combates (vista realista); un aro rojo en la sencilla. Al llegar
+    // una misión aérea, su resultado en el blanco: un fogonazo y humo si acierta y una bocanada gris si fracasa (en la
+    // sencilla, el aro); la interceptada, un aspa amarilla a medio camino.
     effects(now) {
         const real = this.view.isRealistic();
         for (const [id] of this.tracks) {
@@ -232,6 +241,18 @@ class ArmyMotion {
             this.spawn('smoke', (ax + dx) / 2 + (Math.random() - 0.5) * 2.5, (ay + dy) / 2 + (Math.random() - 0.5) * 1.5,
                 { life: 1500, vy: -0.0009, g: 90 + Math.random() * 60 });
         }
+        for (const t of this.air) {
+            const cut = t.result === 'intercepted', at = cut ? (t.start + t.end) / 2 : t.end;
+            if (t.done || now < at) continue;
+            t.done = true;
+            const tx = G.cx[t.cell], ty = G.cy[t.cell];
+            if (cut) { for (const b of t.from) this.spawn('cross', (G.cx[b] + tx) / 2, (G.cy[b] + ty) / 2, { life: 1100 }); continue; }
+            if (!real || t.mission === 'patrol') { this.spawn('ring', tx, ty, { life: 650 }); continue; }
+            if (t.result === 'hit') {
+                this.spawn('flash', tx, ty - 0.3, { life: 240 });
+                for (let i = 0; i < 4; i++) this.spawn('smoke', tx + (Math.random() - 0.5) * 1.6, ty - 0.2 + (Math.random() - 0.5), { life: 1600, vy: -0.0009, g: 70 + Math.random() * 50 });
+            } else this.spawn('smoke', tx, ty - 0.2, { life: 1200, vy: -0.0006, g: 180 });
+        }
     }
     shake(id, now) {
         for (const f of this.fx) if ((f.att === id || f.def === id) && now >= f.start && now < f.end) return [Math.sin(now / 23 + id) * 1.8, Math.cos(now / 31) * 1];
@@ -249,8 +270,53 @@ class ArmyMotion {
                 gr.addColorStop(0, `rgba(255,240,180,${1 - t})`); gr.addColorStop(1, 'rgba(255,140,40,0)');
                 ctx.fillStyle = gr; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); ctx.restore();
             } else if (p.kind === 'ring') { ctx.strokeStyle = `rgba(224,90,71,${1 - t})`; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, Math.max(6, s * (0.8 + t * 2)), 0, TAU); ctx.stroke(); }
+            else if (p.kind === 'cross') {   // aspa amarilla: la misión interceptada
+                const r = Math.max(5, s * 0.9);
+                ctx.lineCap = 'round';
+                for (const [c, w] of [[`rgba(21,26,18,${1 - t})`, 4.6], [`rgba(240,196,25,${1 - t})`, 2.4]]) {
+                    ctx.strokeStyle = c; ctx.lineWidth = w;
+                    ctx.beginPath(); ctx.moveTo(x - r, y - r); ctx.lineTo(x + r, y + r); ctx.moveTo(x + r, y - r); ctx.lineTo(x - r, y + r); ctx.stroke();
+                }
+                ctx.lineCap = 'butt';
+            }
         }
     }
+}
+
+// Misiones aéreas en vuelo, en píxeles de pantalla, de cada base al blanco en 900 ms (× speed). En la vista realista,
+// la estela del avión: un punto que avanza y una línea que se desvanece detrás; en la sencilla, una línea discontinua
+// clara y el avión del color del país. La interceptada se queda a medio camino. Al acabar, el trazo se apaga en 700 ms.
+function drawAirTrails(ctx, view, now) {
+    const M = view.motion;
+    if (!M.air.length) return;
+    const real = view.isRealistic(), g = view.game;
+    ctx.save();
+    ctx.lineCap = 'round';
+    for (const t of M.air) {
+        const stop = t.result === 'intercepted' ? 0.5 : 1, u = Math.min(stop, (now - t.start) / (t.end - t.start));
+        if (u < 0) continue;
+        const fade = clamp01(1 - (now - t.end) / 700), color = g.nations[t.owner].color, [tx, ty] = view.toScreen(G.cx[t.cell], G.cy[t.cell]);
+        for (const b of t.from) {
+            const [bx, by] = view.toScreen(G.cx[b], G.cy[b]), hx = bx + (tx - bx) * u, hy = by + (ty - by) * u;
+            if (real) {
+                const k = Math.max(0, u - 0.35), sx = bx + (tx - bx) * k, sy = by + (ty - by) * k, gr = ctx.createLinearGradient(sx, sy, hx, hy);
+                gr.addColorStop(0, 'rgba(255,255,255,0)'); gr.addColorStop(1, `rgba(255,255,255,${0.9 * fade})`);
+                ctx.strokeStyle = gr; ctx.lineWidth = 2.4;
+                ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(hx, hy); ctx.stroke();
+            } else {
+                ctx.globalAlpha = fade; ctx.setLineDash([6, 4]);
+                ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(hx, hy);
+                ctx.strokeStyle = INK; ctx.lineWidth = 3.8; ctx.stroke();
+                ctx.strokeStyle = '#f3efe2'; ctx.lineWidth = 2; ctx.stroke();
+                ctx.setLineDash([]); ctx.globalAlpha = 1;
+            }
+            if (u < stop) {   // el avión
+                ctx.beginPath(); ctx.arc(hx, hy, 3.8, 0, TAU);
+                ctx.fillStyle = color; ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = real ? '#fff' : INK; ctx.stroke();
+            }
+        }
+    }
+    ctx.restore();
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -274,6 +340,7 @@ class RealisticMap {
         this.state = 'idle';   // idle → loading → ready (o failed: se queda la vista sencilla)
         this.tiles = new Map();
         this.ownerKey = -1;
+        this.minis = new Map();   // miniaturas de la aviación ya pintadas (drawMini)
     }
 
     prepare() {
@@ -814,6 +881,134 @@ class RealisticMap {
         ctx.stroke();
         ctx.lineCap = 'butt';
     }
+
+    // --- Aviación: miniaturas sobre peana, como los ejércitos (o: x, y, hexPx, color, n, level, down, left, mine) ---
+    drawAirfield(ctx, o) { this.drawMini(ctx, o, 'field', this.paintAirfield); }
+    drawSquadrons(ctx, o) { this.drawMini(ctx, o, 'sq', this.paintSquadrons); }
+    drawAASite(ctx, o) { this.drawMini(ctx, o, 'aa', this.paintAASite); }
+    // Cada miniatura se pinta una vez por aspecto (clase, color, tamaño, nivel, estado y etiqueta) en una imagen aparte y
+    // luego solo se copia: a media distancia se ven cientos. El tamaño va en píxeles enteros para que el zoom no las
+    // repinte en cada fotograma; se guardan las 300 últimas.
+    drawMini(ctx, o, kind, paint) {
+        const dpr = this.view.dpr, U = Math.round(Math.max(8, Math.min(24, o.hexPx * 0.82)));
+        const key = `${kind}:${o.color}:${U}:${o.hexPx < 6}:${o.level}:${o.down}:${o.left > 0}:${o.n}:${o.mine}:${!!o.flying}:${dpr}:${document.fonts?.status}`;
+        const W = 1.8 * U + 10, T = 2 * U + 4, B = 0.8 * U + 9;
+        let c = this.minis.get(key);
+        if (!c) {
+            c = document.createElement('canvas');
+            c.width = Math.ceil(2 * W * dpr); c.height = Math.ceil((T + B) * dpr);
+            const x = c.getContext('2d');
+            x.setTransform(dpr, 0, 0, dpr, W * dpr, T * dpr);
+            paint.call(this, x, { ...o, x: 0, y: 0, U });
+            if (this.minis.size >= 300) this.minis.delete(this.minis.keys().next().value);
+            this.minis.set(key, c);
+        }
+        ctx.drawImage(c, Math.round((o.x - W) * dpr) / dpr, Math.round((o.y - T) * dpr) / dpr, c.width / dpr, c.height / dpr);
+    }
+    // Peana de las miniaturas de la aviación: sombra, canto oscuro del color del país con el borde del nivel y la cara de
+    // arriba (del color del país, o `top`).
+    drawPlinth(ctx, x, y, R, color, level, top = color) {
+        ctx.fillStyle = 'rgba(20,16,8,0.38)'; ctx.beginPath(); ctx.ellipse(x + R * 0.18, y + R * 0.4, R * 1.1, R * 0.4, 0, 0, TAU); ctx.fill();
+        ctx.fillStyle = shadeHex(color, -0.4); ctx.beginPath(); ctx.ellipse(x, y + R * 0.3, R, R * 0.36, 0, 0, TAU); ctx.fill();
+        if (level > 0) {
+            ctx.strokeStyle = BASE_RIM[level]; ctx.lineWidth = Math.max(1.4, R * 0.1);
+            ctx.beginPath(); ctx.ellipse(x, y + R * 0.3, R, R * 0.36, 0, 0, Math.PI); ctx.stroke();
+        }
+        ctx.fillStyle = top; ctx.beginPath(); ctx.ellipse(x, y + R * 0.22, R, R * 0.34, 0, 0, TAU); ctx.fill();
+        if (top !== color) { ctx.strokeStyle = color; ctx.lineWidth = Math.max(1.4, R * 0.08); ctx.stroke(); }
+    }
+    // Etiqueta redonda bajo una miniatura (el número, o «?»), como la de los ejércitos.
+    miniLabel(ctx, x, y, text, mine, U) {
+        ctx.font = `700 ${Math.round(Math.max(10, Math.min(14, U * 0.58)))}px 'Barlow Semi Condensed', Bahnschrift, 'Arial Narrow', sans-serif`;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        const w = Math.max(ctx.measureText(text).width + 8, 15);
+        ctx.fillStyle = mine ? SIGNAL : '#ebe7d8'; ctx.strokeStyle = INK; ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.roundRect(x - w / 2, y - 6.5, w, 13, 6.5); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = INK; ctx.fillText(text, x, y + 0.5);
+    }
+    // Aeródromo: una pista con su hangar del color del país, sobre una peana de hierba. En obra, solo el armazón del
+    // hangar; inservible, atenuado y con cráteres en la pista. Si no sabes cuántos escuadrones tiene, «?».
+    paintAirfield(ctx, o) {
+        const { x, y, hexPx, color, U } = o, k = U / 16;
+        ctx.save();
+        ctx.globalAlpha = o.left > 0 ? 0.6 : o.down ? 0.55 : 1;
+        if (hexPx < 6) { ctx.fillStyle = color; ctx.fillRect(x - 3, y - 2, 6, 4); ctx.strokeStyle = INK; ctx.lineWidth = 1; ctx.strokeRect(x - 3, y - 2, 6, 4); ctx.restore(); return; }
+        this.drawPlinth(ctx, x, y, U * 1.2, color, o.level, '#8a9a5b');
+        ctx.translate(x, y); ctx.scale(k, k);
+        // pista en diagonal con su línea central
+        ctx.fillStyle = '#4b4c48'; miniPoly(ctx, [[-17, 6.4], [12, 0.6], [17, 2.2], [-12, 8.4]]); ctx.fill();
+        ctx.strokeStyle = 'rgba(240,238,226,0.85)'; ctx.lineWidth = 0.7; ctx.setLineDash([2.4, 2]);
+        ctx.beginPath(); ctx.moveTo(-13.5, 7.1); ctx.lineTo(13.5, 1.7); ctx.stroke(); ctx.setLineDash([]);
+        if (o.down && !o.left) {   // cráteres
+            ctx.fillStyle = 'rgba(30,24,16,0.85)';
+            for (const [cx, cy] of [[-7, 5.6], [2, 3.8], [9, 2.4]]) { ctx.beginPath(); ctx.ellipse(cx, cy, 1.8, 0.9, 0, 0, TAU); ctx.fill(); }
+        }
+        // hangar: medio cilindro del color del país, con su frente oscuro
+        ctx.save(); ctx.translate(-7, 1.6);
+        if (o.left > 0) {
+            ctx.strokeStyle = '#3a3222'; ctx.lineWidth = 0.9;   // el armazón: el arco y sus costillas
+            ctx.beginPath(); ctx.ellipse(0, 0, 6, 6, 0, Math.PI, 0);
+            for (const i of [-3, 0, 3]) { ctx.moveTo(i, 0); ctx.lineTo(i, -Math.sqrt(36 - i * i)); }
+            ctx.stroke();
+        } else {
+            ctx.fillStyle = color; ctx.beginPath(); ctx.ellipse(0, 0, 6.5, 6, 0, Math.PI, 0); ctx.closePath(); ctx.fill();
+            ctx.strokeStyle = shadeHex(color, -0.5); ctx.lineWidth = 0.8; ctx.stroke();
+            ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 0.6;
+            ctx.beginPath(); for (const i of [-3, 0, 3]) { ctx.moveTo(i, 0); ctx.lineTo(i, -Math.sqrt(36 - i * i * 0.85)); } ctx.stroke();
+            ctx.fillStyle = shadeHex(color, -0.55); ctx.beginPath(); ctx.ellipse(6.2, 0, 1.4, 5.4, 0, Math.PI * 1.5, Math.PI * 0.5, true); ctx.closePath(); ctx.fill();
+            ctx.fillStyle = 'rgba(20,20,16,0.75)'; ctx.fillRect(5.1, -3, 1.4, 3);
+        }
+        ctx.restore();
+        ctx.restore();
+        if (o.n === null && !o.left) { ctx.save(); ctx.globalAlpha = o.down ? 0.7 : 1; this.miniLabel(ctx, x - U * 0.2, y + U * 0.75, '?', o.mine, U); ctx.restore(); }
+    }
+    // Escuadrones: un avión de ala en flecha sobre la pista del aeródromo, con una etiqueta con cuántos son; atenuado
+    // si ninguno puede volar. En patrulla (o.flying), el avión va en vuelo sobre el soporte de una peana pequeña.
+    paintSquadrons(ctx, o) {
+        const { x, y, hexPx, color, U } = o, k = U / 16;
+        if (hexPx < 6) return;
+        ctx.save();
+        ctx.globalAlpha = o.down ? 0.6 : 1;
+        let px = x + U * 0.42, py = y + U * 0.2, rot = -0.2, size = 0.62;   // sobre la pista, delante del hangar
+        if (o.flying) {
+            this.drawPlinth(ctx, x, y, U * 0.6, color, o.level);
+            py = y - U * 1.1; px = x; rot = -0.35; size = 1;
+            ctx.strokeStyle = 'rgba(225,235,240,0.8)'; ctx.lineWidth = Math.max(1, U * 0.08);
+            ctx.beginPath(); ctx.moveTo(x, y + U * 0.15); ctx.lineTo(x, py + U * 0.2); ctx.stroke();
+        }
+        ctx.translate(px, py); ctx.scale(k * size, k * size); ctx.rotate(rot);
+        miniJet(ctx, color);
+        ctx.restore();
+        ctx.save();
+        this.miniLabel(ctx, o.flying ? x : x - U * 0.2, y + U * 0.75, String(o.n), o.mine, U);
+        ctx.restore();
+    }
+    // Antiaéreo fijo: un lanzador con dos misiles sobre la peana; dañado, atenuado, con uno solo y humo negro.
+    paintAASite(ctx, o) {
+        const { x, y, hexPx, color, U } = o, k = U / 16;
+        ctx.save();
+        ctx.globalAlpha = o.left > 0 ? 0.6 : o.down ? 0.75 : 1;
+        if (hexPx < 6) { ctx.beginPath(); ctx.arc(x, y, 3, Math.PI, 0); ctx.closePath(); ctx.fillStyle = color; ctx.fill(); ctx.strokeStyle = INK; ctx.lineWidth = 1; ctx.stroke(); ctx.restore(); return; }
+        this.drawPlinth(ctx, x, y, U * 0.85, color, o.level);
+        ctx.translate(x, y + U * 0.2); ctx.scale(k, k);
+        // la base del lanzador y el pedestal
+        ctx.fillStyle = '#4b5530'; miniRect(ctx, -8, -3.5, 16, 4, 1.2); ctx.fill();
+        ctx.fillStyle = '#3e4428'; miniRect(ctx, -2, -6.5, 4, 3.5, 0.8); ctx.fill();
+        // la rampa inclinada y los misiles
+        ctx.save(); ctx.translate(0, -6.5); ctx.rotate(-0.55);
+        ctx.fillStyle = '#5f6b3c'; miniRect(ctx, -6, -1, 15, 2, 0.6); ctx.fill();
+        if (o.left === 0) for (const dy of o.down ? [-2.6] : [-2.6, -5.2]) {
+            ctx.fillStyle = '#e8e6dc'; miniRect(ctx, -5, dy, 13, 2.2, 1.1); ctx.fill();
+            ctx.fillStyle = '#b8473a'; ctx.beginPath(); ctx.moveTo(8, dy); ctx.lineTo(10.4, dy + 1.1); ctx.lineTo(8, dy + 2.2); ctx.closePath(); ctx.fill();
+            ctx.fillStyle = '#9a988c'; ctx.fillRect(-5, dy - 0.6, 1.6, 3.4);
+        }
+        ctx.restore();
+        if (o.down && o.left === 0) {
+            ctx.fillStyle = 'rgba(40,36,30,0.55)';
+            for (const [cx, cy, r] of [[4, -10, 2.4], [6.5, -13, 3], [8, -16.5, 3.4]]) { ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.fill(); }
+        }
+        ctx.restore();
+    }
 }
 
 const BASE_RIM = [null, '#b87333', '#c9ced6', '#e8b931'];
@@ -853,6 +1048,17 @@ function miniTruck(ctx, now, moving) {
     ctx.beginPath(); ctx.moveTo(-14, -6); ctx.lineTo(-14, -12); ctx.quadraticCurveTo(-4.5, -18, 5, -12); ctx.lineTo(5, -6); ctx.closePath(); ctx.fill();
     ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 0.8;
     ctx.beginPath(); ctx.moveTo(-9, -6); ctx.lineTo(-9, -14.5); ctx.moveTo(-3, -6); ctx.lineTo(-3, -15.6); ctx.stroke();
+}
+// Avión de ala en flecha visto desde arriba, con el morro a la derecha: fuselaje gris, alas y deriva, y una franja del
+// color del país en las alas.
+function miniJet(ctx, color) {
+    ctx.fillStyle = 'rgba(20,16,8,0.25)'; miniPoly(ctx, [[12, 2.2], [1, 1], [-5, 9.5], [-8, 9.5], [-4, 1.4], [-10, 1.6], [-13, 5], [-14.5, 5], [-13, 1.6]]); ctx.fill();
+    ctx.fillStyle = '#9aa1a6'; ctx.strokeStyle = '#3c4246'; ctx.lineWidth = 0.6;
+    miniPoly(ctx, [[2, -0.8], [-5, -9], [-8.5, -9], [-4.5, -0.9], [-4.5, 0.9], [-8.5, 9], [-5, 9], [2, 0.8]]); ctx.fill(); ctx.stroke();   // alas
+    miniPoly(ctx, [[-10, -0.6], [-13.5, -4.5], [-15, -4.5], [-13.5, -0.6], [-13.5, 0.6], [-15, 4.5], [-13.5, 4.5], [-10, 0.6]]); ctx.fill(); ctx.stroke();   // timón
+    ctx.fillStyle = '#b2b8bc'; ctx.beginPath(); ctx.moveTo(13, 0); ctx.quadraticCurveTo(8, -1.7, 0, -1.6); ctx.lineTo(-14, -1); ctx.lineTo(-14, 1); ctx.lineTo(0, 1.6); ctx.quadraticCurveTo(8, 1.7, 13, 0); ctx.fill(); ctx.stroke();   // fuselaje
+    ctx.fillStyle = 'rgba(40,60,80,0.8)'; ctx.beginPath(); ctx.ellipse(7, 0, 2.4, 0.8, 0, 0, TAU); ctx.fill();   // cabina
+    ctx.fillStyle = color; miniPoly(ctx, [[-3.6, -5], [-5.4, -5], [-6.3, -6.8], [-4.4, -6.8]]); ctx.fill(); miniPoly(ctx, [[-3.6, 5], [-5.4, 5], [-6.3, 6.8], [-4.4, 6.8]]); ctx.fill();
 }
 function miniGun(ctx, now, moving) {
     ctx.strokeStyle = '#4a4a35'; ctx.lineWidth = 2.2; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(-2, -4); ctx.lineTo(-15, 0); ctx.stroke();
