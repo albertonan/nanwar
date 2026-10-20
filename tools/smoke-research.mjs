@@ -311,12 +311,14 @@ const CHECKS = [
         const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
         g.start(es); g.declareWar(es, fr);
         const [from, cell] = T.plainPair(g, es);
+        // Lo que da la fortificación sale de su nivel (g.fort), no de lo que su dueño investigue después.
         g.fort[cell] = 1;
         const def = { owner: es, units: { infantry: 1, tank: 0, artillery: 0 } }, att = { infantry: 1, tank: 0, artillery: 0 };
         const fortPart = () => g.combatFactors(fr, att, from, def, cell).parts.find(([n]) => n === 'fortificación')[1];
         T.eq(fortPart(), 1.75, 'sin investigar');
-        T.learn(g, es, 'fortificacion1');
+        g.fort[cell] = 2;
         T.eq(fortPart(), 2, 'hormigón');
+        T.learn(g, es, 'fortificacion1');
         const a = PROVINCES.find(p => p.country === es && p.city !== g.nations[es].capitalCell).city;
         const plan = g.planFort(es, a, a);
         g.nations[es].gold = 1e5;
@@ -324,13 +326,14 @@ const CHECKS = [
         T.eq(g.fortWork.get(a).left, 2, 'obra de 2 turnos');
         T.eq(g.combatFactors(fr, att, from, def, cell).cap, 3, 'tope ×3');
         const wall0 = g.stepCost(fr, from, G.dirTo(from, cell), true);
-        T.learn(g, es, 'fortificacion2');
+        g.fort[cell] = 3;
         T.eq(g.combatFactors(fr, att, from, def, cell).cap, 3.5, 'búnkeres: tope ×3,5');
         T.eq(g.stepCost(fr, from, G.dirTo(from, cell), true), wall0 + MOVE, 'cruzar el muro cuesta un punto más');
         const ring = T.surround(g, es, fr, 3, cell);
         T.eq(g.flankFactor(es, ring), 0.75, 'rodeado en el muro');
-        T.learn(g, es, 'fortificacion3');
+        g.fort[cell] = 4;
         T.eq(g.flankFactor(es, ring), 1, 'casamatas: sin penalización');
+        T.learn(g, es, 'fortificacion2', 'fortificacion3');
         const b = PROVINCES.filter(p => p.country === es)[2].city;
         T.eq(g.planFort(es, b, b).cost, 25, 'fortificar cuesta 25');
         return true;
@@ -478,7 +481,7 @@ const CHECKS = [
     ['F6 · cada fortificación se dibuja con el nivel de su dueño, o rayada si no lo conoces', () => {
         const g = T.uiStart('es', true), p = g.player, fr = T.nation('fr');
         const mine = T.plainPair(g, p)[1], theirs = T.plainPair(g, fr)[1];
-        g.fort[mine] = 1; g.fort[theirs] = 1; g.fortVersion++;
+        g.fort[mine] = 3; g.fort[theirs] = 2; g.fortVersion++;
         T.learn(g, p, 'fortificacion1', 'fortificacion2');
         T.learn(g, fr, 'fortificacion1');
         ui.view.draw();
@@ -534,12 +537,11 @@ const CHECKS = [
         T.ok(/montaña 3/.test($('#legend').textContent), 'partida nueva, sin investigar');
         return true;
     }],
-    ['Revisión · la fortificación defiende según las reglas del dueño de la casilla', () => {
+    ['Revisión · la fortificación defiende según su nivel', () => {
         const g = T.game(), es = T.nation('es'), pt = T.nation('pt'), fr = T.nation('fr');
         g.start(es); g.declareWar(fr, es); g.declareWar(fr, pt);
         const [from, cell] = T.plainPair(g, es);
-        g.fort[cell] = 1;
-        T.learn(g, es, 'fortificacion1');
+        g.fort[cell] = 2;
         const fx = g.combatFactors(fr, { infantry: 1, tank: 0, artillery: 0 }, from, { owner: pt, units: { infantry: 1, tank: 0, artillery: 0 } }, cell);
         T.eq(fx.parts.find(([n]) => n === 'fortificación')[1], 2, 'un aliado en tu muro de hormigón');
         return true;

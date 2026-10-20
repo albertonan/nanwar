@@ -511,11 +511,11 @@
 <input type="file" id="import-file" accept=".json,application/json" hidden>
 <script>
 // Mapas: se elige uno al empezar una partida nueva y se recuerda en este dispositivo (o con ?mapa= en la dirección).
-// El de la partida se carga antes que el juego, que se construye entero sobre él.
+// El de la partida se carga antes que el juego, que se construye entero sobre él. `cellKm`: lo que mide una casilla.
 const MAPS = {
-    europa: { file: 'europa-data.js', name: 'Europa', lead: 'Europa, 2025', of: 'de Europa', all: 'Toda Europa', it: 'Europa',
+    europa: { file: 'europa-data.js', name: 'Europa', lead: 'Europa, 2025', of: 'de Europa', all: 'Toda Europa', it: 'Europa', cellKm: 20,
         desc: '42 países y 343 provincias en casillas de unos 20 km.' },
-    mundo: { file: 'mundo-data.js', name: 'Mundo', lead: 'El mundo, 2025', of: 'del mundo', all: 'Todo el mundo', it: 'el mundo',
+    mundo: { file: 'mundo-data.js', name: 'Mundo', lead: 'El mundo, 2025', of: 'del mundo', all: 'Todo el mundo', it: 'el mundo', cellKm: 85,
         desc: '181 países y más de mil provincias en casillas de unos 85 km. Más lento en móviles modestos.' }
 };
 const MAP_KEY = 'nanwar.map';
@@ -787,6 +787,13 @@ const mergeFx = (into, fx) => {
     }
     return into;
 };
+// Lo que da una fortificación de cada nivel (1 a 4): las reglas de partida con las primeras k − 1 investigaciones de
+// Fortificación. Cada casilla defiende según el nivel de su obra, que sube con la investigación y baja con los daños.
+const FORT_FX = [null, ...[1, 2, 3, 4].map(k => {
+    const r = baseRules();
+    for (const [, fx] of TECH_TREE.fortificacion.slice(0, k - 1)) mergeFx(r, fx);
+    return { fortDefense: r.fortDefense, fortCap: r.fortCap, wallCost: r.wallCost, flankImmune: r.fortFlankImmune };
+})];
 
 // Generador aleatorio con estado en rng.state, para poder guardar y reanudar la partida exactamente.
 function mulberry32(seed) {
@@ -889,6 +896,24 @@ const isLand = i => G.prov[i] >= 0;
 const afloat = i => !isLand(i);   // en el mar, donde solo se navega (los lagos son tierra)
 // Clave canónica de un tramo (los dos sentidos comparten): casilla de índice menor * 6 + su dirección.
 const edgeKey = (u, d) => { const v = G.nb[u * 6 + d]; return v >= 0 && v < u ? v * 6 + (d + 3) % 6 : u * 6 + d; };
+// Escala: casillas que suman unos kilómetros en este mapa (al menos una).
+const kmCells = km => Math.max(1, Math.round(km / MAP.cellKm));
+// Coordenadas cúbicas de una casilla (las filas impares van desplazadas a la derecha) y vuelta a su índice.
+const cubeOf = i => { const r = Math.floor(i / G.cols), q = i % G.cols - (r - (r & 1)) / 2; return [q, r, -q - r]; };
+const cubeCell = (q, r) => r * G.cols + q + (r - (r & 1)) / 2;
+// Distancia en casillas por la rejilla: la mayor de las tres diferencias cúbicas.
+const hexDist = (a, b) => { const x = cubeOf(a), y = cubeOf(b); return Math.max(Math.abs(x[0] - y[0]), Math.abs(x[1] - y[1]), Math.abs(x[2] - y[2])); };
+// Casillas de la línea recta de `a` a `b`, sin las dos puntas y seguidas: una por paso, redondeando el punto
+// intermedio a la casilla más cercana (con un pequeño desplazamiento para no caer justo en una arista).
+const flightPath = (a, b) => {
+    const n = hexDist(a, b), eps = [1e-6, 1e-6, -2e-6], A = cubeOf(a).map((v, k) => v + eps[k]), B = cubeOf(b).map((v, k) => v + eps[k]), out = [];
+    for (let i = 1; i < n; i++) {
+        const t = i / n, f = A.map((v, k) => v + (B[k] - v) * t), [q, r, s] = f.map(Math.round);
+        const dq = Math.abs(q - f[0]), dr = Math.abs(r - f[1]), ds = Math.abs(s - f[2]);
+        out.push(dq > dr && dq > ds ? cubeCell(-r - s, r) : dr > ds ? cubeCell(q, -q - s) : cubeCell(q, r));
+    }
+    return out;
+};
 
 const PROVINCES = E.provinces.map((p, id) => ({ ...p, id, cells: [] }));
 for (const i of G.land) PROVINCES[G.prov[i]].cells.push(i);
@@ -988,8 +1013,8 @@ class GameEngine {
         // Carreteras: clase por arista dirigida (0 nada, 1 carretera, 2 autopista). Se empieza sin ninguna: las construyen los jugadores.
         this.road = new Int8Array(G.N * 6);
         this.broken = new Int8Array(G.N * 6);   // tramos rotos: la clase que tenían, en los dos sentidos
-        this.fort = new Uint8Array(G.N);   // 1 = fortificación terminada
-        this.fortWork = new Map();          // celda → { owner, left }: obras en curso
+        this.fort = new Uint8Array(G.N);   // nivel de la fortificación terminada (1 a 4; 0, ninguna)
+        this.fortWork = new Map();          // celda → { owner, left, up }: obras en curso (up: reparación de un nivel)
         this.roadWork = new Map();          // tramo (edgeKey) → { owner, left, cls }: reparaciones en curso
         this.fortVersion = 0;
 
@@ -1061,7 +1086,7 @@ class GameEngine {
             seed: this.seed, rng: this.rng.state, turn: this.turn, player: this.player, over: this.over, won: this.won,
             settings: this.settings, logs: this.logs.slice(-150), proposals: this.proposals, proposed: [...this.proposedThisTurn],
             owner: runs, legal: compress(this.legal), dev: Array.from(this.dev), roads: this.roadEdges(), broken: this.brokenEdges(),
-            forts: G.land.filter(i => this.fort[i]), fortWork: [...this.fortWork].map(([c, w]) => [c, w.owner, w.left]),
+            fortLv: G.land.filter(i => this.fort[i]).map(i => [i, this.fort[i]]), fortWork: [...this.fortWork].map(([c, w]) => [c, w.owner, w.left, w.up ? 1 : 0]),
             roadWork: [...this.roadWork].map(([k, w]) => [k, w.owner, w.left, w.cls]),
             spies: [...this.spies].map(([pid, s]) => [pid, s.since, s.revealedTurn]),
             sieges: [...this.sieges].map(([c, s]) => [c, s.by, s.prev, s.held]),
@@ -1147,8 +1172,12 @@ class GameEngine {
             g.broken[a * 6 + d] = cls;
             g.broken[b * 6 + (d + 3) % 6] = cls;
         }
-        for (const c of list(data.forts)) g.fort[cellIdx(c)] = 1;
-        g.fortWork = new Map(list(data.fortWork).map(w => [cellIdx(w?.[0]), { owner: nat(w?.[1]), left: int(w?.[2], 0, 100, 0) }]));
+        // Fortificaciones con su nivel. Las de antes de los niveles (forts) toman el máximo de su dueño cuando ya se
+        // conoce su investigación, más abajo.
+        for (const x of list(data.fortLv)) g.fort[cellIdx(x?.[0])] = int(x?.[1], 1, 4, 1);
+        const oldForts = data.fortLv ? [] : list(data.forts).map(cellIdx);
+        g.fortWork = new Map(list(data.fortWork).map(w => [cellIdx(w?.[0]), { owner: nat(w?.[1]), left: int(w?.[2], 0, 100, 0), up: !!w?.[3] }])
+            .filter(([c, w]) => !w.up || g.fort[c]));   // una reparación, solo sobre una fortificación
         g.roadWork = new Map();
         for (const w of list(data.roadWork)) {
             const key = int(w?.[0], 0, G.N * 6 - 1, -1), cls = int(w?.[3], 1, 2, 0);
@@ -1198,6 +1227,7 @@ class GameEngine {
             tech: techOf(n?.tech)
         }));
         g.techVersion++;   // lo calculado hasta aquí no conocía la investigación
+        for (const c of oldForts) g.fort[c] = g.owner[c] >= 0 ? g.fortMax(g.owner[c]) : 1;
         for (const row of g.relations) for (const r of row) if (r) Object.assign(r, { state: 'paz', since: 0, truceUntil: 0 });
         for (const x of list(data.relations)) {
             const a = nat(x?.[0]), b = nat(x?.[1]);
@@ -1638,6 +1668,7 @@ class GameEngine {
         const cells = path.filter(c => !this.fort[c] && !this.fortWork.has(c));
         return { path, cells, cost: cells.length * this.rules(id).fortCost, cls: 'fort' };
     }
+    // La obra nace al nivel máximo de su dueño cuando termina (en beginNationTurn).
     buildFort(id, plan) {
         const n = this.nations[id];
         if (!plan || !plan.cells.length || plan.cost > n.gold) return 0;
@@ -1645,6 +1676,47 @@ class GameEngine {
         n.gold -= plan.cost;
         this.fortVersion++;
         return plan.cells.length;
+    }
+    // Nivel de una fortificación nueva de `id`: 1 (sacos terreros) más su nivel de Fortificación.
+    fortMax(id) { return 1 + this.techLevel(id, 'fortificacion'); }
+    // Reparar una fortificación dañada de `id`: sube un nivel por obra y cuesta la mitad de fortificar. Solo si es suya,
+    // está por debajo de su máximo, no tiene obra y no hay enemigos al lado.
+    fortRepairPlan(id, cell) {
+        if (cell < 0 || this.owner[cell] !== id || !this.fort[cell] || this.fort[cell] >= this.fortMax(id) || this.fortWork.has(cell) || this.repairBlocked(id, cell, cell)) return null;
+        return { cell, cost: Math.round(this.rules(id).fortCost / 2), cls: 'fortRepair' };
+    }
+    startFortRepair(id, plan) {
+        const n = this.nations[id], p = plan ? this.fortRepairPlan(id, plan.cell) : null;
+        if (!p || p.cost > n.gold) return false;
+        this.fortWork.set(p.cell, { owner: id, left: this.rules(id).fortTurns, up: true });
+        n.gold -= p.cost;
+        this.fortVersion++;
+        return true;
+    }
+    playerRepairFort(plan) {
+        if (this.over || !plan) return false;
+        if (plan.cost > this.nations[this.player].gold) { this.log(`Fondos insuficientes: la reparación cuesta ${plan.cost}g.`); return false; }
+        if (!this.startFortRepair(this.player, plan)) return false;
+        this.log(`Reparas la fortificación de ${this.placeName(plan.cell)} por ${plan.cost} de oro.`);
+        return true;
+    }
+    // La IA repara primero las fortificaciones de sus ciudades y luego las más amenazadas, hasta agotar el presupuesto;
+    // devuelve el oro gastado.
+    aiRepairForts(id, budget) {
+        if (budget < Math.round(this.rules(id).fortCost / 2)) return 0;
+        const todo = [];
+        for (const c of G.land) {
+            if (!this.fort[c] || this.owner[c] !== id) continue;
+            const p = this.fortRepairPlan(id, c);
+            if (p) todo.push({ p, city: CITY_OF[c] >= 0 ? 1 : 0, t: this.threat(id, c) });
+        }
+        todo.sort((x, y) => y.city - x.city || y.t - x.t);
+        let spent = 0;
+        for (const { p } of todo) {
+            if (p.cost > budget - spent) break;
+            if (this.startFortRepair(id, p)) spent += p.cost;
+        }
+        return spent;
     }
     // Hay un ejército enemigo (en guerra) en `u`, en `v` o en sus vecinas: no se trabaja en el tramo.
     repairBlocked(id, u, v) {
@@ -1781,7 +1853,7 @@ class GameEngine {
     // Penalización por estar rodeado: multiplicador de ataque y defensa (1 si no lo está).
     flankFactor(owner, cell) {
         const r = this.rules(owner);
-        if (r.fortFlankImmune && this.fort[cell] === 1 && this.owner[cell] === owner) return 1;   // casamatas
+        if (this.fort[cell] && FORT_FX[this.fort[cell]].flankImmune && this.owner[cell] === owner) return 1;   // casamatas
         const n = this.hostileSides(owner, cell);
         return n >= CONFIG.SURROUNDED_SIDES ? r.surrounded : n >= CONFIG.FLANKED_SIDES ? r.flanked : 1;
     }
@@ -2239,9 +2311,9 @@ class GameEngine {
     // Defensa que da una casilla a su dueño: terreno, ciudad, capital y fortificación propia, con el tope del combate.
     defBonus(owner, cell) {
         let m = terrainOf(cell).def * (CITY_OF[cell] >= 0 ? CONFIG.CITY_DEFENSE : 1) * (CAPITAL_OF[cell] >= 0 ? CONFIG.CAPITAL_DEFENSE : 1);
-        const rf = this.fort[cell] === 1 && this.owner[cell] === owner ? this.rules(owner) : null;
-        if (rf) m *= rf.fortDefense;
-        return Math.min(m, rf ? rf.fortCap : CONFIG.MAX_DEFENSE_BONUS);
+        const fx = this.fort[cell] && this.owner[cell] === owner ? FORT_FX[this.fort[cell]] : null;
+        if (fx) m *= fx.fortDefense;
+        return Math.min(m, fx ? fx.fortCap : CONFIG.MAX_DEFENSE_BONUS);
     }
     // Ataque o defensa de un ejército tal como lo ve `viewer` (con niebla, lo peor de su escalón, como expectedRatio).
     seenPower(viewer, a, kind) {
@@ -3079,11 +3151,18 @@ class GameEngine {
                 if (c.pools.research >= cost && n.gold >= cost && this.startResearch(id, tech)) c.pools.research -= cost;
             } else if (tech && this.techState(id, tech) === 'paused') this.startResearch(id, tech);
         }
-        // Fortificar las ciudades más amenazadas.
+        // Fortificar las ciudades más amenazadas: primero se reparan las fortificaciones dañadas y después se construye.
         const fortCost = this.rules(id).fortCost;
-        if (c.pools.forts >= fortCost) {
-            const cities = this.citiesOf(id).filter(p => !this.fort[p.city] && !this.fortWork.has(p.city) && this.legal[p.city] === id)
+        if (c.pools.forts >= Math.round(fortCost / 2)) {
+            const threatened = this.citiesOf(id).filter(p => this.legal[p.city] === id)
                 .map(p => [p.city, this.threat(id, p.city)]).filter(([, t]) => t > 0).sort((x, y) => y[1] - x[1]);
+            for (const [cell] of threatened) {
+                const plan = this.fortRepairPlan(id, cell);
+                if (!plan || plan.cost > c.pools.forts || !this.startFortRepair(id, plan)) continue;
+                c.pools.forts -= plan.cost;
+                if (id === this.player) this.log(`Directiva: se repara la fortificación de ${this.placeName(cell)}.`);
+            }
+            const cities = threatened.filter(([cell]) => !this.fort[cell] && !this.fortWork.has(cell));
             for (const [cell] of cities) {
                 if (c.pools.forts < fortCost || n.gold < fortCost) break;
                 this.buildFort(id, { cells: [cell], path: [cell], cost: fortCost, cls: 'fort' });
@@ -3255,7 +3334,7 @@ class GameEngine {
                         if (c < mp && !term.has(v)) term.set(v, { cost: mp, prev: u, landing: true });
                         continue;
                     }
-                    const walled = hostile && this.fort[v] === 1;   // muro enemigo: cuesta más y detiene la marcha
+                    const walled = hostile && this.fort[v] > 0;   // muro enemigo: cuesta más y detiene la marcha
                     const nc = c + this.stepCost(a, u, d, hostile);
                     if (nc > mp) {
                         if (fresh && mp > 0 && u === start && !uSea && !exp.has(v) && !term.has(v)) term.set(v, { cost: mp, prev: u, landing: false });
@@ -3312,13 +3391,13 @@ class GameEngine {
 
     // Subpuntos que le cuesta a un ejército de `owner` pasar de la casilla u (de tierra o de mar) a su vecina de tierra
     // en la dirección d: terreno o carretera según sus reglas, río, entrada en territorio enemigo y muro del enemigo
-    // (que cuesta según las reglas de quien lo construyó).
+    // (que cuesta según su nivel).
     stepCost(owner, u, d, hostile) {
         const v = G.nb[u * 6 + d], r = this.rules(owner), uSea = !isLand(u);
         const roadCls = uSea ? 0 : this.road[u * 6 + d];
         const step = roadCls ? r.roadMove[roadCls] : MOVE * r.terrainCost[CELL_TERRAIN[v]] + (!uSea && RIVER[u * 6 + d] ? r.riverCrossing : 0);
-        const walled = hostile && this.fort[v] === 1;
-        return step + (hostile ? MOVE / 2 : 0) + (walled ? this.rules(this.owner[v]).wallCost : 0);
+        const walled = hostile && this.fort[v] > 0;
+        return step + (hostile ? MOVE / 2 : 0) + (walled ? FORT_FX[this.fort[v]].wallCost : 0);
     }
 
     attack(army, from, target, r) {
@@ -3340,10 +3419,10 @@ class GameEngine {
         if (!sea && d >= 0 && RIVER[fromCell * 6 + d] && !ra.ignoreRiver) parts.push(['río', CONFIG.RIVER_DEFENSE]);
         if (!sea && CITY_OF[cell] >= 0) parts.push(['ciudad', CONFIG.CITY_DEFENSE]);
         if (!sea && CAPITAL_OF[cell] >= 0) parts.push(['capital', CONFIG.CAPITAL_DEFENSE]);
-        const rf = !sea && this.fort[cell] === 1 ? this.rules(this.owner[cell]) : null;   // la fortificación, según quien la construyó
-        if (rf) parts.push(['fortificación', rf.fortDefense]);
+        const fx = !sea && this.fort[cell] ? FORT_FX[this.fort[cell]] : null;   // la fortificación, según su nivel
+        if (fx) parts.push(['fortificación', fx.fortDefense]);
         const raw = parts.reduce((m, [, x]) => m * x, 1);
-        const cap = rf ? rf.fortCap : CONFIG.MAX_DEFENSE_BONUS;
+        const cap = fx ? fx.fortCap : CONFIG.MAX_DEFENSE_BONUS;
         const bonus = Math.min(raw, cap);
         const attState = this.armyState(attOwner, fromCell, attUnits, attId);
         const defState = sea ? { mult: 1, parts: [] } : this.armyState(def.owner, cell, def.units, def.id ?? 0);
@@ -3480,7 +3559,7 @@ class GameEngine {
         for (const c of p.cells) {
             if (this.owner[c] !== prev) continue;
             const ar = this.armyOn(c);
-            if ((!ar || ar.owner !== prev) && this.fort[c] !== 1) this.owner[c] = holder(c);
+            if ((!ar || ar.owner !== prev) && !this.fort[c]) this.owner[c] = holder(c);
         }
         if (byForce && prev >= 0) this.plunder(a, prev, p);
         if (CAPITAL_OF[cell] >= 0 || this.involvesPlayer(a, prev)) {
@@ -3608,10 +3687,12 @@ class GameEngine {
         const k = this.intel(viewer, a.owner, a.cell), n = countUnits(a.units), type = dominantType(a.units);
         return { type: k.exact ? type : null, n: k.exact ? n : null, echelon: echelonOf(n).mark, level: k.levels ? this.techLevel(a.owner, UNIT_BRANCH[type]) : null };
     }
-    // Nivel de Fortificación del dueño de una casilla, si `viewer` lo conoce (null si no).
+    // Nivel de la fortificación de una casilla (0 a 3, como FORT_LEVELS), si `viewer` lo conoce (null si no). En una
+    // casilla sin fortificación, el de una nueva de su dueño.
     fortLevel(viewer, cell) {
         const o = this.owner[cell];
-        return this.intel(viewer, o, cell).levels ? this.techLevel(o, 'fortificacion') : null;
+        if (!this.intel(viewer, o, cell).levels) return null;
+        return (this.fort[cell] || this.fortMax(o)) - 1;
     }
     // ¿Sabe `viewer` qué investiga `id`? Sin niebla sí; si no, con un espía que informe desde su capital o, con
     // Agentes dobles, desde cualquier provincia suya.
@@ -3624,7 +3705,7 @@ class GameEngine {
 
     spyOdds(pid) {
         const p = PROVINCES[pid], s = this.spies.get(pid), r = this.rules(this.player);
-        const hard = CAPITAL_OF[p.city] >= 0 || this.fort[p.city] === 1;
+        const hard = CAPITAL_OF[p.city] >= 0 || this.fort[p.city] > 0;
         const turns = s ? this.turn - s.since : 0;
         return {
             success: hard ? r.spySuccessHard : r.spySuccess,
@@ -3648,8 +3729,8 @@ class GameEngine {
             let extra = '';
             if (this.rules(this.player).spyWide) {   // Agentes dobles: también muros e investigación
                 const o = this.owner[p.city], t = this.nations[o].tech;
-                const forts = p.cells.filter(c => this.fort[c]).length;
-                if (forts) extra += ` ${plural(forts, 'casilla fortificada', 'casillas fortificadas')} (${FORT_LEVELS[this.techLevel(o, 'fortificacion')]}).`;
+                const forts = p.cells.filter(c => this.fort[c]), top = Math.max(0, ...forts.map(c => this.fort[c]));
+                if (forts.length) extra += ` ${plural(forts.length, 'casilla fortificada', 'casillas fortificadas')} (${forts.length > 1 ? 'la más fuerte, con' : 'con'} ${FORT_LEVELS[top - 1]}).`;
                 extra += t.current.length ? ` ${this.nm(o)} investiga ${t.current.map(x => `${TECH_BY_ID.get(x).name} (faltan ${this.techTurns(o, x) - this.techProgress(o, x)})`).join(' y ')}.`
                     : ` ${this.nm(o)} no investiga nada ahora.`;
             }
@@ -3757,6 +3838,11 @@ class GameEngine {
             s.current = s.current.filter(x => x !== techId);
             s.done.add(techId);
             this.techVersion++;
+            const t = TECH_BY_ID.get(techId);
+            if (t.branch === 'fortificacion') {   // sus fortificaciones intactas pasan al nivel nuevo; las dañadas, no
+                for (const c of G.land) if (this.fort[c] === t.tier && this.owner[c] === id) this.fort[c] = t.tier + 1;
+                this.fortVersion++;
+            }
             if (id === this.player) this.log(`Investigación terminada: ${TECH_BY_ID.get(techId).name}.`);
         }
     }
@@ -3820,15 +3906,22 @@ class GameEngine {
         for (const a of this.armies.values()) if (a.owner === id) a.used = 0;
         this.feedArmies(id);
         this.advanceResearch(id);
-        let done = 0;
+        // Obras de fortificación: la nueva termina al nivel máximo de su dueño; la reparación sube un nivel y no avanza
+        // con el enemigo al lado. Las dos se pierden si la casilla cambia de dueño.
+        let done = 0, raised = 0;
         for (const [c, w] of this.fortWork) {
             if (w.owner !== id) continue;
-            if (this.owner[c] !== id) { this.fortWork.delete(c); this.fortVersion++; continue; }
-            if (--w.left <= 0) { this.fort[c] = 1; this.fortWork.delete(c); done++; }
+            if (this.owner[c] !== id || (w.up && !this.fort[c])) { this.fortWork.delete(c); this.fortVersion++; continue; }
+            if (w.up && this.repairBlocked(id, c, c)) continue;
+            if (--w.left > 0) continue;
+            this.fortWork.delete(c);
+            if (w.up) { this.fort[c] = Math.min(this.fortMax(id), this.fort[c] + 1); raised++; }
+            else { this.fort[c] = this.fortMax(id); done++; }
         }
-        if (done) {
+        if (done || raised) {
             this.fortVersion++;
-            if (id === this.player) this.log(`Fortificación terminada en ${done} casilla${done > 1 ? 's' : ''}.`);
+            if (id === this.player && done) this.log(`Fortificación terminada en ${done} casilla${done > 1 ? 's' : ''}.`);
+            if (id === this.player && raised) this.log(`Fortificación reparada en ${raised} casilla${raised > 1 ? 's' : ''}.`);
         }
         let fixed = 0, dropped = 0;
         for (const [key, w] of [...this.roadWork]) {
@@ -4694,13 +4787,14 @@ class GameEngine {
         if (cells.length) this.buildFort(id, { cells, cost: cells.length * fortCost });
     }
 
-    // Repara sus carreteras rotas antes de reclutar (y aunque haya perdido la capital). En guerra, con una cuarta parte
-    // del oro, que el resto es para tropas; en paz, con lo que le sobra de la reserva, como las carreteras nuevas.
+    // Repara sus carreteras rotas y después sus fortificaciones dañadas antes de reclutar (y aunque haya perdido la
+    // capital). En guerra, con una cuarta parte del oro para las carreteras y un 15 % de lo que quede para las
+    // fortificaciones, que el resto es para tropas; en paz, con lo que le sobra de la reserva, como las carreteras nuevas.
     aiRepairs(id) {
         const n = this.nations[id];
-        if (this.enemiesOf(id).length) { this.aiRepairRoads(id, n.gold * 0.25); return; }
+        if (this.enemiesOf(id).length) { this.aiRepairRoads(id, n.gold * 0.25); this.aiRepairForts(id, n.gold * 0.15); return; }
         const budget = n.gold - this.aiReserve(id) * 0.5;
-        if (budget >= CONFIG.ROAD_COST * 2) this.aiRepairRoads(id, budget * 0.7);
+        if (budget >= CONFIG.ROAD_COST * 2) this.aiRepairForts(id, budget * 0.7 - this.aiRepairRoads(id, budget * 0.7));
     }
     // Une a la red de carreteras la ciudad o el yacimiento más valioso que aún no lo esté (una obra por turno;
     // en guerra solo con el oro que sobre tras reclutar). Las reparaciones ya se han pagado antes, en aiRepairs.
@@ -5864,7 +5958,7 @@ class GameUI {
         this.legendKey = null;
         Object.assign(this.view, { game: g, builtVersion: -1, builtRoads: -1, builtForts: -1, preview: null, stretch: null, hoverNation: -1 });
         this.stretch = null;
-        this.repair = null;
+        this.repair = this.fortRepair = null;
         this.tool = 'command';
         this.anchor = -1;
         this.choice = g.player;
@@ -6034,7 +6128,12 @@ class GameUI {
         if (supply.length) lines.push(`Abastecida por ${supply.map(r => CONFIG.RESOURCE_ICON[r.type]).join('')}: +${Math.round(100 * Math.min(ownerRules.resIndustryMax, ownerRules.resIndustry * supply.length))} % de renta`);
         const sg = g.sieges.get(cell);
         if (sg) lines.push(`<span class="warn-text">Asediada por ${g.nm(sg.by)}: ${sg.held} de ${g.rules(sg.by).siegeTurns} turnos</span>`);
-        if (g.fort[cell]) { const lv = g.fortLevel(g.player, cell); lines.push(lv === null ? 'Fortificada (no sabes de qué nivel)' : `Fortificada con ${FORT_LEVELS[lv]}: defensa ×${decimal(ownerRules.fortDefense)}`); }
+        if (g.fort[cell]) {
+            const lv = g.fortLevel(g.player, cell), w = g.fortWork.get(cell);
+            lines.push(lv === null ? 'Fortificada (no sabes de qué nivel)' : `Fortificada con ${FORT_LEVELS[lv]}: defensa ×${decimal(FORT_FX[g.fort[cell]].fortDefense)}`);
+            if (w?.up && lv !== null) lines.push(`Reparando la fortificación: ${plural(w.left, 'turno', 'turnos')}`);
+            else if (g.owner[cell] === g.player && g.fort[cell] < g.fortMax(g.player)) lines.push('<span class="muted">Dañada: se repara con Fortificar</span>');
+        }
         else if (g.fortWork.has(cell)) lines.push(`Fortificando: ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}`);
         if (g.player === null) { /* antes de elegir país no se enseñan las fuerzas de nadie */ }
         else if (!g.sees(g.player, cell)) lines.push('<span class="muted">Niebla de guerra: no sabes qué tropas hay</span>');
@@ -6180,6 +6279,7 @@ class GameUI {
         this.pending = null;
         this.stretch = fort ? null : g.roadStretch(g.player, cell);
         this.repair = fort ? null : g.repairPlan(g.player, cell);
+        this.fortRepair = fort ? g.fortRepairPlan(g.player, cell) : null;   // una fortificación propia dañada: repararla
         this.view.stretch = this.stretch;
         if (this.anchor < 0 || (cell === this.anchor && !fort)) {
             this.anchor = cell;
@@ -6293,7 +6393,7 @@ class GameUI {
     setTool(id, draft = null) {
         if (this.game.player === null || this.game.over) return;
         this.tool = id;
-        this.stretch = this.view.stretch = this.repair = null;
+        this.stretch = this.view.stretch = this.repair = this.fortRepair = null;
         this.opDraft = id === 'op' ? draft ?? { kind: this.opDraft?.kind ?? 'ofensiva', cells: [], redraw: null } : null;
         this.anchor = -1;
         this.pending = null;
@@ -6315,7 +6415,7 @@ class GameUI {
 
     cancel() {
         if (this.mapMenu) { this.mapMenu = false; this.render(); return; }
-        if ((this.stretch || this.repair) && !this.pending) { this.stretch = this.view.stretch = this.repair = null; this.render(); return; }
+        if ((this.stretch || this.repair || this.fortRepair) && !this.pending) { this.stretch = this.view.stretch = this.repair = this.fortRepair = null; this.render(); return; }
         if (this.ordering) { this.ordering = null; this.render(); return; }
         if (this.proposal) { this.endProposal(); return; }
         if (this.tool === 'op' && this.opDraft?.cells.length) { this.opDraft.cells.pop(); this.render(); return; }
@@ -6505,6 +6605,9 @@ class GameUI {
                 break;
             case 'repair-roads':
                 if (this.repair && g.playerRepair(this.repair)) this.repair = null;
+                break;
+            case 'repair-fort':
+                if (this.fortRepair && g.playerRepairFort(this.fortRepair)) this.fortRepair = null;
                 break;
             case 'cancel-build': this.cancel(); return;
             case 'stop-build': this.setTool('command'); return;
@@ -6977,7 +7080,7 @@ class GameUI {
         } else if (foreign && g.sees(p0, cell)) {
             sections.push(`<section class="sec"><h3>Ejército de ${g.nm(a.owner)}</h3>
                 <div class="units">${UNIT_KEYS.filter(k => a.units[k] > 0).map(k => `<div class="unit-row">${unitIcon(k, g.nations[a.owner].color)}<div>${a.units[k]} ${CONFIG.TYPES[k].name.toLowerCase()}</div><span></span></div>`).join('')}</div>
-                <p class="small muted">Ataque ${unitPower(a.units, 'atk', g.rules(a.owner))}, defensa ${unitPower(a.units, 'def', g.rules(a.owner))}${g.fort[cell] ? (g.fortLevel(p0, cell) === null ? ', en una casilla fortificada' : `, ×${String(g.rules(g.owner[cell]).fortDefense).replace('.', ',')} por la fortificación`) : ''}.</p></section>`);
+                <p class="small muted">Ataque ${unitPower(a.units, 'atk', g.rules(a.owner))}, defensa ${unitPower(a.units, 'def', g.rules(a.owner))}${g.fort[cell] ? (g.fortLevel(p0, cell) === null ? ', en una casilla fortificada' : `, ×${decimal(FORT_FX[g.fort[cell]].fortDefense)} por estar fortificada con ${FORT_LEVELS[g.fortLevel(p0, cell)]}`) : ''}.</p></section>`);
         }
 
         // Reclutar
@@ -7050,7 +7153,8 @@ class GameUI {
                 ${g.isDisputed(cell) ? `<dt>Estado</dt><dd class="warn-text">en disputa: la ocupa ${g.nm(o)} pero es de ${g.nm(g.legal[cell])}. Rinde la mitad y se anexiona al firmar la paz.</dd>` : ''}
                 ${res.map(r => { const reach = g.resourceReach(r); return `<dt>${r.typeName}</dt><dd>${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}, +${r.value} de oro. ${reach.length ? `Abastece también a ${reach.map(x => esc(PROVINCES[x].name)).join(', ')}.` : 'Solo abastece a esta provincia: pasa una carretera por su casilla y llévala hasta otras ciudades.'}</dd>`; }).join('')}
                 ${(() => { const s = g.provinceSupply(p.id), r = g.rules(g.owner[p.city]); return s.length ? `<dt>Industria</dt><dd>+${Math.round(100 * Math.min(r.resIndustryMax, r.resIndustry * s.length))} % de renta y tropas más baratas: la abastecen ${s.map(r => `${CONFIG.RESOURCE_ICON[r.type]} ${esc(r.name)}`).join(', ')}</dd>` : ''; })()}
-                ${g.fort[cell] ? `<dt>Casilla</dt><dd>fortificada</dd>` : g.fortWork.has(cell) ? `<dt>Casilla</dt><dd>fortificando, ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}</dd>` : ''}
+                ${g.fort[cell] ? (() => { const lv = g.fortLevel(p0, cell), w = g.fortWork.get(cell); return `<dt>Casilla</dt><dd>${lv === null ? 'fortificada (no sabes de qué nivel)' : `fortificada con ${FORT_LEVELS[lv]}: defensa ×${decimal(FORT_FX[g.fort[cell]].fortDefense)}${w?.up ? `; en reparación, ${plural(w.left, 'turno', 'turnos')}` : ''}`}</dd>`; })()
+                    : g.fortWork.has(cell) ? `<dt>Casilla</dt><dd>fortificando, ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}</dd>` : ''}
             </dl></section>`);
 
         el.innerHTML = `
@@ -7334,11 +7438,17 @@ class GameUI {
         }
         if (this.tool === 'road' && g.player !== null && !g.over) { this.renderRoadBar(el); return; }
         if (!plan || g.player === null) {
+            // Una fortificación propia dañada elegida con Fortificar: repararla un nivel.
+            const fr = this.tool === 'fort' && g.player !== null && !g.over ? this.fortRepair : null;
             // Con el dedo, mientras se construye, un botón visible para terminar (no hay clic derecho ni Esc).
-            el.hidden = !(this.touch && ['road', 'fort'].includes(this.tool) && g.player !== null);
-            if (el.hidden) el.innerHTML = '';
-            else el.innerHTML = `<span class="small">${this.anchor < 0 ? 'Toca una casilla tuya para empezar' : 'Toca dónde termina la obra'}</span>
-                <button class="btn" data-action="stop-build">Terminar obras</button>`;
+            const stop = this.touch && ['road', 'fort'].includes(this.tool) && g.player !== null;
+            el.hidden = !fr && !stop;
+            if (el.hidden) { el.innerHTML = ''; return; }
+            const r = this.myRules(), frOk = fr && fr.cost <= g.nations[g.player].gold;
+            el.innerHTML = `${fr ? `<span class="small">Fortificación dañada: ${FORT_LEVELS[g.fort[fr.cell] - 1]}; las tuyas nuevas son de ${FORT_LEVELS[g.fortMax(g.player) - 1]}.</span>
+                <button class="btn primary" data-action="repair-fort" ${frOk ? '' : 'disabled'} title="Cuesta la mitad que fortificar">Reparar un nivel (${fr.cost} de oro, ${plural(r.fortTurns, 'turno', 'turnos')})</button>`
+                : `<span class="small">${this.anchor < 0 ? 'Toca una casilla tuya para empezar' : 'Toca dónde termina la obra'}</span>`}
+                ${stop ? '<button class="btn" data-action="stop-build">Terminar obras</button>' : ''}`;
             return;
         }
         const ok = plan.cost <= g.nations[g.player].gold;
