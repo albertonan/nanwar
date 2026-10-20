@@ -1001,6 +1001,9 @@ const afloat = i => !isLand(i);   // en el mar, donde solo se navega (los lagos 
 const edgeKey = (u, d) => { const v = G.nb[u * 6 + d]; return v >= 0 && v < u ? v * 6 + (d + 3) % 6 : u * 6 + d; };
 // Escala: casillas que suman unos kilómetros en este mapa (al menos una).
 const kmCells = km => Math.max(1, Math.round(km / MAP.cellKm));
+// El mayor radio que puede tener un antiaéreo fijo con la investigación, en casillas: lo que se supone de quien no se
+// sabe qué investiga.
+const AA_MAX_RADIUS = kmCells(Math.max(BASE_RULES.aaRangeKm, ...TECHS.map(t => t.fx.aaRangeKm ?? 0)));
 // Coordenadas cúbicas de una casilla (las filas impares van desplazadas a la derecha) y vuelta a su índice.
 const cubeOf = i => { const r = Math.floor(i / G.cols), q = i % G.cols - (r - (r & 1)) / 2; return [q, r, -q - r]; };
 const cubeCell = (q, r) => r * G.cols + q + (r - (r & 1)) / 2;
@@ -2127,17 +2130,14 @@ class GameEngine {
     //   no, se sobrevuela a media eficacia. Con varias bases, cuenta el camino que peor lo tenga.
     // Cada fuente cuenta una vez, y las sumas tienen el tope del defensor (el ejército de la casilla o, si no, su dueño).
     // Los pesos de las pérdidas salen de lo que conoce el atacante (`owner`), que es con lo que vuela la misión; `seen`
-    // es lo mismo con solo las fuentes que conoce `viewer`. `unknown`: hay antiaéreo que dispara y `viewer` no conoce
-    // (también el integrado de una ciudad cuya fortificación no conoce), tierra enemiga en el blanco o en el camino
-    // donde podría haberlo sin que lo sepa, o, a una casilla o menos de ellos, una casilla que no ve o un ejército enemigo
-    // que no identifica (lleve antiaéreas o no). Un blanco en el mar solo cuenta con el antiaéreo móvil: el fijo y el
-    // integrado de la costa no protegen a un barco.
+    // es lo mismo con solo las fuentes que conoce `viewer`. `unknown` (ver aaDoubt) se calcula al leerlo: la IA no lo
+    // usa. Un blanco en el mar solo cuenta con el antiaéreo móvil: el fijo y el integrado de la costa no protegen a un barco.
     aaCover(owner, bases, cell, { viewer = owner, range = this.airRange(owner) } = {}) {
         const A = CONFIG.AIR, sea = afloat(cell), def = this.armyOn(cell)?.owner ?? this.owner[cell];
         const cap = A.AA_CAP * (def >= 0 ? this.rules(def) : BASE_RULES).aaPower;
         const paths = bases.map(b => ({ base: b, d: hexDist(b, cell), cells: flightPath(b, cell) }));
         const sources = [];
-        let fire = 0, loss = 0, seenFire = 0, seenLoss = 0, unseen = false;
+        let fire = 0, loss = 0, seenFire = 0, seenLoss = 0;
         for (const src of this.aaList()) {
             if (!this.atWar(owner, src.owner) || (sea && src.kind !== 'mobile')) continue;
             const r = src.radius, dt = hexDist(src.cell, cell);
@@ -2145,7 +2145,6 @@ class GameEngine {
             const over = dt <= r ? null : paths.filter(p => hexDist(src.cell, p.base) + dt <= p.d + 2 * r && p.cells.some(x => hexDist(x, src.cell) <= r));
             if (over && !over.length) continue;
             const known = this.aaKnown(owner, src), seen = viewer === owner ? known : this.aaKnown(viewer, src);
-            if (!seen) unseen = true;
             let w = 0;   // peso en las pérdidas
             if (!over) {
                 w = known ? A.KNOWN_TARGET : 1;
@@ -2159,26 +2158,46 @@ class GameEngine {
             if (seen) seenLoss += w * src.power;
             if (!sources.includes(src.cell)) sources.push(src.cell);
         }
-        const hidden = c => isLand(c) && this.atWar(owner, this.owner[c]) && !this.aaVisible(viewer, c);
-        // A una casilla o menos del blanco o del camino, un ejército enemigo que `viewer` no identifica, o una casilla que
-        // no ve, puede llevar antiaéreas: se avisa lo lleve o no, para no delatar lo que hay.
-        const blind = () => {
-            if (!this.settings.fog || viewer === null) return false;
-            const near = new Set();
-            for (const c of [cell, ...paths.flatMap(p => p.cells)]) {
-                near.add(c);
-                for (let d = 0; d < 6; d++) { const j = G.nb[c * 6 + d]; if (j >= 0) near.add(j); }
+        const top = x => Math.min(cap, x), g = this;
+        let unknown;
+        return { fire: top(fire), loss: top(loss), cap, sources, seen: { fire: top(seenFire), loss: top(seenLoss) },
+            get unknown() { return unknown ??= g.aaDoubt(owner, cell, paths, viewer); } };
+    }
+    // Alcance del antiaéreo fijo de `id` que puede suponer `viewer`: el de su investigación si sabe qué investiga y, si no,
+    // el mayor del juego (Defensa aérea 2).
+    aaReach(viewer, id) { return this.knowsResearch(viewer, id) ? this.aaRadius(id) : AA_MAX_RADIUS; }
+    // ¿Puede haber antiaéreo que `viewer` no conoce contra una misión de `owner` a `cell` por los caminos `paths`? Sale solo
+    // de lo que `viewer` sabe y ve, nunca de lo que hay, para no delatar nada:
+    // - a una casilla o menos del blanco o del camino, una casilla que no ve o un ejército enemigo que no identifica (el
+    //   antiaéreo móvil), lo lleve o no;
+    // - en tierra, a lo que podría cubrir un antiaéreo fijo de su dueño (aaReach), una casilla de un país en guerra con
+    //   `owner` donde no vería un antiaéreo, o una ciudad suya fortificada cuyo nivel no conoce: podría tener casamatas.
+    // El mar solo mira lo primero. Se recorren las casillas a esa distancia del camino, por anillos, y para en la primera.
+    aaDoubt(owner, cell, paths, viewer) {
+        if (!this.settings.fog || viewer === null) return false;
+        const land = !afloat(cell), reach = new Map();
+        let R = 1;
+        if (land) for (const e of this.enemiesOf(owner)) { const r = this.aaReach(viewer, e); reach.set(e, r); R = Math.max(R, r); }
+        const seen = new Set();
+        let ring = [];
+        for (const c of [cell, ...paths.flatMap(p => p.cells)]) if (!seen.has(c)) { seen.add(c); ring.push(c); }
+        for (let d = 0; d <= R && ring.length; d++) {
+            const next = [];
+            for (const c of ring) {
+                if (d <= 1) {
+                    if (!this.sees(viewer, c)) return true;
+                    const a = this.armyOn(c);
+                    if (a && this.atWar(owner, a.owner) && !this.knownCell(viewer, c)) return true;
+                }
+                if (land && isLand(c) && d <= (reach.get(this.owner[c]) ?? -1)) {
+                    if (!this.aaVisible(viewer, c)) return true;
+                    if (CITY_OF[c] >= 0 && this.fort[c] > 0 && this.fortLevel(viewer, c) === null) return true;
+                }
+                if (d < R) for (let k = 0; k < 6; k++) { const j = G.nb[c * 6 + k]; if (j >= 0 && !seen.has(j)) { seen.add(j); next.push(j); } }
             }
-            for (const c of near) {
-                if (!this.sees(viewer, c)) return true;
-                const a = this.armyOn(c);
-                if (a && this.atWar(owner, a.owner) && !this.knownCell(viewer, c)) return true;
-            }
-            return false;
-        };
-        const unknown = unseen || (!sea && (hidden(cell) || paths.some(p => p.cells.some(hidden)))) || blind();
-        const top = x => Math.min(cap, x);
-        return { fire: top(fire), loss: top(loss), cap, unknown, sources, seen: { fire: top(seenFire), loss: top(seenLoss) } };
+            ring = next;
+        }
+        return false;
     }
     // Probabilidades de una misión según cuánto antiaéreo hay por cada punto de fuerza de los escuadrones: `rf`, el que
     // cubre el blanco (fracaso de la misión); `rl`, el que cuenta en las pérdidas (derribo y daño de cada escuadrón).
@@ -2331,7 +2350,7 @@ class GameEngine {
         const o = this.airOdds(c.seen.fire / power, c.seen.loss / power, this.rules(owner).airEvade);
         const sees = this.knownCell(viewer, cell), known = kind === 'aa' || sees;
         const patrol = sees ? this.interceptors(owner, kind, cell).reduce((s, q) => s + this.airPower(q.owner), 0) : 0;
-        return { why, hit: (1 - o.fail) * (known ? 1 : this.rules(owner).blindHit), down: o.down, damaged: o.damaged, known, unknown: c.unknown,
+        return { why, hit: (1 - o.fail) * (known ? 1 : this.rules(owner).blindHit), down: o.down, damaged: o.damaged, known, get unknown() { return c.unknown; },
             fire: c.seen.fire, loss: c.seen.loss, power, patrol };
     }
     // Un escuadrón vuelve dañado: no vuela hasta pasado el próximo turno de su dueño, y deja de proteger su casilla.

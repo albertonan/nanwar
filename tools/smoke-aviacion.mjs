@@ -497,17 +497,26 @@ const CHECKS = [
     g.start(es); T.bare(g); g.declareWar(es, fr);
     T.learn(g, es, 'reconocimiento1', 'reconocimiento2');
     T.eq([g.rules(es).intelExact, g.rules(es).intelLevels], [true, false], 'información exacta, sin niveles');
-    // Ejércitos españoles junto al camino y al blanco, para tenerlo todo a la vista.
-    const [base, target] = T.pair(g, es, fr, () => true, 1);
-    for (const c of [target, ...flightPath(base, target)]) {
-        if (!isLand(c) || g.owner[c] !== fr || g.sees(es, c)) continue;
-        T.army(g, es, [...g.nearCells(c, 3).keys()].find(x => x !== target && T.free(g, x)));
-    }
-    g.fort[target] = 0; g.fortVersion++;
+    // Un satélite español sobre el blanco, para tenerlo todo a la vista (sin Óptica de alta resolución: sin niveles).
+    const [base, target] = T.pair(g, es, fr, () => true, 1, 12);
+    T.learn(g, es, 'espacio1'); g.nations[es].gold = 1e6; g.launchSat(es, target);
+    g.fort.fill(0); g.fortVersion++;
     T.eq(g.aaCover(es, [base], target).unknown, false, 'todo a la vista y sin antiaéreo');
     g.fort[target] = 4; g.fortVersion++;
     const c = g.aaCover(es, [base], target);
     T.eq([c.fire, c.seen.fire, c.unknown], [20, 0, true], 'casamatas: dispara y no lo sabes');
+    return true;
+}],
+// Pendiente A: el aviso no puede delatar el nivel de una fortificación que no conoces.
+['Pend A · una ciudad fortificada de nivel desconocido avisa igual con casamatas que con hormigón', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    T.learn(g, es, 'reconocimiento1', 'reconocimiento2', 'espacio1');
+    const [base, target] = T.pair(g, es, fr, () => true, 1, 12);
+    g.nations[es].gold = 1e6; g.launchSat(es, target);
+    const out = [];
+    for (const lv of [0, 2, 4]) { g.fort.fill(0); g.fort[target] = lv; g.fortVersion++; out.push([g.fortLevel(es, target), g.aaCover(es, [base], target).unknown]); }
+    T.eq(out, [[null, false], [null, true], [null, true]], 'sin fortificar, hormigón y casamatas');
     return true;
 }],
 ['3 · el jugador construye un antiaéreo: cobra, lo anota en el parte y no repite casilla', () => {
@@ -998,6 +1007,7 @@ const CHECKS = [
     const off = g.createOp(es, 'ofensiva', [base, target], { auto: 'manual' });
     const res = g.createOp(es, 'reserva', [base], { auto: 'auto' }); g.assignSquadron(s, res.id);
     g.executeOps(es, [off.id]); T.eq(s.flown, 0, 'manual: nada');
+    off.auto = 'auto';   // a una en manual no lo mandaría (Pend 11)
     g.executeOps(es, [res.id]); T.eq(s.op, off.id, 'la reserva lo manda');
     return true;
 }],
@@ -1672,6 +1682,43 @@ const CHECKS = [
     T.ok(/Satélites/.test(first.textContent), 'va primero');
     ui.cancel(); T.eq(ui.air.mode, null, 'Esc lo cancela');
     ui.setTool('command');
+    return true;
+}],
+// Pendientes tras publicar la aviación (.superpowers/sdd/pendientes/lista.md).
+['Pend A · con Reconocimiento 2, un antiaéreo fijo escondido a 3 casillas del blanco no cambia el aviso', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr); g.fort.fill(0); g.fortVersion++;
+    T.learn(g, es, 'reconocimiento1', 'reconocimiento2');
+    const ring = c => [c, ...[0, 1, 2, 3, 4, 5].map(d => G.nb[c * 6 + d]).filter(j => j >= 0)];
+    // Un blanco francés con todo a la vista a una casilla o menos de él y de su camino, sin ejércitos franceses ahí, y una
+    // casilla francesa en la niebla a 3 de él y a 2 o más del camino.
+    let pick = null;
+    for (const t of G.land) {
+        if (pick) break;
+        if (g.owner[t] !== fr || !g.sees(es, t)) continue;
+        const base = PROVINCES.filter(p => g.owner[p.city] === es && hexDist(p.city, t) <= g.airRange(es)).map(p => p.city).sort((a, b) => hexDist(a, t) - hexDist(b, t))[0];
+        if (base === undefined) continue;
+        const route = [t, ...flightPath(base, t)], near = route.flatMap(ring);
+        if (!near.every(c => g.sees(es, c) && (!g.armyAt[c] || g.armyOn(c).owner === es))) continue;
+        const x = G.land.find(c => g.owner[c] === fr && !g.sees(es, c) && hexDist(c, t) === 3 && route.every(r => hexDist(r, c) >= 2));
+        if (x !== undefined) pick = { t, x, base };
+    }
+    T.ok(pick, 'hay un blanco así');
+    const { t, x, base } = pick, without = g.aaCover(es, [base], t).unknown;
+    T.site(g, fr, x);
+    const withSite = g.aaCover(es, [base], t);
+    T.eq(withSite.fire, 10, 'el sitio cubre el blanco');
+    T.eq([without, withSite.unknown], [true, true], 'sin sitio y con él');
+    return true;
+}],
+['Pend A · el alcance que se supone al antiaéreo enemigo: el de su investigación si se conoce y, si no, el mayor', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(es, fr);
+    T.eq([g.aaReach(es, fr), kmCells(150)], [8, 8], 'sin saber qué investiga: el mayor del juego');
+    g.spies.set(G.prov[g.nations[fr].capitalCell], { since: g.turn, revealedTurn: g.turn }); g.spyVersion++;
+    T.eq(g.aaReach(es, fr), 3, 'con un espía en su capital, el suyo');
+    T.learn(g, fr, 'antiaerea1', 'antiaerea2');
+    T.eq(g.aaReach(es, fr), 8, 'y sube con su Defensa aérea 2');
     return true;
 }],
 ['M · con seis guerras, la fase de la IA con aviación tarda como mucho 1,25 veces lo mismo sin ella', () => {
