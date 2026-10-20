@@ -106,6 +106,26 @@ const setup = () => {
         airfield(g, owner, cell) { g.airfields.set(cell, { owner, left: 0, downUntil: 0 }); g.airVersion++; },
         // `n` escuadrones de `owner` en el aeródromo `base`, listos para volar.
         squad(g, owner, base, n = 1) { return Array.from({ length: n }, () => g.newSquadron(owner, base, 0)); },
+        // Antiaéreo fijo terminado de `owner` en `cell`, sin daños y sin que nadie lo conozca.
+        site(g, owner, cell) { const s = { owner, left: 0, hits: 0, known: new Set() }; g.aaSites.set(cell, s); g.airVersion++; return s; },
+        // La pareja más cercana [ciudad de A, ciudad de B] con min ≤ hexDist ≤ max que cumpla `ok(a, b)`.
+        pair(g, A, B, ok = () => true, min = 6, max = 18) {
+            const of = id => PROVINCES.filter(p => g.owner[p.city] === id).map(p => p.city);
+            let best = null, bd = Infinity;
+            for (const a of of(A)) for (const b of of(B)) {
+                const d = hexDist(a, b);
+                if (d >= min && d <= max && d < bd && ok(a, b)) { best = [a, b]; bd = d; }
+            }
+            if (!best) throw new Error('no hay pareja de ciudades');
+            return best;
+        },
+        // La ciudad de `owner` más cercana a `cell`, a `R` casillas o menos.
+        baseFor(g, owner, cell, R = 25) {
+            const c = PROVINCES.filter(p => g.owner[p.city] === owner && hexDist(p.city, cell) <= R).map(p => p.city)
+                .sort((a, b) => hexDist(a, cell) - hexDist(b, cell) || a - b)[0];
+            if (c === undefined) throw new Error('no hay base a su alcance');
+            return c;
+        },
         // Texto de la tarjeta al pasar el ratón por `cell` ('' si no sale).
         hover(cell) {
             ui.cellFromEvent = () => cell; ui.view.hoverCell = -1;
@@ -321,6 +341,148 @@ const CHECKS = [
     T.eq([g.nextOwnTurn(es), g.nextOwnTurn(fr)], [g.turn + 1, g.turn], 'empezada');
     const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
     T.eq([h.nextOwnTurn(es), h.nextOwnTurn(fr)], [h.turn + 1, h.turn], 'cargada');
+    return true;
+}],
+['3 · antiaéreo inicial: uno en la capital y otro por cada 4 escuadrones en las ciudades mayores', () => {
+    const g = T.game(), es = T.nation('es'), cap = g.nations[es].capitalCell;
+    const big = PROVINCES.filter(p => p.country === es && p.city !== cap).sort((a, b) => b.population - a.population)[0].city;
+    const sites = [...g.aaSites].filter(([, s]) => s.owner === es).map(([c]) => c).sort((a, b) => a - b);
+    T.eq(sites, [cap, big].sort((a, b) => a - b), 'Madrid y la ciudad mayor');
+    T.eq([...g.aaSites.values()].filter(s => s.owner === T.nation('ie')).length, 0, 'sin aviación, sin antiaéreo');
+    return true;
+}],
+['3 · construir un antiaéreo fijo: 60 de oro y 2 turnos; se pierde si el enemigo toma la casilla', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr); g.nations[es].gold = 500;
+    const [, c] = T.plainPair(g, es);
+    T.ok(g.buildAA(es, g.planAA(es, c)), 'en obra');
+    T.eq([g.nations[es].gold, g.aaSites.get(c).left], [440, 2], 'cobra');
+    g.beginNationTurn(es); g.beginNationTurn(es);
+    T.eq(g.aaSites.get(c).left, 0, 'listo');
+    g.capture(c, fr, true);
+    T.ok(!g.aaSites.has(c), 'perdido');
+    return true;
+}],
+['3 · cobertura: 3 casillas en Europa; dañado, la mitad; casamatas en ciudad, el doble', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    const ring = d => [...g.nearCells(target, 4)].find(([c, k]) => k === d && isLand(c) && g.owner[c] === fr && !flightPath(base, target).includes(c))[0];
+    T.site(g, fr, ring(3)); T.eq(g.aaCover(es, [base], target).fire, 10, 'a 3 casillas cubre');
+    g.aaSites.clear(); T.site(g, fr, ring(4)); g.airVersion++;
+    T.eq(g.aaCover(es, [base], target).fire, 0, 'a 4, no');
+    g.aaSites.clear(); T.site(g, fr, target); g.aaSites.get(target).hits = 1; g.airVersion++;
+    T.eq(g.aaCover(es, [base], target).fire, 5, 'dañado');
+    g.aaSites.clear(); g.fort[target] = 4; g.fortVersion++; g.airVersion++;
+    T.eq(g.aaCover(es, [base], target).fire, 20, 'integrado: el doble');
+    g.fort[target] = 3; g.fortVersion++;
+    T.eq(g.aaCover(es, [base], target).fire, 0, 'sin casamatas no hay integrado');
+    return true;
+}],
+['3 · probabilidades: con 2 a 1 fracasa el 70 % y cae el 40 %; con 1 a 2 sale bien el 87 % y cae el 5 %', () => {
+    const g = T.game(), a = g.airOdds(2, 2), b = g.airOdds(0.5, 0.5);
+    T.near([a.fail, a.down, a.damaged], [0.702, 0.4, 0.4], 0.005, '2 a 1');
+    T.near([1 - b.fail, b.down], [0.872, 0.05], 0.005, '1 a 2');
+    T.eq(g.airOdds(0, 0), { fail: 0, down: 0, damaged: 0 }, 'sin antiaéreo');
+    T.near([g.airOdds(9, 9).down, g.airOdds(9, 9).damaged], [0.6, 0.4], 1e-9, 'tope');
+    return true;
+}],
+['3 · el antiaéreo que no conoces cuenta en lo que pasa, no en lo que sabes; conocido, rebaja las pérdidas', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.site(g, fr, target);
+    const c = g.aaCover(es, [base], target);
+    T.eq([c.fire, c.loss, c.seen.fire, c.unknown], [10, 10, 0, true], 'no lo sabes');
+    g.aaSites.get(target).known.add(es); g.airVersion++;
+    const k = g.aaCover(es, [base], target);
+    T.eq([k.fire, k.seen.fire, k.loss], [10, 10, 7.5], 'conocido: pérdidas ×0,75');
+    return true;
+}],
+['3 · el antiaéreo conocido del camino se rodea si sobra alcance; si no, cuenta la mitad', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const onPath = (b, t) => flightPath(b, t).find(x => g.owner[x] === fr && hexDist(x, t) > 3 && hexDist(x, b) > 3);
+    const [base, target] = T.pair(g, es, fr, (b, t) => onPath(b, t) !== undefined);
+    T.site(g, fr, onPath(base, target));
+    T.eq([g.aaCover(es, [base], target).fire, g.aaCover(es, [base], target).loss], [0, 0], 'se rodea');
+    T.eq(g.aaCover(es, [base], target, { range: hexDist(base, target) }).loss, 5, 'sin alcance de sobra: la mitad');
+    return true;
+}],
+['3 · partida anterior a la aviación: al cargarla recibe la aviación y el antiaéreo iniciales y sus fortificaciones toman nivel', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es); T.learn(g, es, 'fortificacion1');
+    const [, c] = T.plainPair(g, es); g.fort[c] = 2;
+    const data = JSON.parse(JSON.stringify(g.serialize()));
+    delete data.air; delete data.fortLv; data.forts = [c];
+    const h = GameEngine.load(data), fresh = T.game();
+    const sum = x => [x.squadrons.size, x.airfields.size, x.aaSites.size];
+    T.eq([sum(h), h.fort[c], h.squadronsAt(h.nations[es].capitalCell).length], [sum(fresh), 2, 4], 'aviación de partida y fortificación al máximo');
+    return true;
+}],
+// Además del plan: reglas de la Task 3 que el plan no prueba por sí mismo.
+['3 · antiaéreo inicial con un múltiplo de 4 escuadrones: la capital y uno más por cada 4', () => {
+    const g = T.game(), n = id => squadronsFor(airFleet(E.countries[id].key));
+    const id = g.nations.findIndex(x => x.alive && n(x.id) >= 4 && n(x.id) % 4 === 0);
+    T.ok(id >= 0, 'hay un país así');
+    T.eq([...g.aaSites.values()].filter(s => s.owner === id).length, 1 + n(id) / 4, 'uno más que aeródromos');
+    T.ok([...g.aaSites].every(([c, s]) => g.owner[c] === s.owner && s.left === 0 && s.hits === 0), 'terminados y en su tierra');
+    return true;
+}],
+['3 · guardar y cargar conserva el antiaéreo, sus daños y quién lo conoce (solo países válidos)', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.nations[es].gold = 500;
+    const [, c] = T.plainPair(g, es);
+    g.buildAA(es, g.planAA(es, c));
+    const cap = g.nations[fr].capitalCell, s = g.aaSites.get(cap); s.hits = 1; s.known.add(es);
+    const data = JSON.parse(JSON.stringify(g.serialize()));
+    data.air.aa.find(x => x[0] === cap)[4].push(9999, -1, 'x');
+    const h = GameEngine.load(data), t = h.aaSites.get(c);
+    T.eq([h.aaSites.size, t.owner, t.left, t.hits, t.known.size, h.aaSites.get(cap).hits, [...h.aaSites.get(cap).known]],
+        [g.aaSites.size, es, 2, 0, 0, 1, [es]], 'igual');
+    return true;
+}],
+['3 · un antiaéreo en tierra que cambia de manos sin combate se pierde, sin trasladarse', () => {
+    const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+    g.start(es); T.bare(g);
+    const [, c] = T.plainPair(g, es);
+    T.site(g, es, c);
+    g.owner[c] = pt; g.version++;
+    T.eq(g.aaList().length, 0, 'ya no dispara');
+    g.beginNationTurn(es);
+    T.eq(g.aaSites.size, 0, 'perdido');
+    return true;
+}],
+['3 · con niebla, el antiaéreo se ve con Reconocimiento 2 a la vista o con un espía en la provincia', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr), src = () => g.aaList().find(x => x.cell === target);
+    T.site(g, fr, target);
+    T.eq([g.aaVisible(es, target), g.aaKnown(es, src()), g.aaVisible(fr, target)], [false, false, true], 'sin nada, no');
+    g.spies.set(G.prov[target], { since: g.turn, revealedTurn: g.turn }); g.spyVersion++;
+    T.ok(g.aaKnown(es, src()), 'con un espía');
+    T.eq(g.aaCover(es, [base], target).seen.fire, 10, 'cuenta en lo que sabes');
+    g.spies.clear(); g.spyVersion++;
+    T.learn(g, es, 'reconocimiento1', 'reconocimiento2');
+    T.ok(g.rules(es).intelExact, 'Reconocimiento 2 da información exacta');
+    T.eq(g.aaVisible(es, target), g.sees(es, target), 'el jugador, solo lo que tiene a la vista');
+    const hidden = G.land.find(x => g.owner[x] === fr && !g.sees(es, x));
+    T.ok(hidden !== undefined && !g.aaVisible(es, hidden), 'fuera de la vista, no');
+    T.learn(g, fr, 'reconocimiento1', 'reconocimiento2');
+    T.ok(g.aaVisible(fr, G.land.find(x => g.owner[x] === es)), 'la IA, con Reconocimiento 2');
+    g.aaSites.clear(); g.fort[target] = 4; g.fortVersion++;
+    T.eq(g.aaKnown(es, src()), g.fortLevel(es, target) !== null, 'el integrado, si se conoce la fortificación');
+    return true;
+}],
+['3 · el jugador construye un antiaéreo: cobra, lo anota en el parte y no repite casilla', () => {
+    const g = T.uiStart('es'), es = g.player;
+    T.bare(g); g.nations[es].gold = 100;
+    const [, c] = T.plainPair(g, es);
+    T.ok(g.playerBuildAA(c), 'en obra');
+    T.ok(/antiaéreo/.test(g.logs.at(-1).msg), 'parte');
+    T.ok(!g.playerBuildAA(c), 'no repite');
+    T.ok(!g.playerBuildAA(g.nations[T.nation('fr')].capitalCell), 'en tierra ajena, no');
+    T.eq(g.nations[es].gold, 40, 'una vez');
     return true;
 }]
 ];

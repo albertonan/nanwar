@@ -592,8 +592,12 @@ const CONFIG = {
     SPY_CATCH_PER_TURN: 0.04,       // ... que crece cada turno que sigue allí
     SPY_CATCH_MAX: 0.6,
     // Aviación: aviones de combate por escuadrón (al empezar), escuadrones por aeródromo, precios en oro y
-    // turnos que un aeródromo bombardeado queda inservible.
-    AIR: { PER_SQUADRON: 24, PER_AIRFIELD: 4, SQUADRON_COST: 300, AIRFIELD_COST: 150, DOWN_TURNS: 2 },
+    // turnos que un aeródromo bombardeado queda inservible. Antiaéreo: fuerza de un escuadrón, precio y obra de un
+    // sitio fijo, cuánto vale el integrado de una ciudad con casamatas (en sitios), tope de lo que cubre un blanco (en
+    // sitios), pérdidas ante el antiaéreo conocido (del blanco y del camino que no se puede rodear) y la constante de
+    // la probabilidad de fracaso.
+    AIR: { PER_SQUADRON: 24, PER_AIRFIELD: 4, SQUADRON_COST: 300, AIRFIELD_COST: 150, DOWN_TURNS: 2,
+        POWER: 10, AA_COST: 60, AA_TURNS: 2, INTEGRATED: 2, AA_CAP: 4, KNOWN_TARGET: 0.75, KNOWN_PATH: 0.5, FAIL_K: 1.7 },
     // Terreno de cada casilla, sacado de datos reales (relieve, bosques, humedales y lagos): coste de entrar y defensa.
     TERRAIN: {
         plain:    { name: "Llanura", cost: 1, def: 1 },
@@ -707,7 +711,9 @@ const baseRules = () => ({
     commandOps: 3,                       // operaciones a la vez (más una por cada 20 provincias)
     seaSpeed: 6,                         // casillas por turno de un ejército embarcado
     amphibious: 0.5,                     // ataque al desembarcar en una costa enemiga
-    airRangeKm: 500                      // radio de acción de un escuadrón desde su aeródromo
+    airRangeKm: 500,                     // radio de acción de un escuadrón desde su aeródromo
+    aaPower: 10, aaRangeKm: 60,          // fuerza y alcance de un antiaéreo fijo
+    airEvade: 1                          // multiplicador de la probabilidad de derribo de los escuadrones propios
 });
 
 const BASE_RULES = baseRules();
@@ -1068,7 +1074,8 @@ class GameEngine {
         this.squadrons = new Map();   // id → { id, owner, base, ready, flown, patrol, op, task }
         this.nextSquadronId = 1;
         this.airfields = new Map();   // casilla → { owner, left, downUntil }: left, turnos de obra; downUntil, inservible hasta
-        this.airVersion = 0;          // cambia con escuadrones y aeródromos
+        this.aaSites = new Map();     // casilla → { owner, left, hits, known }: antiaéreo fijo; known, quién lo conoce
+        this.airVersion = 0;          // cambia con escuadrones, aeródromos y antiaéreos
         this.seedAir();
         this.configure({ aggression: 'normal', alliances: 'reales', victory: 0.5, fog: true });
         for (const nat of this.nations) nat.gold = this.income(nat.id) * CONFIG.START_GOLD_TURNS;
@@ -1133,7 +1140,8 @@ class GameEngine {
             blocs: this.blocs.map(b => ({ id: b.id, name: b.name, founder: b.founder, secret: b.secret, since: b.since, members: [...b.members] })),
             nextBlocId: this.nextBlocId,
             air: { sq: [...this.squadrons.values()].map(q => [q.id, q.owner, q.base, q.ready, q.flown, q.patrol, q.op]), nextSq: this.nextSquadronId,
-                fields: [...this.airfields].map(([c, f]) => [c, f.owner, f.left, f.downUntil]) }
+                fields: [...this.airfields].map(([c, f]) => [c, f.owner, f.left, f.downUntil]),
+                aa: [...this.aaSites].map(([c, s]) => [c, s.owner, s.left, s.hits, [...s.known]]) }
         };
     }
 
@@ -1324,10 +1332,10 @@ class GameEngine {
             if (g.setOrder(a, { kind, dest: int(x?.[2], -1, G.N - 1, -1), target: int(x?.[3], 0, 1e9, 0), ratio: [0, 1, 1.3, 1.8].includes(Number(x?.[4])) ? Number(x[4]) : 1.3, flee: !!x?.[5] }))
                 Object.assign(a.order, { since: int(x?.[6], 0, 1e6, g.turn), stuck: int(x?.[7], 0, 3, 0) });
         }
-        // Aviación: lo que sembró el constructor se tira. Aeródromos en tierra; escuadrones con id único, en un aeródromo
-        // de su mismo dueño y con sitio, y en una operación solo si es suya. Las partidas de antes de la aviación la
-        // reciben ahora, según quién tiene qué ciudades.
-        g.squadrons = new Map(); g.airfields = new Map(); g.nextSquadronId = 1;
+        // Aviación: lo que sembró el constructor se tira. Aeródromos y antiaéreos en tierra; escuadrones con id único, en
+        // un aeródromo de su mismo dueño y con sitio, y en una operación solo si es suya; quién conoce un antiaéreo, solo
+        // países que existen. Las partidas de antes de la aviación la reciben ahora, según quién tiene qué ciudades.
+        g.squadrons = new Map(); g.airfields = new Map(); g.aaSites = new Map(); g.nextSquadronId = 1;
         if (data.air) {
             for (const x of list(data.air.fields)) {
                 const c = int(x?.[0], -1, G.N - 1, -1);
@@ -1343,6 +1351,12 @@ class GameEngine {
                     op: op && op.owner === owner ? op.id : 0, task: null });
             }
             g.nextSquadronId = Math.max(int(data.air.nextSq, 1, 1e9, 1), ...[...g.squadrons.keys()].map(x => x + 1), 1);
+            for (const x of list(data.air.aa)) {
+                const c = int(x?.[0], -1, G.N - 1, -1);
+                if (c < 0 || !isLand(c) || g.aaSites.has(c)) continue;
+                const known = new Set(list(x?.[4]).filter(k => Number.isInteger(k) && k >= 0 && k < NN));
+                g.aaSites.set(c, { owner: nat(x?.[1]), left: int(x?.[2], 0, CONFIG.AIR.AA_TURNS, 0), hits: int(x?.[3], 0, 1, 0), known });
+            }
         } else g.seedAir();
         g.airVersion++;
         // Quién ya ha empezado este turno: el jugador, que es quien guarda; los demás juegan después.
@@ -1824,14 +1838,15 @@ class GameEngine {
         return true;
     }
     // Aviación de partida: un escuadrón por cada 24 aviones de 2024, de 4 en 4 en aeródromos que ya funcionan, en la
-    // capital y luego en las ciudades mayores; si no hay bastantes, en casillas propias cerca de la capital. Sin azar.
+    // capital y luego en las ciudades mayores; si no hay bastantes, en casillas propias cerca de la capital. En esa misma
+    // lista, un antiaéreo fijo terminado en la capital y otro más por cada 4 escuadrones. Sin azar.
     seedAir() {
         const per = CONFIG.AIR.PER_AIRFIELD, byCountry = this.nations.map(() => []);
         for (const p of PROVINCES) byCountry[this.owner[p.city]]?.push(p);
         for (const nat of this.nations) {
             const k = squadronsFor(airFleet(nat.key));
             if (!nat.alive || !k) continue;
-            const id = nat.id, need = Math.ceil(k / per), cap = nat.capitalCell, S = [];
+            const id = nat.id, fields = Math.ceil(k / per), sites = 1 + Math.floor(k / per), need = Math.max(fields, sites), cap = nat.capitalCell, S = [];
             if (this.owner[cap] === id) S.push(cap);
             const cities = byCountry[id].filter(p => p.city !== cap && this.legal[p.city] === id).sort((a, b) => b.population - a.population || a.id - b.id);
             for (const p of cities) { if (S.length >= need) break; S.push(p.city); }
@@ -1840,10 +1855,11 @@ class GameEngine {
                     .sort((a, b) => hexDist(a, cap) - hexDist(b, cap) || a - b);
                 S.push(...rest.slice(0, need - S.length));
             }
-            S.forEach((c, i) => {
+            S.slice(0, fields).forEach((c, i) => {
                 this.airfields.set(c, { owner: id, left: 0, downUntil: 0 });
                 for (let j = i * per; j < Math.min(k, (i + 1) * per); j++) this.newSquadron(id, c, 0);
             });
+            for (const c of S.slice(0, sites)) this.aaSites.set(c, { owner: id, left: 0, hits: 0, known: new Set() });
         }
         this.airVersion++;
     }
@@ -1857,9 +1873,26 @@ class GameEngine {
         this.airVersion++;
         if (f.owner === this.player) this.log(`Pierdes el aeródromo de ${this.placeName(cell)}${lost.length ? ` y sus ${plural(lost.length, 'escuadrón', 'escuadrones')}` : ''}.`);
     }
+    // Lo mismo con el antiaéreo fijo de la casilla: si la toma otro, se pierde (también a medio construir).
+    loseAASite(cell) {
+        const s = this.aaSites.get(cell);
+        if (!s || s.owner === this.owner[cell]) return;
+        this.aaSites.delete(cell);
+        this.airVersion++;
+        if (s.owner === this.player) this.log(`Pierdes el antiaéreo de ${this.placeName(cell)}.`);
+    }
     // Aeródromos en casillas que ya no son de su dueño (sin combate: un tratado, una provincia que cae entera...): se
     // cierran y sus escuadrones vuelan al aeródromo propio más cercano que funcione y tenga sitio. Si no hay, se pierden.
+    // Los antiaéreos fijos de esas casillas se pierden sin más: no se trasladan.
     airSweep() {
+        let lostAA = 0;
+        for (const [c, s] of this.aaSites) {
+            if (this.owner[c] === s.owner) continue;
+            this.aaSites.delete(c);
+            this.airVersion++;
+            if (s.owner === this.player) lostAA++;
+        }
+        if (lostAA) this.log(`Pierdes ${lostAA === 1 ? 'un antiaéreo' : `${lostAA} antiaéreos`} en tierra que ya no es tuya.`);
         for (const [c, f] of [...this.airfields]) {
             if (this.owner[c] === f.owner) continue;
             this.airfields.delete(c);
@@ -1879,11 +1912,16 @@ class GameEngine {
             this.log(`Pierdes el aeródromo de ${this.placeName(c)}${parts.length ? `: ${parts.join(' y ')}` : ''}.`);
         }
     }
-    // Al empezar el turno de `id`: avanzan sus obras de aeródromo y sus escuadrones dejan de patrullar.
+    // Al empezar el turno de `id`: avanzan sus obras de aeródromo y de antiaéreo y sus escuadrones dejan de patrullar.
     airTurn(id) {
         for (const [c, f] of this.airfields) {
             if (f.owner !== id || f.left <= 0) continue;
             if (--f.left === 0 && id === this.player) this.log(`Aeródromo terminado en ${this.placeName(c)}.`);
+            this.airVersion++;
+        }
+        for (const [c, s] of this.aaSites) {
+            if (s.owner !== id || s.left <= 0) continue;
+            if (--s.left === 0 && id === this.player) this.log(`Antiaéreo terminado en ${this.placeName(c)}.`);
             this.airVersion++;
         }
         for (const q of this.squadrons.values()) if (q.owner === id && q.patrol >= 0) { q.patrol = -1; this.airVersion++; }
@@ -1916,6 +1954,111 @@ class GameEngine {
         else this.log(`Ningún escuadrón puede trasladarse a ${this.placeName(cell)}: hace falta un aeródromo tuyo en servicio, con sitio y a su alcance (${plural(this.airRange(this.player), 'casilla', 'casillas')}), y que no hayan volado este turno.`);
         return n;
     }
+    // --- Antiaéreo: sitios fijos e integrado en las ciudades con casamatas ---
+    // Fuerza de un escuadrón de `id`, con lo que tenga investigado de Aviación.
+    airPower(id) { return CONFIG.AIR.POWER * (1 + 0.1 * this.techLevel(id, 'aviacion')); }
+    // Alcance del antiaéreo de `id`, en casillas.
+    aaRadius(id) { return kmCells(this.rules(id).aaRangeKm); }
+    // El antiaéreo que puede disparar ahora: los sitios terminados en una casilla de su dueño (los dañados, a media
+    // fuerza) y las ciudades con casamatas, que traen el integrado de la calidad que tenga investigada su dueño.
+    aaList() {
+        const key = `${this.airVersion}:${this.fortVersion}:${this.techVersion}:${this.version}:${this.armyVersion}`;
+        if (this.aaCache?.key === key) return this.aaCache.list;
+        const list = [];
+        for (const [cell, site] of this.aaSites) {
+            if (site.left > 0 || this.owner[cell] !== site.owner) continue;
+            list.push({ cell, owner: site.owner, kind: 'site', power: this.rules(site.owner).aaPower * (site.hits ? 0.5 : 1), radius: this.aaRadius(site.owner), site });
+        }
+        for (const p of PROVINCES) {
+            const cell = p.city, owner = this.owner[cell];
+            if (this.fort[cell] !== 4 || owner < 0) continue;   // solo con casamatas
+            list.push({ cell, owner, kind: 'integrated', power: CONFIG.AIR.INTEGRATED * this.rules(owner).aaPower, radius: this.aaRadius(owner), site: null });
+        }
+        this.aaCache = { key, list };
+        return list;
+    }
+    // ¿Ve `viewer` el antiaéreo que pueda haber en `cell`? Sin niebla, y el propio y el de los aliados, siempre; si no,
+    // con un espía en la provincia o con Reconocimiento 2 (el jugador, además, con la casilla a la vista).
+    aaVisible(viewer, cell) {
+        const o = this.owner[cell];
+        if (!this.settings.fog || viewer === null || o < 0 || o === viewer || this.allied(viewer, o)) return true;
+        if (viewer === this.player && this.spiedProvinces().has(SEA_PROV[cell])) return true;
+        return this.rules(viewer).intelExact && (viewer !== this.player || this.sees(viewer, cell));
+    }
+    // ¿Conoce `viewer` esta fuente de antiaéreo? Un sitio, si le ha disparado o si lo ve; el integrado, si conoce el
+    // nivel de la fortificación de la ciudad.
+    aaKnown(viewer, src) {
+        if (src.kind === 'integrated') return this.fortLevel(viewer, src.cell) !== null;
+        return src.site.known.has(viewer) || this.aaVisible(viewer, src.cell);
+    }
+    // Antiaéreo enemigo que se encuentra una misión de `owner` que sale de `bases` contra `cell`, en línea recta.
+    // - Lo que tiene el blanco a su alcance hace fracasar la misión (`fire`) y derriba (`loss`); el conocido, menos.
+    // - Lo que solo cubre el camino derriba: el que no se conoce, de lleno; el conocido se rodea si sobra alcance y, si
+    //   no, se sobrevuela a media eficacia. Con varias bases, cuenta el camino que peor lo tenga.
+    // Cada fuente cuenta una vez, y las sumas tienen el tope del defensor (el ejército de la casilla o, si no, su dueño).
+    // `seen` es lo mismo con solo lo que conoce `viewer`; `unknown`, si en el blanco o en el camino queda tierra enemiga
+    // donde podría haber antiaéreo que no conoce.
+    aaCover(owner, bases, cell, { viewer = owner, range = this.airRange(owner) } = {}) {
+        const A = CONFIG.AIR, def = this.armyOn(cell)?.owner ?? this.owner[cell];
+        const cap = A.AA_CAP * (def >= 0 ? this.rules(def) : BASE_RULES).aaPower;
+        const paths = bases.map(b => ({ base: b, d: hexDist(b, cell), cells: flightPath(b, cell) }));
+        const sources = [];
+        let fire = 0, loss = 0, seenFire = 0, seenLoss = 0;
+        for (const src of this.aaList()) {
+            if (!this.atWar(owner, src.owner)) continue;
+            const r = src.radius, dt = hexDist(src.cell, cell);
+            // Las casillas del camino están a i de la base y a d − i del blanco: más lejos de eso, no lo cubre.
+            const over = dt <= r ? null : paths.filter(p => hexDist(src.cell, p.base) + dt <= p.d + 2 * r && p.cells.some(x => hexDist(x, src.cell) <= r));
+            if (over && !over.length) continue;
+            const known = this.aaKnown(owner, src), seen = viewer === owner ? known : this.aaKnown(viewer, src);
+            let w = 0;   // peso en las pérdidas
+            if (!over) {
+                w = known ? A.KNOWN_TARGET : 1;
+                fire += src.power;
+                if (seen) seenFire += src.power;
+            } else {
+                for (const p of over) w = Math.max(w, !known ? 1 : range >= p.d + 2 * r + 1 ? 0 : A.KNOWN_PATH);
+                if (!w) continue;   // conocido y rodeado: no dispara
+            }
+            loss += w * src.power;
+            if (seen) seenLoss += w * src.power;
+            if (!sources.includes(src.cell)) sources.push(src.cell);
+        }
+        const hidden = c => isLand(c) && this.atWar(owner, this.owner[c]) && !this.aaVisible(viewer, c);
+        const unknown = hidden(cell) || paths.some(p => p.cells.some(hidden));
+        const top = x => Math.min(cap, x);
+        return { fire: top(fire), loss: top(loss), cap, unknown, sources, seen: { fire: top(seenFire), loss: top(seenLoss) } };
+    }
+    // Probabilidades de una misión según cuánto antiaéreo hay por cada punto de fuerza de los escuadrones: `rf`, el que
+    // cubre el blanco (fracaso de la misión); `rl`, el que cuenta en las pérdidas (derribo y daño de cada escuadrón).
+    // `evade` rebaja el derribo; el dañado nunca pasa del derribado ni de lo que queda.
+    airOdds(rf, rl, evade = 1) {
+        const fail = rf * rf / (rf * rf + CONFIG.AIR.FAIL_K), down = Math.min(0.6, 0.4 * (rl / 2) ** 1.5) * evade;
+        return { fail, down, damaged: Math.min(down, 1 - down) };
+    }
+    // Un antiaéreo fijo: en cualquier casilla de tierra propia (no en un lago), uno por casilla.
+    planAA(id, cell) {
+        if (cell < 0 || !isLand(cell) || CELL_TERRAIN[cell] === 'lake' || this.owner[cell] !== id || this.aaSites.has(cell)) return null;
+        return { cell, cost: CONFIG.AIR.AA_COST };
+    }
+    buildAA(id, plan) {
+        const n = this.nations[id], p = plan ? this.planAA(id, plan.cell) : null;
+        if (!p || p.cost > n.gold) return false;
+        this.aaSites.set(p.cell, { owner: id, left: CONFIG.AIR.AA_TURNS, hits: 0, known: new Set() });
+        n.gold -= p.cost;
+        this.airVersion++;
+        return true;
+    }
+    playerBuildAA(cell) {
+        if (this.over) return false;
+        const p = this.player, plan = this.planAA(p, cell);
+        if (!plan) { this.log(this.owner[cell] === p && this.aaSites.has(cell) ? 'Ahí ya tienes un antiaéreo.' : 'Solo se construye un antiaéreo en tierra tuya.'); return false; }
+        if (plan.cost > this.nations[p].gold) { this.log(`Fondos insuficientes: el antiaéreo cuesta ${plan.cost}g.`); return false; }
+        if (!this.buildAA(p, plan)) return false;
+        this.log(`Empiezas un antiaéreo en ${this.placeName(cell)} por ${plan.cost} de oro: listo en ${plural(CONFIG.AIR.AA_TURNS, 'turno', 'turnos')}.`);
+        return true;
+    }
+
     // Hay un ejército enemigo (en guerra) en `u`, en `v` o en sus vecinas: no se trabaja en el tramo.
     repairBlocked(id, u, v) {
         const foes = this.enemiesOf(id);
@@ -3732,6 +3875,7 @@ class GameEngine {
         this.owner[cell] = holder(cell);
         this.version++;
         this.loseAirfield(cell);   // antes de que la ciudad quede asediada: el aeródromo cae al entrar
+        this.loseAASite(cell);     // y el antiaéreo, igual
         this.sieges.delete(cell);
         if (byForce) this.wreck(cell, prev, a);
         const res = RESOURCE_AT.get(cell);
