@@ -153,8 +153,10 @@ const CHECKS = [
     g.start(es); g.declareWar(es, pt);
     const [, c] = T.plainPair(g, es);
     T.pocket(g, es, fr, c);
+    T.ok(!g.starving(es, c), 'dueño legal en paz: no no hay hambre');
+    g.legal[c] = pt; g.version++;   // dueño legal en guerra: solo las vecinas (de Francia, en paz) lo salvan
     const a = T.army(g, es, c, 2);
-    T.ok(!g.starving(es, c), 'en paz no hay hambre');
+    T.ok(!g.starving(es, c), 'vecinas en paz: no hay hambre');
     for (let i = 0; i < 4; i++) g.beginNationTurn(es);
     T.eq([a.hunger, a.units.infantry], [0, 2], 'sin contar ni perder');
     return true;
