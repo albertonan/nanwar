@@ -316,6 +316,156 @@ const CHECKS = [
     T.ok(g.roadWork.has(edgeKey(a, d)), 'obra empezada');
     return true;
 }],
+['A · la ficha del ejército explica aislado, sin carretera y sin víveres', () => {
+    const g = T.uiStart('es'), es = g.player, pt = T.nation('pt');
+    g.declareWar(es, pt);
+    const [, c] = T.plainPair(g, es);
+    T.pocket(g, es, pt, c);
+    const a = T.army(g, es, c, 3);
+    g.beginNationTurn(es);
+    ui.select(a.cell);
+    const txt = document.body.textContent;
+    T.ok(/Aislado ×0,9/.test(txt), 'aislado');
+    T.ok(/Sin víveres: pierde 1 unidad dentro de 2 turnos/.test(txt), 'hambre con su cuenta');
+    return true;
+}],
+['A · la ficha al pasar el ratón también lo dice, con «sin carretera al alcance»', () => {
+    const g = T.uiStart('es'), es = g.player, pt = T.nation('pt');
+    g.declareWar(es, pt);
+    const [, c] = T.plainPair(g, es);
+    T.pocket(g, es, pt, c);
+    for (const x of g.nearCells(c, 8).keys()) for (let d = 0; d < 6; d++) g.road[x * 6 + d] = 0;
+    g.roadVersion++;
+    const a = T.army(g, es, c, 3);
+    g.beginNationTurn(es);
+    ui.cellFromEvent = () => a.cell;
+    try { ui.hover({ clientX: 0, clientY: 0 }); } finally { delete ui.cellFromEvent; }
+    const txt = document.querySelector('#tooltip').textContent;
+    T.ok(/Aislado ×0,9/.test(txt), 'aislado: ' + txt);
+    T.ok(/Sin carretera al alcance ×0,85/.test(txt), 'sin carretera: ' + txt);
+    T.ok(/Sin víveres: pierde 1 unidad dentro de 2 turnos/.test(txt), 'hambre: ' + txt);
+    return true;
+}],
+['A · la leyenda explica el borde de sin víveres', () => {
+    T.uiStart('es');
+    T.ok(/Ficha con borde violeta: ejército sin víveres/.test(document.querySelector('#legend').textContent), 'leyenda');
+    return true;
+}],
+['A · la IA saca de la bolsa a un ejército que pasa hambre, antes de sus ataques', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es);
+    const [, c] = T.plainPair(g, fr);
+    T.pocket(g, fr, es, c);
+    const a = T.army(g, fr, c, 3);
+    T.ok(g.starving(fr, c), 'pasa hambre antes');
+    let early = null;
+    const command = g.aiCommand;
+    g.aiCommand = function (...x) { const b = this.armies.get(a.id); early = !!b && b.cell !== c && !this.starving(fr, b.cell); return command.apply(this, x); };
+    g.aiStep(fr);
+    T.ok(early, 'ya ha salido cuando la IA manda sus operaciones');
+    const b = g.armies.get(a.id);
+    T.ok(b && b.cell !== c && !g.starving(fr, b.cell), 'fuera de la bolsa y comiendo');
+    return true;
+}],
+['A · la IA no busca su casa al otro lado de tierra que no puede pisar', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+    g.start(es); g.declareWar(fr, es);
+    const c = G.land.find(x => g.owner[x] === fr && CELL_TERRAIN[x] === 'plain' && T.free(g, x)
+        && [...g.nearCells(x, 5)].every(([j]) => isLand(j) && g.owner[j] === fr && CAPITAL_OF[j] < 0));
+    T.ok(c !== undefined, 'hay sitio');
+    const ring = [...g.nearCells(c, 4)];
+    for (const [j, k] of ring) if (k >= 1 && k <= 3) { const x = g.armyOn(j); if (x) g.removeArmy(x); g.owner[j] = es; g.legal[j] = es; }
+    g.legal[c] = es;
+    // Una casilla francesa a 3 pasos, pero rodeada de Portugal (en paz): no se puede llegar a ella.
+    const island = ring.find(([, k]) => k === 3)[0];
+    g.owner[island] = fr; g.legal[island] = fr;
+    for (let d = 0; d < 6; d++) { const j = G.nb[island * 6 + d]; g.owner[j] = pt; g.legal[j] = pt; }
+    g.version++;
+    const a = T.army(g, fr, c, 3);
+    T.ok(g.starving(fr, c), 'pasa hambre');
+    const home = g.nearestHome(fr, c);
+    T.ok(home >= 0 && home !== island && g.owner[home] === fr && !g.starving(fr, home), 'su casa es Francia, no la isla');
+    g.aiPockets(fr);
+    const b = g.armies.get(a.id);
+    T.ok(b && b.cell !== c && g.landSteps(fr, [home])[b.cell] < g.landSteps(fr, [home])[c], 'da el paso hacia Francia');
+    return true;
+}],
+['A · sin poder atacar, va a la casilla propia que alcance donde no pasa hambre', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es);
+    // Una ciudad española tomada por Francia, en medio de España: con suministro (es ciudad propia) se mueve entero.
+    const p = PROVINCES.find(q => CAPITAL_OF[q.city] < 0 && [...g.nearCells(q.city, 3)].every(([j]) => isLand(j) && g.owner[j] === es));
+    T.ok(p, 'hay sitio');
+    const c = p.city;
+    for (const [j] of g.nearCells(c, 3)) { const x = g.armyOn(j); if (x) g.removeArmy(x); }
+    g.owner[c] = fr; g.version++;
+    const a = T.army(g, fr, c, 0, 3);
+    T.ok(g.starving(fr, c), 'pasa hambre');
+    const two = [...g.nearCells(c, 2)].filter(([j, k]) => k === 2 && T.free(g, j)).map(([j]) => j);
+    const r0 = g.reach(fr, c, g.mp(a), true), can = new Set(g.destinations(r0));
+    const reached = two.filter(j => can.has(j)), hungry = reached[0];
+    const fed = reached.find(j => j !== hungry && G.dirTo(j, hungry) < 0);   // no vecinas entre sí
+    T.ok(fed !== undefined && hungry !== undefined, 'alcanza dos casillas a 2 pasos y no vecinas');
+    g.owner[hungry] = fr;                    // tomada y rodeada de España: allí también pasaría hambre
+    g.owner[fed] = fr; g.legal[fed] = fr;    // francesa de verdad: allí come
+    g.version++;
+    T.ok(g.starving(fr, hungry) && !g.starving(fr, fed), 'una con hambre y otra sin');
+    const out = g.breakOut(fr, a, [g.nearestHome(fr, c)]);
+    T.eq(out?.cell, fed, 'a la que come');
+    return true;
+}],
+['A · la IA rompe el cerco atacando a un vecino con previsión de al menos 1', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es);
+    const [n, c] = T.plainPair(g, fr);
+    T.pocket(g, fr, es, c);
+    const weak = T.army(g, es, n, 1), a = T.army(g, fr, c, 4, 2);
+    T.ok(g.starving(fr, c), 'pasa hambre');
+    let hit = -1;
+    const attack = g.attack;
+    g.attack = function (army, from, target, r) { if (army.owner === fr) hit = target; return attack.call(this, army, from, target, r); };
+    g.aiPockets(fr);
+    T.eq(hit, weak.cell, 'ataca al vecino débil');
+    return true;
+}],
+['A · sin nadie a quien atacar, la IA marcha hacia lo suyo', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es);
+    const [, c] = T.plainPair(g, fr);
+    T.pocket(g, fr, es, c);
+    const a = T.army(g, fr, c, 3);
+    g.aiPockets(fr);
+    const b = g.armies.get(a.id);
+    T.ok(b && b.cell !== c, 'se ha movido');
+    T.ok(!g.starving(fr, b.cell), 'ya come');
+    return true;
+}],
+['A · la IA no saca de la bolsa a quien tiene una orden', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es);
+    const [, c] = T.plainPair(g, fr);
+    T.pocket(g, fr, es, c);
+    const a = T.army(g, fr, c, 3);
+    a.order = { kind: 'march', dest: c, stuck: 0 };
+    g.aiPockets(fr);
+    T.eq(g.armies.get(a.id)?.cell, c, 'quieto');
+    return true;
+}],
+['A · declarar la guerra o firmar la paz renueva la carretera al alcance', () => {
+    const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+    g.start(es);
+    const [mine, theirs] = T.border(g, es, pt);
+    for (const x of g.nearCells(mine, 8).keys()) for (let d = 0; d < 6; d++) g.road[x * 6 + d] = 0;
+    const k = [0, 1, 2, 3, 4, 5].find(x => { const j = G.nb[theirs * 6 + x]; return j >= 0 && j !== mine && isLand(j) && g.owner[j] === pt; });
+    g.road[theirs * 6 + k] = 1; g.road[G.nb[theirs * 6 + k] * 6 + (k + 3) % 6] = 1; g.roadVersion++;
+    const units = { infantry: 3, tank: 0, artillery: 0 };
+    T.eq(g.roadInReach(es, mine, units), false, 'en paz no se cruza Portugal');
+    g.declareWar(es, pt);
+    T.eq(g.roadInReach(es, mine, units), true, 'en guerra, la carretera portuguesa está a su alcance');
+    g.makePeace(es, pt, true);
+    T.eq(g.roadInReach(es, mine, units), false, 'con la paz, otra vez no');
+    return true;
+}],
 ];
 
 const exe = process.env.CHROME ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome'].find(existsSync);

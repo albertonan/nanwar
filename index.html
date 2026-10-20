@@ -945,6 +945,7 @@ class GameEngine {
         this.version = 0;       // cambia con la propiedad de las casillas
         this.roadVersion = 0;   // cambia al construir
         this.blocVersion = 0;   // cambia con las alianzas
+        this.warVersion = 0;    // cambia al declarar la guerra o firmar la paz
         this.econCache = [];
         this.techVersion = 0;       // cambia al terminar cualquier investigación
         this.rulesCache = [];
@@ -1184,6 +1185,7 @@ class GameEngine {
             if (a === b) continue;
             Object.assign(g.relations[a][b], { state: x?.[2] === 'guerra' ? 'guerra' : 'paz', since: int(x?.[3], 0, 1e6, 0), truceUntil: int(x?.[4], 0, 1e6, 0) });
         }
+        g.warVersion++;
         g.armies = new Map();
         g.armyAt = new Int32Array(G.N);
         // Las partidas de antes de los doceavos contaban el movimiento en sextos: el gastado se duplica.
@@ -1772,10 +1774,11 @@ class GameEngine {
     }
     // ¿Llega con su movimiento completo de un turno (sin el recorte por suministro ni por rodeado) a alguna casilla con
     // un tramo de carretera intacto, de cualquier dueño? Pasa por territorio propio, aliado o enemigo sin mirar ejércitos,
-    // y la propia casilla cuenta. Se guarda por dueño, casilla y velocidad hasta que cambie el mapa, la red o las reglas.
+    // y la propia casilla cuenta. Se guarda por dueño, casilla y velocidad hasta que cambie el mapa, la red, las reglas o
+    // quién está en guerra con quién.
     roadInReach(owner, cell, units) {
         const budget = speedOf(units, this.rules(owner)) * MOVE;
-        const stamp = `${this.version}:${this.roadVersion}:${this.techVersion}:${this.blocVersion}:${this.fortVersion}`;
+        const stamp = `${this.version}:${this.roadVersion}:${this.techVersion}:${this.blocVersion}:${this.fortVersion}:${this.warVersion}`;
         if (stamp !== this.roadReachStamp) { this.roadReach.clear(); this.roadReachStamp = stamp; }
         const key = `${owner}:${cell}:${budget}`;
         let hit = this.roadReach.get(key);
@@ -2592,6 +2595,40 @@ class GameEngine {
         return `${this.placeName(cells[Math.floor(cells.length / 2)])} (${parts.join(' y ')})`;
     }
     // Cumple una línea de defensa este turno con sus ejércitos libres.
+    // Saca a un ejército de una bolsa. Rodeado o sin víveres, rompe el cerco atacando, con una previsión de al menos 1, la
+    // casilla que más lo acerque a `towards`. Si no puede, marcha a la casilla que alcance este turno que más valga según
+    // `value` (de entre las de igual valor, la de menos coste de movimiento); por defecto, la propia o aliada donde no pase
+    // hambre. Si no alcanza ninguna que valga y pasa hambre, da el paso que más lo acerque a `towards` por tierra que pueda
+    // pisar (propia, aliada o en guerra). Devuelve null si ha atacado; si no, el ejército, se haya movido o no.
+    breakOut(id, a, towards, value = c => (this.owner[c] === id || this.allied(id, this.owner[c])) && !this.starving(id, c) ? 1 : 0) {
+        const r = this.reach(id, a.cell, this.mp(a), a.used === 0);
+        const near = c => towards.length ? Math.min(...towards.map(t => (G.cx[t] - G.cx[c]) ** 2 + (G.cy[t] - G.cy[c]) ** 2)) : 0;
+        const hungry = this.starving(id, a.cell);
+        if (hungry || this.hostileSides(id, a.cell) >= CONFIG.FLANKED_SIDES) {
+            let best = null, bd = Infinity;
+            for (const [target, from] of r.attacks) {
+                if (this.expectedRatio(id, a.units, from, this.armyOn(target), target, a.id) < 1) continue;
+                const d = near(target);
+                if (d < bd) { bd = d; best = { target, from }; }
+            }
+            if (best) { this.attack(a, best.from, best.target, r); return null; }
+        }
+        let best = a.cell, bv = value(a.cell), bc = 0;
+        for (const v of this.destinations(r)) {
+            if (this.armyAt[v] || !isLand(v)) continue;
+            const val = value(v), cost = this.entry(r, v)?.cost ?? Infinity;
+            if (val > bv || (val === bv && val > 0 && cost < bc)) { best = v; bv = val; bc = cost; }
+        }
+        if (best === a.cell && hungry && towards.length) {
+            const steps = this.landSteps(id, towards);
+            let bd = steps[a.cell];
+            for (const v of this.destinations(r)) {
+                if (this.armyAt[v] || !isLand(v)) continue;
+                if (steps[v] < bd) { bd = steps[v]; best = v; }
+            }
+        }
+        return best !== a.cell ? this.moveArmy(a, best, r) : a;
+    }
     defenseStep(op, free, tally, live) {
         const id = op.owner, rules = this.rules(id);
         const held = c => { const x = this.armyAt[c]; return x && this.armies.get(x).owner === id; };
@@ -2656,27 +2693,9 @@ class GameEngine {
             for (const a0 of free) {
                 if (!live(a0) || a0.op !== op.id || line.has(a0.cell)) continue;
                 if (this.hostileSides(id, a0.cell) < CONFIG.FLANKED_SIDES && (costs.get(a0.cell) ?? Infinity) <= LINE_STEP_TURNS * speedOf(a0.units, rules) * MOVE) continue;
-                let a = a0;
-                const r = this.reach(id, a.cell, this.mp(a), a.used === 0);
-                if (this.hostileSides(id, a.cell) >= CONFIG.FLANKED_SIDES) {
-                    // Rodeado: rompe el cerco por donde lo acerque a la línea, con una previsión de al menos 1.
-                    let best = null, bd = Infinity;
-                    for (const [target, from] of r.attacks) {
-                        if (this.expectedRatio(id, a.units, from, this.armyOn(target), target, a.id) < 1) continue;
-                        const d = Math.min(...op.cells.map(c => (G.cx[c] - G.cx[target]) ** 2 + (G.cy[c] - G.cy[target]) ** 2));
-                        if (d < bd) { bd = d; best = { target, from }; }
-                    }
-                    if (best) { this.attack(a, best.from, best.target, r); tally.attacked++; continue; }
-                }
-                // Si no, a la ciudad, la montaña o la colina propia más cercana que alcance, y aguanta allí.
-                const value = c => this.owner[c] !== id ? 0 : CITY_OF[c] >= 0 ? 3 : CELL_TERRAIN[c] === 'mountain' ? 2 : CELL_TERRAIN[c] === 'hills' ? 1 : 0;
-                let best = a.cell, bv = value(a.cell), bc = 0;
-                for (const v of this.destinations(r)) {
-                    if (this.armyAt[v] || !isLand(v)) continue;
-                    const val = value(v), cost = this.entry(r, v)?.cost ?? Infinity;
-                    if (val > bv || (val === bv && val > 0 && cost < bc)) { best = v; bv = val; bc = cost; }
-                }
-                if (best !== a.cell) a = this.moveArmy(a, best, r);
+                // Rompe el cerco hacia la línea o va a la ciudad, la montaña o la colina propia más cercana que alcance, y aguanta allí.
+                const a = this.breakOut(id, a0, op.cells, c => this.owner[c] !== id ? 0 : CITY_OF[c] >= 0 ? 3 : CELL_TERRAIN[c] === 'mountain' ? 2 : CELL_TERRAIN[c] === 'hills' ? 1 : 0);
+                if (!a) { tally.attacked++; continue; }
                 if (this.armies.has(a.id) && a.owner === id) stay(a, cut);
             }
         }
@@ -3387,6 +3406,7 @@ class GameEngine {
         for (const a of [...this.armies.values()]) if (a.owner === id) this.removeArmy(a);
         for (const op of this.opsOf(id)) this.endOp(op);
         for (const o of this.nations) if (o.id !== id) Object.assign(this.rel(id, o.id), { state: 'paz' });
+        this.warVersion++;
         for (const b of this.blocsOf(id)) this.leaveBloc(b, id);
         this.proposals = this.proposals.filter(p => p.from !== id && p.against !== id);
         this.version++;
@@ -3806,10 +3826,12 @@ class GameEngine {
             if (lord === this.player) this.proposals.push({ kind: 'llamada', from: b, against: a });
             else Object.assign(this.rel(lord, a), { state: 'guerra', since: this.turn });
         }
+        this.warVersion++;
         return true;
     }
     makePeace(a, b, quiet = false) {
         Object.assign(this.rel(a, b), { state: 'paz', since: this.turn, truceUntil: this.turn + CONFIG.TRUCE_TURNS });
+        this.warVersion++;
         if (!quiet) this.log(`PAZ entre ${this.nm(a)} y ${this.nm(b)} (tregua hasta el turno ${this.turn + CONFIG.TRUCE_TURNS}).`);
     }
     // Firma la paz entre el bando de `a` y el de `b` (cada uno con sus satélites) y reparte lo ocupado.
@@ -3856,6 +3878,7 @@ class GameEngine {
         // Hace la paz con quien no esté en guerra con su señor y entra en las guerras de su señor.
         for (const e of this.enemiesOf(sat)) if (!this.atWar(lord, e)) this.settlePeace(sat, e, { mode: 'annex' });
         for (const e of this.enemiesOf(lord)) if (!this.atWar(sat, e)) Object.assign(this.rel(sat, e), { state: 'guerra', since: this.turn });
+        this.warVersion++;
         this.proposals = this.proposals.filter(p => p.from !== sat);
         this.version++;
     }
@@ -4138,6 +4161,7 @@ class GameEngine {
         s.alive = false;
         s.overlord = -1;
         for (const o of this.nations) if (o.id !== sat) Object.assign(this.rel(sat, o.id), { state: 'paz' });
+        this.warVersion++;
         this.blocsChanged();
         this.armyVersion++;
         this.version++;
@@ -4185,6 +4209,7 @@ class GameEngine {
             if (accept && !this.atWar(p, pr.against)) {
                 for (const bl of this.sharedBlocs(p, pr.against)) this.leaveBloc(bl, p, ` para defender a ${this.nm(pr.from)}`);
                 Object.assign(this.rel(p, pr.against), { state: 'guerra', since: this.turn });
+                this.warVersion++;
                 this.log(`Acudes en defensa de ${this.nm(pr.from)}: guerra contra ${this.nm(pr.against)}.`);
             } else if (!accept) {
                 this.log(`${verb} la llamada de ${this.nm(pr.from)}.`);
@@ -4207,6 +4232,7 @@ class GameEngine {
         this.aiDiplomacy(id, powers);
         this.aiResearch(id);
         this.aiForts(id);   // antes de reclutar: en guerra el reclutamiento gasta todo el oro
+        this.aiPockets(id);   // antes de sus ataques: los que pasan hambre salen de la bolsa
         this.aiCommand(id, powers);
         this.aiRecruit(id);
         this.aiArmies(id);   // los ejércitos que no están en ninguna operación
@@ -4392,6 +4418,48 @@ class GameEngine {
         }
     }
 
+    // Cada ejército que pasa hambre y no tiene una orden en marcha (aguantar no cuenta) intenta salir de la bolsa hacia
+    // la casilla propia o aliada más cercana donde coma: atacando si tiene una previsión de al menos 1 o marchando si no.
+    aiPockets(id) {
+        for (const a of [...this.armies.values()]) {
+            if (this.over) return;
+            if (a.owner !== id || !this.armies.has(a.id) || this.armyOn(a.cell) !== a || this.mp(a) <= 0) continue;
+            if ((a.order && a.order.kind !== 'hold') || a.direct === this.turn || !this.starving(id, a.cell)) continue;
+            const home = this.nearestHome(id, a.cell);
+            this.breakOut(id, a, home < 0 ? [] : [home]);
+        }
+    }
+    // Tierra que `id` puede pisar: propia, aliada o de un país en guerra con él.
+    enterable(id, c) { const o = this.owner[c]; return o === id || this.allied(id, o) || this.atWar(id, o); }
+    // Casilla propia o aliada donde no pasaría hambre más cercana a `cell`, en pasos por tierra que pueda pisar, o −1.
+    nearestHome(id, cell) {
+        const seen = new Set([cell]), queue = [cell];
+        for (let i = 0; i < queue.length; i++) {
+            for (let d = 0; d < 6; d++) {
+                const j = G.nb[queue[i] * 6 + d];
+                if (j < 0 || !isLand(j) || seen.has(j) || !this.enterable(id, j)) continue;
+                if ((this.owner[j] === id || this.allied(id, this.owner[j])) && !this.starving(id, j)) return j;
+                seen.add(j); queue.push(j);
+            }
+        }
+        return -1;
+    }
+    // Pasos hasta `sources` por tierra que `id` puede pisar (1e9 si no se llega).
+    landSteps(id, sources) {
+        const dist = new Int32Array(G.N).fill(1e9), queue = [];
+        for (const c of sources) { dist[c] = 0; queue.push(c); }
+        for (let i = 0; i < queue.length; i++) {
+            const u = queue[i];
+            for (let d = 0; d < 6; d++) {
+                const v = G.nb[u * 6 + d];
+                if (v < 0 || !isLand(v) || dist[v] <= dist[u] + 1 || !this.enterable(id, v)) continue;
+                dist[v] = dist[u] + 1;
+                queue.push(v);
+            }
+        }
+        return dist;
+    }
+
     // La IA manda con el mismo sistema que el jugador: en cada frente, una ofensiva sobre la ciudad enemiga más cercana
     // si es lo bastante fuerte y una línea en la frontera si no lo es; les asigna los ejércitos cercanos y oro para
     // refuerzos, y las cumple solas. Al firmar la paz con un frente, sus operaciones terminan.
@@ -4481,6 +4549,7 @@ class GameEngine {
 const $ = sel => document.querySelector(sel);
 const INK = '#151a12';
 const SIGNAL = '#f0c419';
+const HUNGER = '#b98cf0';   // borde de la ficha sin víveres: violeta, distinto del rojo de rodeado y del naranja de sin suministro
 
 // Partidas guardadas (localStorage del navegador; también exportables a archivo). Cada mapa tiene sus ranuras.
 const saveKey = map => (map === 'europa' ? 'eurowar.saves.v1' : `nanwar.saves.${map}`);
@@ -5175,7 +5244,7 @@ class MapView {
             const view = g.armyView(g.player, a);
             tokens.push({ id: a.id, owner: a.owner, type: view.type, n: view.n, echelon: view.echelon, level: view.level, wx, wy, mine,
                 spent: mine && g.mp(a) === 0, noSupply: mine && !g.inSupply(a.owner, a.cell),
-                flanked: g.hostileSides(a.owner, a.cell) >= CONFIG.FLANKED_SIDES, selected: a.cell === this.selectedCell && !pose?.moving,
+                flanked: g.hostileSides(a.owner, a.cell) >= CONFIG.FLANKED_SIDES, starving: g.starving(a.owner, a.cell), selected: a.cell === this.selectedCell && !pose?.moving,
                 moving: !!pose?.moving, facing: this.motion.facingOf(a.id, pose), alpha: 1 });
         }
         if (g.player !== null) for (const gh of this.motion.ghosts(now)) {
@@ -5436,8 +5505,8 @@ class MapView {
         else if (t.type === 'tank') { ctx.ellipse(x, y0 + hh / 2, w * 0.28, hh * 0.24, 0, 0, Math.PI * 2); ctx.stroke(); }
         else if (t.type === 'artillery') { ctx.arc(x, y0 + hh / 2, hh * 0.17, 0, Math.PI * 2); ctx.fillStyle = INK; ctx.fill(); }
         // sin tipo conocido: el marco queda vacío, como en un mapa militar
-        ctx.lineWidth = t.selected ? 3 : t.flanked || t.noSupply ? 2.6 : 1.6;
-        ctx.strokeStyle = t.selected ? '#fff' : t.flanked ? '#e05a47' : t.noSupply ? '#ff9f1c' : INK;
+        ctx.lineWidth = t.selected ? 3 : t.starving || t.flanked || t.noSupply ? 2.6 : 1.6;
+        ctx.strokeStyle = t.selected ? '#fff' : t.starving ? HUNGER : t.flanked ? '#e05a47' : t.noSupply ? '#ff9f1c' : INK;
         ctx.strokeRect(x0, y0, w, hh);
         if (t.level > 0 && hexPx >= 8) {   // galones bajo la ficha: nivel de su rama de tropa
             const cw = Math.max(5, w * 0.2), ch = Math.max(2.5, hh * 0.14), gap = ch + 1.8;
@@ -5574,6 +5643,7 @@ class GameUI {
             <li>Terreno (coste de mover, defensa): <span data-legend="terrain"></span></li>
             <li><i class="line" style="border-top:3px solid #4a86a0"></i>Río: <span data-legend="river"></span>; quien defiende tras él, ×${String(CONFIG.RIVER_DEFENSE).replace('.', ',')}</li>
             <li>Ficha con borde rojo: ejército rodeado por 3 o más lados (más débil y más lento)</li>
+            <li>Ficha con borde violeta: ejército sin víveres, cercado en tierra ocupada (pierde una unidad cada <span data-legend="hunger">${CONFIG.HUNGER_TURNS}</span> turnos)</li>
             <li>Anillo rojo: ciudad asediada (hay que mantener tropas <span data-legend="siege">${CONFIG.SIEGE_TURNS}</span> turnos para tomarla)</li>
             <li>Con niebla de guerra, en sombra: lo que no ves. Ojo junto a una ciudad: tu espía</li>
             <li>${Object.entries(E.resourceTypes).map(([k, name]) => `${CONFIG.RESOURCE_ICON[k]} ${name}`).join(' &nbsp;')}</li>
@@ -5680,6 +5750,19 @@ class GameUI {
         return `${t.name.toLowerCase()}${t.def > 1 ? `, defensa ×${num(t.def)}` : ''}, mover cuesta ${num(r.terrainCost[CELL_TERRAIN[cell]])}${river ? ` · junto a un río (${crossing}; defiende ×${num(CONFIG.RIVER_DEFENSE)})` : ''}`;
     }
 
+    // El desgaste de un ejército, una línea por cada parte: aislado, sin carretera al alcance y sin víveres (rodeado va
+    // aparte). Con `explain`, cada línea dice además por qué y qué hacer.
+    wearLines(a, explain = false) {
+        const g = this.game, out = [];
+        for (const [k, x] of g.armyState(a.owner, a.cell, a.units, a.id).parts) {
+            if (k === 'aislado') out.push(`Aislado ×${decimal(x)}${explain ? ': ningún ejército propio o aliado al lado y fuera de una ciudad; ataque y defensa bajan. Acércale otro ejército.' : ''}`);
+            else if (k === 'sin carretera') out.push(`Sin carretera al alcance ×${decimal(x)}${explain ? ': en territorio enemigo y sin ninguna carretera a un turno de marcha.' : ''}`);
+        }
+        const left = g.hungerLeft(a);
+        if (left !== null) out.push(`Sin víveres: pierde 1 unidad dentro de ${plural(left, 'turno', 'turnos')}${explain ? '. Rompe el cerco o abre un paso hasta tu territorio.' : ''}`);
+        return out;
+    }
+
     cellFromEvent(e) {
         const r = this.view.canvas.getBoundingClientRect();
         return this.view.cellAtScreen(e.clientX - r.left, e.clientY - r.top);
@@ -5731,6 +5814,7 @@ class GameUI {
             lines.push(view.n === null ? `Ejército de ${g.nm(a.owner)}: ${ech.name} sin identificar (${ech.range} unidades)` : `Ejército de ${g.nm(a.owner)}: ${this.unitsLong(a.units)}`);
             const sides = g.hostileSides(a.owner, cell);
             if (sides >= CONFIG.FLANKED_SIDES) lines.push(`<span class="warn-text">${sides >= CONFIG.SURROUNDED_SIDES ? 'Cercado' : 'Rodeado'} por ${sides} lados: ataque y defensa ×${g.flankFactor(a.owner, cell)}</span>`);
+            if (a.owner === g.player || view.n !== null) for (const w of this.wearLines(a)) lines.push(`<span class="warn-text">${w}</span>`);
         }
         if (g.spies.has(G.prov[cell])) lines.push('Tienes un espía en esta provincia');
         if (g.player !== null && o === g.player && !g.inSupply(g.player, cell)) lines.push('<span style="color:#ffb347">Sin suministro</span>');
@@ -6625,6 +6709,7 @@ class GameUI {
                 ${(() => { const sides = g.hostileSides(p0, a.cell); if (sides < CONFIG.FLANKED_SIDES) return '';
                     const cercado = sides >= CONFIG.SURROUNDED_SIDES;
                     return `<p class="note warn">${cercado ? 'Cercado' : 'Rodeado'} por ${sides} lados: ataque y defensa ×${g.flankFactor(p0, a.cell)} y ${cercado ? 'solo puede avanzar una casilla' : 'mueve la mitad'}. Mejor retirarse o romper el cerco.</p>`; })()}
+                ${this.wearLines(a, true).map(w => `<p class="note warn">${w}</p>`).join('')}
                 ${supplied ? '' : `<p class="note warn">Sin suministro: lejos de tus ciudades y de tu red de carreteras solo avanza una casilla por turno. Construye carreteras hasta el frente para abastecerlo (llegan a ${g.rules(p0).supplyRoad} casillas de la red).</p>`}
                 ${left > 0 ? `<p class="note">Haz clic en una casilla ${this.view.isRealistic() ? 'de la zona clara' : 'verde'} para mover o en una roja para atacar. Por carretera llegas más lejos; si no se ha movido este turno, siempre puede avanzar al menos una casilla.</p>` : ''}
             </section>`);
@@ -6831,6 +6916,7 @@ class GameUI {
         set('highway', moveFraction(r.roadMove[2]));
         set('river', r.riverCrossing ? `cruzarlo sin carretera cuesta ${moveFraction(r.riverCrossing)} punto más` : 'tus pontoneros lo cruzan sin coste extra');
         set('siege', r.siegeTurns);
+        set('hunger', r.hungerTurns);
     }
     // Lo que sabes de la investigación de otro país: cuántas ha terminado y, si un espía informa, cuáles y qué investiga.
     researchText(id) {
