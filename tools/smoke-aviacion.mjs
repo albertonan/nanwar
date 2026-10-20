@@ -502,6 +502,187 @@ const CHECKS = [
     T.ok(!g.playerBuildAA(g.nations[T.nation('fr')].capitalCell), 'en tierra ajena, no');
     T.eq(g.nations[es].gold, 40, 'una vez');
     return true;
+}],
+['4 · atacar un ejército: le quita un 15 %, primero tanques, y lo desorganiza ×0,8 dos turnos suyos', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const sq = T.squad(g, es, base, 2);
+    if (g.armyOn(target)) g.removeArmy(g.armyOn(target));
+    const a = T.army(g, fr, target, 10, 10);
+    T.luck(g, 0.99);
+    T.eq(g.airMission(es, sq.map(s => s.id), 'army', target).result, 'hit', 'acierto');
+    T.eq([a.units.tank, a.units.infantry], [7, 10], 'tres tanques');
+    const dis = () => g.armyState(fr, target, a.units, a.id).parts.some(([k, x]) => k === 'desorganizado' && x === 0.8);
+    T.ok(dis(), 'desorganizado'); g.turn++; T.ok(dis(), 'el segundo turno'); g.turn++; T.ok(!dis(), 'se le pasa');
+    return true;
+}],
+['4 · cortar carreteras rompe los tramos de la casilla y lo dice el parte', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const sq = T.squad(g, es, base, 1);
+    let n = 0;
+    for (let d = 0; d < 3; d++) { const j = G.nb[target * 6 + d]; if (j >= 0 && isLand(j)) { g.road[target * 6 + d] = 1; g.road[j * 6 + (d + 3) % 6] = 1; n++; } }
+    g.roadVersion++; T.luck(g, 0.99);
+    T.eq(g.airMission(es, [sq[0].id], 'roads', target).result, 'hit', 'acierto');
+    T.eq([0, 1, 2, 3, 4, 5].filter(d => g.broken[target * 6 + d]).length, n, 'rotos');
+    T.ok(g.logs.some(l => l.msg.includes(`Bombardeada la carretera de ${g.placeName(target)}: ${plural(n, 'tramo roto', 'tramos rotos')}`)), 'parte');
+    return true;
+}],
+['4 · bajar fortificación: un nivel por acierto y, por debajo de 1, desaparece', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const [s] = T.squad(g, es, base, 1);
+    g.fort[target] = 2; T.luck(g, 0.99);
+    g.airMission(es, [s.id], 'fort', target); T.eq(g.fort[target], 1, 'baja a sacos terreros');
+    g.turn++; g.airMission(es, [s.id], 'fort', target); T.eq(g.fort[target], 0, 'desaparece');
+    return true;
+}],
+['4 · un acierto por blanco y turno: cuatro escuadrones bajan un solo nivel y la segunda misión no despega', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr), base2 = PROVINCES.find(p => g.owner[p.city] === es && p.city !== base && hexDist(p.city, target) <= 25).city;
+    T.airfield(g, es, base); T.airfield(g, es, base2);
+    const four = T.squad(g, es, base, 4), two = T.squad(g, es, base2, 2);
+    g.fort[target] = 4; T.luck(g, 0.99);
+    T.eq(g.airMission(es, four.map(s => s.id), 'fort', target).result, 'hit', 'acierto');
+    T.eq(g.fort[target], 3, 'un solo nivel');
+    T.eq(g.missionCheck(es, two, 'fort', target), 'Ese blanco ya ha recibido un acierto este turno.', 'motivo');
+    T.eq([g.airMission(es, two.map(s => s.id), 'fort', target).result, g.fort[target], two.every(s => g.canFly(s))], ['blocked', 3, true], 'no despega');
+    return true;
+}],
+['4 · destruir antiaéreo: solo el que conoces; el primer acierto lo daña y el segundo lo destruye', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const sq = T.squad(g, es, base, 2); T.site(g, fr, target);
+    T.eq(g.missionCheck(es, sq, 'aa', target), 'No conoces ningún antiaéreo en esa casilla.', 'desconocido');
+    g.aaSites.get(target).known.add(es); g.airVersion++; T.luck(g, 0.99);
+    g.airMission(es, sq.map(s => s.id), 'aa', target); T.eq(g.aaSites.get(target).hits, 1, 'dañado');
+    g.turn++; g.airMission(es, sq.map(s => s.id), 'aa', target); T.ok(!g.aaSites.has(target), 'destruido');
+    return true;
+}],
+['4 · atacar un aeródromo lo deja inservible dos turnos de su dueño, y sus escuadrones lo defienden', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); T.airfield(g, fr, target);
+    const [s] = T.squad(g, es, base, 1); T.luck(g, 0.99);
+    T.eq(g.airMission(es, [s.id], 'airfield', target).result, 'hit', 'acierto');
+    T.eq(g.airfieldUp(target), false, 'inservible'); g.turn++; T.eq(g.airfieldUp(target), false, 'segundo turno'); g.turn++; T.ok(g.airfieldUp(target), 'vuelve');
+    T.squad(g, fr, target, 4);
+    T.eq(g.airMission(es, [s.id], 'airfield', target).result, 'intercepted', 'lo defienden');
+    return true;
+}],
+// Del plan, con la casilla española de la frontera (la del plan era la francesa): se protege una casilla propia.
+['4 · proteger casilla: la misión enemiga pasa antes por la patrulla y, si gana, no llega; acaba al volver su dueño', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [c] = T.border(g, es, fr);
+    T.airfield(g, es, T.baseFor(g, es, c)); T.airfield(g, fr, T.baseFor(g, fr, c));
+    const [mine] = T.squad(g, es, T.baseFor(g, es, c)), [theirs] = T.squad(g, fr, T.baseFor(g, fr, c));
+    const army = T.army(g, es, c, 5); T.luck(g, 0.99);
+    T.eq([g.airMission(es, [mine.id], 'patrol', c).result, mine.patrol], ['hit', c], 'protege');
+    T.eq([g.airMission(fr, [theirs.id], 'army', c).result, countUnits(army.units)], ['intercepted', 5], 'no llega');
+    g.beginNationTurn(es); T.eq(mine.patrol, -1, 'acaba en su turno');
+    return true;
+}],
+['4 · a ciegas rinde la mitad; con un espía, entero', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [, c] = T.border(g, es, fr), base = T.baseFor(g, es, c);
+    T.airfield(g, es, base); const sq = T.squad(g, es, base, 1); T.army(g, fr, c, 5);
+    T.eq([g.missionOdds(es, sq, 'army', c).known, g.missionOdds(es, sq, 'army', c).hit], [false, 0.5], 'a ciegas');
+    g.spies.set(G.prov[c], { since: g.turn, revealedTurn: g.turn }); g.spyVersion++;
+    T.eq(g.missionOdds(es, sq, 'army', c).hit, 1, 'con espía');
+    return true;
+}],
+['4 · el antiaéreo derriba o daña; el dañado no vuela el turno siguiente y el sitio que dispara queda conocido', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const [s, t] = T.squad(g, es, base, 2); T.site(g, fr, target); g.fort[target] = 2;
+    T.luck(g, 0.2);
+    T.eq([g.airMission(es, [s.id], 'fort', target).result, g.fort[target], g.aaSites.get(target).known.has(es)], ['miss', 2, true], 'falla y lo conoce');
+    T.eq([g.squadrons.has(s.id), g.canFly(s)], [true, false], 'dañado'); g.turn++; T.ok(!g.canFly(s), 'tampoco el siguiente'); g.turn++; T.ok(g.canFly(s), 'vuelve');
+    T.luck(g, 0.05); g.airMission(es, [t.id], 'fort', target); T.ok(!g.squadrons.has(t.id), 'derribado');
+    return true;
+}],
+['4 · la misión desvela la casilla ese turno: tipo y número', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [, c] = T.border(g, es, fr), base = T.baseFor(g, es, c);
+    T.airfield(g, es, base); const sq = T.squad(g, es, base, 1); const a = T.army(g, fr, c, 5);
+    T.eq(g.armyView(es, a).n, null, 'sin identificar');
+    T.luck(g, 0.99); g.airMission(es, [sq[0].id], 'army', c);
+    T.eq(g.armyView(es, a).n, countUnits(a.units), 'desvelado'); g.turn++; T.eq(g.armyView(es, a).n, null, 'solo ese turno');
+    return true;
+}],
+['4 · contra un ejército embarcado: el doble de bajas y sin el antiaéreo fijo de la costa', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [c, s] = T.coast(g, fr, { near: g.nations[es].capitalCell }), base = T.baseFor(g, es, s);
+    T.airfield(g, es, base); const sq = T.squad(g, es, base, 2);
+    const boat = T.embark(g, fr, s, 20); T.site(g, fr, c);
+    T.eq(g.aaCover(es, [base], s).fire, 0, 'el antiaéreo de la costa no protege al barco');
+    T.luck(g, 0.99); g.airMission(es, sq.map(x => x.id), 'army', s);
+    T.eq(boat.units.infantry, 14, 'seis bajas: el doble');
+    return true;
+}],
+['4 · un escuadrón que protege una casilla de mar escolta al barco', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [, s] = T.coast(g, es, { near: g.nations[fr].capitalCell });
+    T.airfield(g, es, T.baseFor(g, es, s)); T.airfield(g, fr, T.baseFor(g, fr, s, 25));
+    const [mine] = T.squad(g, es, T.baseFor(g, es, s)), [theirs] = T.squad(g, fr, T.baseFor(g, fr, s, 25));
+    const boat = T.embark(g, es, s, 6); T.luck(g, 0.99);
+    g.airMission(es, [mine.id], 'patrol', s);
+    T.eq([g.airMission(fr, [theirs.id], 'army', s).result, countUnits(boat.units)], ['intercepted', 6], 'escoltado');
+    return true;
+}],
+// Del plan, con un segundo escuadrón que no ha volado: el primero ya no puede, y el motivo sería otro.
+['4 · guardar a media partida conserva desorganizado, el acierto del turno y lo desvelado', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [, c] = T.border(g, es, fr), base = T.baseFor(g, es, c);
+    T.airfield(g, es, base); const sq = T.squad(g, es, base, 2); const a = T.army(g, fr, c, 5);
+    T.luck(g, 0.99); g.airMission(es, [sq[0].id], 'army', c);
+    const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+    T.eq([h.armies.get(a.id).disorgUntil, h.missionCheck(es, [h.squadrons.get(sq[1].id)], 'army', c), h.armyView(es, h.armies.get(a.id)).n],
+        [a.disorgUntil, 'Ese blanco ya ha recibido un acierto este turno.', countUnits(a.units)], 'igual');
+    return true;
+}],
+// Además del plan: reglas de la Task 4 que el plan no prueba por sí mismo.
+['4 · desorganizado pasa al dividir el ejército y, al juntarse, se queda el que más dura; también en el mar', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(es, fr);
+    const [a0, c] = T.plainPair(g, es), a = T.army(g, es, c, 6);
+    a.disorgUntil = g.turn + 1;
+    T.eq(g.split(a, { infantry: 2, tank: 0, artillery: 0 }).disorgUntil, g.turn + 1, 'al dividir');
+    const d = T.army(g, es, a0, 1); d.disorgUntil = g.turn + 3; g.removeArmy(d); d.cell = c;
+    T.eq(g.settle(d).disorgUntil, g.turn + 3, 'al juntarse, el mayor');
+    const [, sea] = T.coast(g, fr), boat = T.embark(g, fr, sea, 3); boat.disorgUntil = g.turn;
+    T.ok(g.combatFactors(es, { infantry: 1, tank: 0, artillery: 0 }, c, boat, sea).defState.parts.some(([k]) => k === 'desorganizado'), 'en el mar');
+    return true;
+}],
+['4 · motivos: listo, alcance, guerra, blanco y casilla que proteger', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr), far = PROVINCES.find(p => g.owner[p.city] === fr && hexDist(base, p.city) > 25).city;
+    T.airfield(g, es, base); const [s] = T.squad(g, es, base, 1);
+    if (g.armyOn(target)) g.removeArmy(g.armyOn(target));
+    const why = (kind, cell, sq = s) => g.missionCheck(es, [sq], kind, cell);
+    T.eq([why('fort', far), why('army', target), why('roads', target), why('fort', target), why('airfield', target), why('patrol', target), why('patrol', base)],
+        ['Fuera de alcance.', 'No ves ningún ejército enemigo ahí.', 'No hay carreteras intactas en esa casilla.', 'No hay fortificación.',
+            'No hay aeródromo enemigo que funcione.', 'Solo se protege una casilla tuya, de un aliado o de mar.', ''], 'motivos');
+    const [, pc] = T.border(g, es, pt), pb = T.baseFor(g, es, pc);
+    T.airfield(g, es, pb); const [q] = T.squad(g, es, pb, 1);
+    T.eq(why('fort', pc, q), 'Solo contra un país con el que estás en guerra.', 'en paz');
+    s.ready = g.turn + 1; T.eq(why('patrol', base), 'Ningún escuadrón listo.', 'dañado');
+    T.eq([g.airMission(es, [s.id], 'patrol', base).result, s.flown], ['invalid', 0], 'no despega');
+    return true;
 }]
 ];
 
