@@ -90,6 +90,11 @@ const setup = () => {
             }
             throw new Error('no hay sitio para el frente');
         },
+        // Rodea `cell` de territorio de `foe` (dueño y legal) y la deja ocupada por `owner`.
+        pocket(g, owner, foe, cell) {
+            for (let d = 0; d < 6; d++) { const j = G.nb[cell * 6 + d]; if (j >= 0 && isLand(j)) { g.owner[j] = foe; g.legal[j] = foe; } }
+            g.owner[cell] = owner; g.legal[cell] = foe; g.version++;
+        },
         // Empieza una partida en la interfaz con el país dado y devuelve su motor.
         uiStart(key, fog = false) {
             for (const d of document.querySelectorAll('dialog[open]')) d.close();
