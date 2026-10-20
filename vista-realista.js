@@ -620,7 +620,7 @@ class RealisticMap {
         x.strokeStyle = '#f3d27a'; x.lineWidth = Math.max(0.32, 1.6 / b); x.stroke(this.roads[2]);
         x.lineCap = 'butt'; x.setLineDash([2.2 / b, 2.2 / b]); x.lineWidth = Math.max(0.3, 1.5 / b);
         x.strokeStyle = 'rgba(70,55,35,0.75)'; x.stroke(this.cuts.line);
-        x.strokeStyle = '#f0e8cf'; x.stroke(this.cuts.work);
+        x.strokeStyle = '#e3d9c0'; x.stroke(this.cuts.work);
         x.setLineDash([]); x.strokeStyle = 'rgba(60,25,15,0.9)'; x.lineWidth = Math.max(0.45, 2 / b); x.stroke(this.cuts.mark);
         x.lineCap = 'round';
 

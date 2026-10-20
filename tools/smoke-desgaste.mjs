@@ -263,8 +263,10 @@ const CHECKS = [
     g.nations[es].gold = 1e4;
     ui.setTool('road'); ui.clickCell(a);
     const btn = document.querySelector('[data-action="repair-roads"]');
-    T.ok(btn && /Reparar/.test(btn.textContent), 'botón de reparar con su precio');
+    T.ok(btn && /Reparar \d+ tramos? \(\d+ de oro, \d+ turnos?\)/.test(btn.textContent), 'botón de reparar con su precio: ' + btn?.textContent);
+    const v0 = g.roadVersion;
     btn.click();
+    T.ok(g.roadVersion !== v0, 'la versión de carreteras cambia para repintar la obra');
     T.ok(g.roadWork.has(edgeKey(a, d)), 'obra empezada');
     return true;
 }],

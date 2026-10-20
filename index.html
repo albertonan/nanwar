@@ -1660,6 +1660,7 @@ class GameEngine {
             started++;
         }
         if (!started) return 0;
+        this.roadVersion++;
         n.gold -= plan.cost;
         return started;
     }
