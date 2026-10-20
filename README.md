@@ -37,15 +37,17 @@ Tres reglas más castigan al ejército que se interna sin apoyo, y se multiplica
 
 Todo aparece en la ficha del ejército, en la tarjeta al pasar el ratón y en el parte de batalla.
 
+**Mar.** Un ejército embarca desde una costa propia o de un aliado: entra en una casilla de mar y ese turno ya no se mueve. Un cruce corto, de una sola casilla de mar entre dos orillas, se hace en un turno si le queda movimiento para desembarcar enfrente. Embarcado navega 6 casillas por turno (8 con Transporte naval 1 y 10 con Transporte naval 3) y no le afectan el suministro ni estar rodeado. En cada casilla de mar cabe un ejército (dos propios se unen) y una casilla con un ejército ajeno corta el paso. Desembarcar o atacar desde el mar gasta el resto del turno. El asalto anfibio ataca ×0,5 (×0,65 con Transporte naval 2), contra la costa y contra otro barco. En el mar se defiende ×0,25, sin terreno, ciudad, río ni fortificación, y sin rodeado, aislado ni sin carretera. Quien gana a un barco se queda donde está; el barco que pierde se retira a una costa propia o aliada libre de al lado y, si no la hay, se hunde con todas sus tropas. Un ejército en el mar no hace zona de control, no sirve de apoyo contra «aislado» y no pasa hambre. Con niebla, un barco se ve como en tierra, y el espía de la provincia de la costa más cercana también lo ve. En la vista sencilla, el embarcado lleva el marco redondo de superficie marítima de la OTAN (APP-6) con el símbolo de su tropa; en la realista, va en un barco de transporte. Se le elige y se le mueve con un clic, como en tierra, y Mayúsculas + clic en el mar le da una orden de marcha hasta allí. Las órdenes, las operaciones y la IA prefieren la tierra y cruzan el mar cuando por tierra no hay camino o es mucho más largo.
+
 Las partidas se guardan en el propio dispositivo (autoguardado al final de cada turno y tres ranuras por mapa). Para pasar una partida a otro dispositivo, usa «Partida → Exportar a archivo» e «Importar archivo». Cargar o importar una partida del otro mapa cambia a ese mapa.
 
 ## Investigación
 
-Cada país puede investigar mejoras permanentes (botón de la cabecera o tecla I). Hay 36 investigaciones en 12 ramas de tres niveles, agrupadas en cuatro áreas:
+Cada país puede investigar mejoras permanentes (botón de la cabecera o tecla I). Hay 39 investigaciones en 13 ramas de tres niveles, agrupadas en cuatro áreas:
 
 - **Militar:** Infantería, Blindados y Artillería (ataque, defensa y velocidad de cada tipo) y Doctrina (menos castigo al estar rodeado, asedios más cortos, menos bajas al ganar).
 - **Estado:** Movilización (más reclutas por turno), Ciencia (investigar más rápido, más barato y dos cosas a la vez) e Industria (yacimientos que rinden más y abaratan más las tropas).
-- **Terreno:** Infraestructura (carreteras más baratas y más rápidas, suministro más lejos), Movilidad (montaña, colinas, bosque, pantano, ríos y lagos) y Fortificación (más defensa, obras más cortas, búnkeres y casamatas).
+- **Terreno:** Infraestructura (carreteras más baratas y más rápidas, suministro más lejos), Movilidad (montaña, colinas, bosque, pantano, ríos y lagos), Fortificación (más defensa, obras más cortas, búnkeres y casamatas) y Transporte naval (barcos más rápidos y asalto anfibio más fuerte).
 - **Inteligencia:** Reconocimiento (más visión, tipo y número de los ejércitos enemigos, sus niveles) y Espionaje (espías más baratos, que duran más y que informan de más).
 
 Cada investigación se paga al empezar (entre 4 y 12 turnos de renta según el nivel, un 10 % más por cada una ya terminada) y tarda 6, 10 o 15 turnos. Se investiga una cosa a la vez (dos con Ciencia 3); si se cambia, la anterior queda en pausa con su progreso. La IA también investiga, según esté en guerra o en paz, sus tropas y su terreno.
@@ -85,6 +87,7 @@ La IA manda con el mismo sistema: en cada frente, una ofensiva si es lo bastante
 | `tools/smoke-research.mjs` | Pruebas del motor y de la interfaz en el navegador (Playwright): investigación, sus efectos en las reglas, la IA, la inteligencia y las insignias. |
 | `tools/smoke-mando.mjs` | Pruebas del mando estratégico en el navegador (Playwright): órdenes de varios turnos, operaciones, plantillas y refuerzos, directiva, teatros y la IA con operaciones. |
 | `tools/smoke-desgaste.mjs` | Pruebas del desgaste en el navegador (Playwright): carreteras rotas y su reparación, aislado, sin carretera, sin víveres, y la IA que rompe bolsas. |
+| `tools/smoke-agua.mjs` | Pruebas del mar en el navegador (Playwright): embarcar, navegar y desembarcar, asalto anfibio y hundimiento, Transporte naval, órdenes e IA por mar, la interfaz, y capturas de un barco en las dos vistas. |
 | `tools/smoke-vista.mjs` | Prueba en el navegador (Playwright): empieza una partida, comprueba la vista realista y las animaciones y guarda capturas. |
 | `tools/perf-mapa.mjs` | Mide cuánto cuesta dibujar el mapa al arrastrar y al hacer zoom, en las dos vistas y los dos mapas. |
 | `tools/smoke-mundo.mjs` | Prueba en el navegador (Playwright) del selector de mapas y del mapa del mundo: relieve, turnos de la IA, fotogramas y cargar una partida del otro mapa. |

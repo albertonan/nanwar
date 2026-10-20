@@ -702,9 +702,10 @@ class RealisticMap {
     }
 
     // Miniatura de un ejército: carro, pelotón o cañón sobre una peana del color del país. Si no se sabe qué es
-    // (niebla de guerra sin inteligencia), un camión con lona y el escalón de la OTAN en lugar del número.
+    // (niebla de guerra sin inteligencia), un camión con lona y el escalón de la OTAN en lugar del número. Embarcado
+    // (o.afloat), la peana es el casco de un barco de transporte que se mece con las olas.
     drawArmy(ctx, o) {
-        const { x, y, hexPx, color, type, n, mine, spent, flanked, noSupply, starving, selected, moving, facing, now } = o;
+        const { x, y, hexPx, color, type, n, mine, spent, selected, moving, facing, now } = o;
         const alpha = (o.alpha ?? 1) * (spent ? 0.6 : 1);
         ctx.save();
         ctx.globalAlpha = alpha;
@@ -715,24 +716,11 @@ class RealisticMap {
             return;
         }
         const U = Math.max(8, Math.min(24, hexPx * 0.82)), k = U / 16;
-        ctx.fillStyle = 'rgba(20,16,8,0.38)'; ctx.beginPath(); ctx.ellipse(x + U * 0.2, y + U * 0.45, U * 1.12, U * 0.42, 0, 0, TAU); ctx.fill();
-        if (selected) {
-            ctx.strokeStyle = SIGNAL; ctx.lineWidth = 2.5;
-            ctx.beginPath(); ctx.ellipse(x, y + U * 0.28, U * 1.28 + Math.sin(now / 220) * 1.2, U * 0.5, 0, 0, TAU); ctx.stroke();
-        }
-        ctx.fillStyle = shadeHex(color, -0.4); ctx.beginPath(); ctx.ellipse(x, y + U * 0.34, U, U * 0.38, 0, 0, TAU); ctx.fill();
-        if (o.level > 0) {   // borde de la peana: bronce, plata u oro según el nivel de su rama de tropa
-            ctx.strokeStyle = BASE_RIM[o.level]; ctx.lineWidth = Math.max(1.6, U * 0.13);
-            ctx.beginPath(); ctx.ellipse(x, y + U * 0.34, U, U * 0.38, 0, 0, Math.PI); ctx.stroke();
-        }
-        ctx.fillStyle = color; ctx.beginPath(); ctx.ellipse(x, y + U * 0.25, U, U * 0.36, 0, 0, TAU); ctx.fill();
-        if (starving || flanked || noSupply) {   // la misma señal que el borde de la ficha: sin víveres, rodeado, sin suministro
-            ctx.strokeStyle = starving ? HUNGER : flanked ? '#e05a47' : '#ff9f1c'; ctx.lineWidth = 2.4;
-            ctx.beginPath(); ctx.ellipse(x, y + U * 0.3, U, U * 0.37, 0, 0, TAU); ctx.stroke();
-        } else {
-            ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1;
-            ctx.beginPath(); ctx.ellipse(x, y + U * 0.25, U * 0.9, U * 0.29, 0, Math.PI * 1.1, Math.PI * 1.9); ctx.stroke();
-        }
+        if (o.afloat) {   // vaivén: el barco sube, baja y se escora un poco, con todo lo que lleva encima
+            const roll = Math.sin(now / 400);
+            ctx.translate(x, y + roll * U * 0.05); ctx.rotate(roll * 0.04 * facing); ctx.translate(-x, -y);
+            this.drawHull(ctx, o, U);
+        } else this.drawBase(ctx, o, U);
         // banderín
         const fx = x - facing * U * 0.8, wave = moving ? Math.sin(now / 120) * 1.4 : 0;
         ctx.strokeStyle = '#3a3222'; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(fx, y + U * 0.15); ctx.lineTo(fx, y - U * 1.45); ctx.stroke();
@@ -756,6 +744,75 @@ class RealisticMap {
         ctx.beginPath(); ctx.roundRect(x - w / 2, by - 7, w, 14, 7); ctx.fill(); ctx.stroke();
         ctx.fillStyle = INK; ctx.fillText(t, x, by + 0.5);
         ctx.restore();
+    }
+    // Peana de tierra: sombra, anillo de elegido, borde del nivel y la señal de estado.
+    drawBase(ctx, o, U) {
+        const { x, y, color, flanked, noSupply, starving, selected, now } = o;
+        ctx.fillStyle = 'rgba(20,16,8,0.38)'; ctx.beginPath(); ctx.ellipse(x + U * 0.2, y + U * 0.45, U * 1.12, U * 0.42, 0, 0, TAU); ctx.fill();
+        if (selected) {
+            ctx.strokeStyle = SIGNAL; ctx.lineWidth = 2.5;
+            ctx.beginPath(); ctx.ellipse(x, y + U * 0.28, U * 1.28 + Math.sin(now / 220) * 1.2, U * 0.5, 0, 0, TAU); ctx.stroke();
+        }
+        ctx.fillStyle = shadeHex(color, -0.4); ctx.beginPath(); ctx.ellipse(x, y + U * 0.34, U, U * 0.38, 0, 0, TAU); ctx.fill();
+        if (o.level > 0) {   // borde de la peana: bronce, plata u oro según el nivel de su rama de tropa
+            ctx.strokeStyle = BASE_RIM[o.level]; ctx.lineWidth = Math.max(1.6, U * 0.13);
+            ctx.beginPath(); ctx.ellipse(x, y + U * 0.34, U, U * 0.38, 0, 0, Math.PI); ctx.stroke();
+        }
+        ctx.fillStyle = color; ctx.beginPath(); ctx.ellipse(x, y + U * 0.25, U, U * 0.36, 0, 0, TAU); ctx.fill();
+        if (starving || flanked || noSupply) {   // la misma señal que el borde de la ficha: sin víveres, rodeado, sin suministro
+            ctx.strokeStyle = starving ? HUNGER : flanked ? '#e05a47' : '#ff9f1c'; ctx.lineWidth = 2.4;
+            ctx.beginPath(); ctx.ellipse(x, y + U * 0.3, U, U * 0.37, 0, 0, TAU); ctx.stroke();
+        } else {
+            ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.ellipse(x, y + U * 0.25, U * 0.9, U * 0.29, 0, Math.PI * 1.1, Math.PI * 1.9); ctx.stroke();
+        }
+    }
+    // Casco de un barco de transporte visto de costado, con la proa hacia donde mira el ejército: obra muerta del color
+    // del país, obra viva más oscura bajo la línea de flotación, ojos de buey, regala con el borde del nivel y espuma.
+    // Las tropas van en cubierta, a la altura de la peana.
+    drawHull(ctx, o, U) {
+        const { x, y, color, facing: f, flanked, noSupply, starving, selected, moving, now } = o;
+        const deck = y + U * 0.22, keel = y + U * 0.66, water = y + U * 0.52;
+        ctx.fillStyle = 'rgba(6,20,34,0.4)'; ctx.beginPath(); ctx.ellipse(x, water + U * 0.06, U * 1.45, U * 0.22, 0, 0, TAU); ctx.fill();
+        if (selected) {
+            ctx.strokeStyle = SIGNAL; ctx.lineWidth = 2.5;
+            ctx.beginPath(); ctx.ellipse(x, water, U * 1.6 + Math.sin(now / 220) * 1.2, U * 0.42, 0, 0, TAU); ctx.stroke();
+        }
+        const sheer = () => {   // la cubierta, de popa a proa, que sube en la proa lanzada
+            ctx.moveTo(x - f * U * 1.12, deck - U * 0.05);
+            ctx.lineTo(x + f * U * 0.95, deck);
+            ctx.quadraticCurveTo(x + f * U * 1.25, deck - U * 0.02, x + f * U * 1.36, deck - U * 0.18);
+        };
+        const hull = () => {
+            ctx.beginPath(); sheer();
+            ctx.quadraticCurveTo(x + f * U * 1.2, keel - U * 0.06, x + f * U * 0.8, keel);                 // roda hasta la quilla
+            ctx.lineTo(x - f * U * 0.95, keel);
+            ctx.quadraticCurveTo(x - f * U * 1.12, keel - U * 0.08, x - f * U * 1.12, deck - U * 0.05);    // espejo de popa
+            ctx.closePath();
+        };
+        hull(); ctx.fillStyle = color; ctx.fill();
+        ctx.save(); hull(); ctx.clip();
+        ctx.fillStyle = shadeHex(color, -0.45); ctx.fillRect(x - U * 1.5, water, U * 3, U);
+        ctx.fillStyle = 'rgba(255,255,255,0.18)'; ctx.fillRect(x - U * 1.5, deck, U * 3, U * 0.06);
+        ctx.restore();
+        ctx.fillStyle = 'rgba(20,24,30,0.55)';
+        for (let i = -2; i <= 2; i++) { ctx.beginPath(); ctx.arc(x + i * U * 0.36, deck + U * 0.15, Math.max(0.9, U * 0.05), 0, TAU); ctx.fill(); }
+        // regala: bronce, plata u oro según el nivel de su rama de tropa, como el borde de la peana
+        ctx.strokeStyle = o.level > 0 ? BASE_RIM[o.level] : 'rgba(255,255,255,0.4)'; ctx.lineWidth = o.level > 0 ? Math.max(1.6, U * 0.11) : 1;
+        ctx.beginPath(); sheer(); ctx.stroke();
+        // contorno: la misma señal de estado que la peana, o una línea oscura
+        hull();
+        if (starving || flanked || noSupply) { ctx.strokeStyle = starving ? HUNGER : flanked ? '#e05a47' : '#ff9f1c'; ctx.lineWidth = 2.4; }
+        else { ctx.strokeStyle = shadeHex(color, -0.6); ctx.lineWidth = 1; }
+        ctx.stroke();
+        // espuma en la línea de flotación, en la roda y en la popa: más larga si navega
+        const foam = moving ? 0.5 : 0.22 + Math.sin(now / 400) * 0.04;
+        ctx.strokeStyle = 'rgba(240,248,255,0.75)'; ctx.lineWidth = Math.max(1, U * 0.07); ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(x + f * U * 1.22, water - U * 0.04); ctx.quadraticCurveTo(x + f * U * 1.4, water + U * 0.06, x + f * U * (1.3 + foam), water + U * 0.12);
+        ctx.moveTo(x - f * U * 1.1, water); ctx.lineTo(x - f * U * (1.1 + foam * 1.6), water + U * 0.08);
+        ctx.stroke();
+        ctx.lineCap = 'butt';
     }
 }
 

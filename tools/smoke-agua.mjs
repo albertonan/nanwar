@@ -3,7 +3,7 @@
 // Uso: node basicmilitary-agua/tools/smoke-agua.mjs [filtro]   (CHROME=<ruta> para usar otro navegador)
 import { chromium } from 'playwright';
 import { createServer } from 'node:http';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -51,7 +51,22 @@ const setup = () => {
             throw new Error('no hay estrecho');
         },
         // Ejército de `n` infanterías de `owner` embarcado en la casilla de mar `sea`.
-        embark(g, owner, sea, n = 1) { return g.settle(g.newArmy(owner, sea, { infantry: n, tank: 0, artillery: 0 }, 0)); }
+        embark(g, owner, sea, n = 1) { return g.settle(g.newArmy(owner, sea, { infantry: n, tank: 0, artillery: 0 }, 0)); },
+        // Partida empezada desde la interfaz, como haría el jugador (la de smoke-desgaste).
+        uiStart(key, fog = false) {
+            for (const d of document.querySelectorAll('dialog[open]')) d.close();
+            ui.setGame(T.game(7, fog));
+            ui.choice = T.nation(key); ui.render();
+            document.querySelector('[data-action="start"]').click();
+            return ui.game;
+        },
+        // Texto de la tarjeta al pasar el ratón por `cell` ('' si no sale).
+        hover(cell) {
+            ui.cellFromEvent = () => cell; ui.view.hoverCell = -1;
+            try { ui.hover({ clientX: 0, clientY: 0 }); } finally { delete ui.cellFromEvent; }
+            const tip = document.querySelector('#tooltip');
+            return tip.hidden ? '' : tip.textContent;
+        }
     };
 };
 
@@ -424,6 +439,91 @@ const CHECKS = [
     const sailed = cells.findIndex(afloat), landed = cells.findIndex(j => isLand(j) && g.legal[j] === ma);
     T.ok(sailed >= 0 && landed > sailed, `casillas: ${cells.map(j => (afloat(j) ? 'mar' : PROVINCES[G.prov[j]].name)).join(', ')}`);
     return true;
+}],
+['6 · se elige un barco propio en el mar y se le mueve con un clic', () => {
+    const g = T.uiStart('es'), es = g.player;
+    const [c, s] = T.coast(g, es);
+    const a = T.embark(g, es, s, 3);
+    ui.clickCell(s);
+    T.eq(ui.selectedArmy()?.id, a.id, 'elegido');
+    ui.clickCell(c);
+    T.eq(g.armies.get(a.id)?.cell ?? g.armyOn(c)?.cell, c, 'desembarcado');
+    return true;
+}],
+['6 · la ficha del barco dice «Embarcado: defensa ×0,25»', () => {
+    const g = T.uiStart('es'), es = g.player;
+    const [, s] = T.coast(g, es);
+    T.embark(g, es, s, 3);
+    ui.select(s);
+    T.ok(/Embarcado: defensa ×0,25/.test(document.body.textContent), 'texto');
+    return true;
+}],
+['6 · una orden con Mayúsculas a una casilla de mar se acepta', () => {
+    const g = T.uiStart('es'), es = g.player;
+    const [c, s] = T.coast(g, es);
+    const a = T.army(g, es, c, 3);
+    ui.select(c); ui.clickCell(s, true);
+    T.ok(g.armies.get(a.id)?.order || g.armyOn(s), 'orden o embarque');
+    return true;
+}],
+['6 · la ficha avisa de que el barco se hunde si no tiene costa propia libre al lado', () => {
+    const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+    const [c, s] = T.coast(g, es);
+    T.embark(g, es, s, 3);
+    ui.select(s);
+    T.ok(!/se hunde/.test($('#card').textContent), 'con costa propia libre, no se hunde');
+    for (let d = 0; d < 6; d++) { const j = G.nb[s * 6 + d]; if (j >= 0 && isLand(j) && !g.armyAt[j]) T.army(g, g.owner[j] === es ? es : fr, j, 1); }
+    T.eq(g.retreatCell(g.armyOn(s), s), -1, 'sin costa libre');
+    ui.select(s);
+    T.ok(/Si pierde un combate, se hunde/.test($('#card').textContent), 'aviso de hundimiento');
+    return true;
+}],
+['6 · la tarjeta al pasar el ratón enseña el barco «En el mar», sin terreno, y nada bajo la niebla', () => {
+    const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr');
+    const [, s] = T.coast(g, es);
+    T.embark(g, es, s, 3);
+    const txt = T.hover(s);
+    T.ok(/En el mar/.test(txt) && /Ejército de España/.test(txt) && /Embarcado: defensa ×0,25/.test(txt), 'barco propio: ' + txt);
+    T.ok(!/mover cuesta/.test(txt), 'sin terreno: ' + txt);
+    const [, t] = T.coast(g, fr, { near: g.nations[fr].capitalCell });
+    T.embark(g, fr, t, 5);
+    T.ok(!g.sees(es, t), 'precondición: el barco francés no se ve');
+    const fog = T.hover(t);
+    T.ok(!/Ejército de/.test(fog), 'bajo la niebla no se enseña el barco: ' + fog);
+    return true;
+}],
+['6 · un barco enemigo a la vista sin inteligencia sale sin tipo ni número', () => {
+    const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr');
+    const [, s] = T.coast(g, es);
+    const b = T.embark(g, fr, s, 5);
+    T.ok(g.sees(es, s) && !g.intel(es, fr, s).exact, 'precondición: se ve sin identificar');
+    T.ok(/sin identificar/.test(T.hover(s)), 'escalón sin identificar');
+    ui.view.setMode('sencilla');
+    const seen = new Map(), orig = ui.view.drawCounter;
+    ui.view.drawCounter = function (t, ...rest) { seen.set(t.id, t); return orig.call(this, t, ...rest); };
+    try { ui.view.scale = 1; ui.view.centerOn(s, 14); ui.view.draw(); } finally { delete ui.view.drawCounter; }
+    const t = seen.get(b.id);
+    T.ok(t && t.afloat && t.type === null && t.n === null, 'ficha redonda y vacía: ' + JSON.stringify(t && { afloat: t.afloat, type: t.type, n: t.n }));
+    return true;
+}],
+['6 · la leyenda explica el mar con las cifras de tu investigación', () => {
+    const g = T.uiStart('es'), es = g.player;
+    const txt = () => $('#legend').textContent;
+    T.ok(/Mar: .*navega 6 casillas.*×0,25.*asalto anfibio ×0,5.*se hunde/.test(txt()), 'entrada Mar: ' + txt());
+    T.learn(g, es, 'naval1', 'naval2'); ui.render();
+    T.ok(/navega 8 casillas.*asalto anfibio ×0,65/.test(txt()), 'con Transporte naval');
+    return true;
+}],
+['6 · en la vista sencilla el barco tiene t.afloat y el ejército de tierra no', () => {
+    const g = T.uiStart('es'), es = g.player;
+    const [c, s] = T.coast(g, es);
+    const land = T.army(g, es, c, 2), ship = T.embark(g, es, s, 3);
+    ui.view.setMode('sencilla');
+    const seen = new Map(), orig = ui.view.drawCounter;
+    ui.view.drawCounter = function (t, ...rest) { seen.set(t.id, t.afloat); return orig.call(this, t, ...rest); };
+    try { ui.view.scale = 1; ui.view.centerOn(s, 14); ui.view.draw(); } finally { delete ui.view.drawCounter; }
+    T.eq([seen.get(ship.id), seen.get(land.id)], [true, false], 'afloat');
+    return true;
 }]
 ];
 
@@ -451,6 +551,44 @@ try {
         const result = await page.evaluate(`Promise.resolve().then(${fn.toString()}).catch(e => String(e && e.stack || e))`);
         if (result === true) console.log(`ok    ${name}`);
         else { failed++; console.log(`FALLA ${name}\n      ${String(result).split('\n').slice(0, 3).join('\n      ')}`); }
+    }
+    // Capturas de un barco en las dos vistas (tools/cache/smoke/agua-*.png): un círculo en la sencilla y un casco en la
+    // realista, junto a un ejército en tierra para comparar.
+    const SHOTS = '6 · capturas de un barco en las dos vistas';
+    if (!filter || SHOTS.includes(filter)) {
+        ran++;
+        const out = join(root, 'tools/cache/smoke');
+        mkdirSync(out, { recursive: true });
+        const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+        page.errors = [];
+        page.on('pageerror', e => page.errors.push(e.message));
+        await page.goto(`http://localhost:${port}/?seed=7&mapa=europa`);
+        await page.waitForFunction(() => typeof GameEngine === 'function' && typeof ui === 'object');
+        await page.evaluate(setup);
+        const s = await page.evaluate(() => {
+            const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+            const [c, s] = T.coast(g, es);
+            T.army(g, es, c, 4, 2);
+            T.embark(g, es, s, 6);
+            const other = [0, 1, 2, 3, 4, 5].map(d => G.nb[s * 6 + d]).find(j => j >= 0 && T.seaFree(g, j));
+            if (other !== undefined) g.settle(g.newArmy(es, other, { infantry: 0, tank: 3, artillery: 0 }, 0));
+            const far = [...g.nearCells(s, 3).keys()].find(j => T.seaFree(g, j) && G.dirTo(j, s) < 0 && G.dirTo(j, other) < 0);
+            if (far !== undefined) T.embark(g, fr, far, 4);
+            ui.select(-1);
+            return s;
+        });
+        await page.waitForFunction(() => ui.view.realistic.state === 'ready' || ui.view.realistic.state === 'failed', null, { timeout: 60000 });
+        const shot = async (name, mode) => {
+            await page.evaluate(([m, c]) => new Promise(r => { ui.view.setMode(m); ui.view.scale = 1; ui.view.centerOn(c, 30); ui.view.draw(); requestAnimationFrame(() => requestAnimationFrame(r)); }), [mode, s]);
+            await page.waitForTimeout(400);
+            await page.screenshot({ path: join(out, `${name}.png`) });
+        };
+        await shot('agua-sencilla', 'sencilla');
+        await shot('agua-realista', 'realista');
+        const state = await page.evaluate(() => ui.view.realistic.state);
+        if (state !== 'ready' || page.errors.length) { failed++; console.log(`FALLA ${SHOTS}\n      vista realista: ${state}; ${page.errors.join('; ')}`); }
+        else console.log(`ok    ${SHOTS} (${join(out, 'agua-sencilla.png')}, agua-realista.png)`);
+        await page.close();
     }
     for (const page of pages.values()) if (page.errors.length) { failed++; console.log(`FALLA errores en la página:\n      ${page.errors.join('\n      ')}`); }
 } finally {
