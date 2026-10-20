@@ -939,6 +939,187 @@ const CHECKS = [
     T.ok(other === 'auto' || other === '0px', `otra ficha: ${other}`);
     T.ok(parseFloat(air) > 0, `ficha de Aviación: ${air}`);
     return true;
+}],
+['7 · una ofensiva con escuadrones y sus fines golpea lo que defiende su objetivo', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const sq = T.squad(g, es, base, 2);
+    const op = g.createOp(es, 'ofensiva', [base, target], { auto: 'auto' });
+    T.eq(op.aims, ['army', 'fort', 'roads'], 'fines de serie');
+    for (const s of sq) g.assignSquadron(s, op.id);
+    g.fort[target] = 3; T.luck(g, 0.99);
+    g.executeOp(op);
+    T.ok(g.fort[target] === 2 || sq.some(s => s.flown === g.turn), 'vuela contra el objetivo');
+    return true;
+}],
+['7 · una línea protege su casilla más amenazada', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [c, e] = T.border(g, es, fr), base = T.baseFor(g, es, c);
+    T.airfield(g, es, base); const [s] = T.squad(g, es, base, 1);
+    const op = g.createOp(es, 'defensa', [c], { auto: 'auto' }); op.aims = ['patrol'];
+    g.assignSquadron(s, op.id); T.army(g, fr, e, 8);
+    g.executeOp(op);
+    T.eq(s.patrol, c, 'protege la casilla');
+    return true;
+}],
+['7 · la misión a mano gana a su encargo ese turno y al siguiente vuelve a él', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const [s] = T.squad(g, es, base, 1);
+    const op = g.createOp(es, 'ofensiva', [base, target], { auto: 'auto' }); g.assignSquadron(s, op.id);
+    const [, c] = T.plainPair(g, es); T.luck(g, 0.99);
+    g.airMission(es, [s.id], 'patrol', c);
+    T.eq(g.opAir(op).flown, 0, 'ya ha volado a mano');
+    g.turn++; g.fort[target] = 2;
+    T.eq([g.opAir(op).flown, s.op], [1, op.id], 'vuelve a su operación');
+    return true;
+}],
+['7 · en manual no vuela; la reserva manda un escuadrón a la operación que pide ayuda', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const [s] = T.squad(g, es, base, 1);
+    const off = g.createOp(es, 'ofensiva', [base, target], { auto: 'manual' });
+    const res = g.createOp(es, 'reserva', [base], { auto: 'auto' }); g.assignSquadron(s, res.id);
+    g.executeOps(es, [off.id]); T.eq(s.flown, 0, 'manual: nada');
+    g.executeOps(es, [res.id]); T.eq(s.op, off.id, 'la reserva lo manda');
+    return true;
+}],
+['7 · orden de zona: un escuadrón suelto ataca en su zona cada turno', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const [s] = T.squad(g, es, base, 1);
+    if (g.armyOn(target)) g.removeArmy(g.armyOn(target));
+    const a = T.army(g, fr, target, 10); T.luck(g, 0.99);
+    g.setAirTask(s, { cell: target, aims: ['army'] }); g.stepAirTasks(es);
+    T.eq([s.flown, countUnits(a.units)], [g.turn, 9], 'ataca');
+    return true;
+}],
+['7 · escolta: una ofensiva por mar protege a sus ejércitos embarcados', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [, s] = T.coast(g, es), base = T.baseFor(g, es, s);
+    T.airfield(g, es, base); const [q] = T.squad(g, es, base, 1);
+    const target = PROVINCES.filter(p => g.owner[p.city] === fr).sort((x, y) => hexDist(s, x.city) - hexDist(s, y.city))[0].city;
+    const op = g.createOp(es, 'ofensiva', [base, target], { auto: 'auto' }); op.aims = ['patrol'];
+    const boat = T.embark(g, es, s, 6); boat.op = op.id; g.assignSquadron(q, op.id);
+    g.opAir(op);
+    T.eq(q.patrol, s, 'sobre el barco');
+    return true;
+}],
+['7 · se guardan fines, escuadrones asignados y órdenes de zona; las operaciones antiguas reciben los fines de serie', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const [s, t] = T.squad(g, es, base, 2);
+    const op = g.createOp(es, 'ofensiva', [base, target]); op.aims = ['aa']; g.assignSquadron(s, op.id); g.setAirTask(t, { cell: target, aims: ['roads'] });
+    const data = JSON.parse(JSON.stringify(g.serialize())), h = GameEngine.load(JSON.parse(JSON.stringify(data)));
+    T.eq([h.ops.get(op.id).aims, h.squadrons.get(s.id).op, h.squadrons.get(t.id).task], [['aa'], op.id, { cell: target, aims: ['roads'] }], 'igual');
+    delete data.ops[0].aims;
+    T.eq(GameEngine.load(data).ops.get(op.id).aims, ['army', 'fort', 'roads'], 'de serie');
+    return true;
+}],
+['7 · la pestaña Mando enseña los escuadrones y los fines de la operación', () => {
+    const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+    g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    const op = g.createOp(es, 'ofensiva', [base, target]);
+    const s = [...g.squadrons.values()].find(x => x.owner === es); g.assignSquadron(s, op.id);
+    ui.tab = 'mando'; ui.drawerOpen = true; ui.focusOp = op.id; ui.render();
+    const body = document.querySelector('#drawer-body');
+    T.ok(/Escuadrones \(1\)/.test(body.textContent) && body.querySelector('[data-action="op-aim"][data-aim="fort"]'), 'escuadrones y fines');
+    body.querySelector('[data-action="op-aim"][data-aim="aa"]').click();
+    T.ok(g.ops.get(op.id).aims.includes('aa'), 'marca un fin');
+    return true;
+}],
+['7 · la propuesta de una asistida enseña sus misiones aéreas sin hacerlas, y al confirmar vuelan', () => {
+    const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+    T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const [s] = T.squad(g, es, base, 1);
+    const op = g.createOp(es, 'ofensiva', [base, target], { auto: 'asistida' }); op.aims = ['fort']; g.assignSquadron(s, op.id);
+    g.fort[target] = 2; T.luck(g, 0.99);
+    const ghost = g.previewOps(es, [op.id]);
+    T.ok(ghost.some(e => e.kind === 'air' && e.cell === target), 'la propuesta trae la misión');
+    T.eq([s.flown, g.fort[target]], [0, 2], 'la previsión no vuela de verdad');
+    ui.proposal = { ids: [op.id], ghost, skip: new Set() }; ui.render();
+    const text = document.querySelector('#confirm').textContent;
+    ui.proposal = null; ui.render();
+    T.ok(/1 misión aérea/.test(text), `propuesta: ${text.trim().slice(0, 80)}`);
+    g.executeOrders(es); T.eq(s.flown, 0, 'sin confirmar no vuela');
+    g.executeOps(es, [op.id]); T.eq([s.flown, g.fort[target]], [g.turn, 1], 'confirmada, vuela');
+    return true;
+}],
+['7 · con niebla, una operación solo elige blancos que su dueño conoce', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr, (a, b) => !g.sees(es, b));
+    T.airfield(g, es, base); const sq = T.squad(g, es, base, 3);
+    if (!g.armyOn(target)) T.army(g, fr, target, 5);
+    const zone = [...g.nearCells(target, 3).keys()];
+    const list = g.airTargets(es, zone, ['army', 'aa'], { obj: target, pool: sq });
+    T.ok(list.length <= 8 && list.every(t => g.sees(es, t.cell)), `blancos: ${JSON.stringify(list)}`);
+    T.ok(!list.some(t => t.cell === target), 'el ejército que no ve no es blanco');
+    return true;
+}],
+['7 · terminar una operación deja sus escuadrones sin encargo; una orden de zona saca de la operación', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const [s, t] = T.squad(g, es, base, 2);
+    const op = g.createOp(es, 'ofensiva', [base, target]);
+    g.assignSquadron(s, op.id); g.assignSquadron(t, op.id);
+    g.setAirTask(t, { cell: target, aims: ['roads', 'nada'] });
+    T.eq([t.op, t.task], [0, { cell: target, aims: ['roads'] }], 'orden de zona');
+    g.assignSquadron(t, op.id); T.eq(t.task, null, 'vuelve a la operación');
+    g.assignSquadron(s, 999); T.eq(s.op, op.id, 'una operación que no existe no cuenta');
+    g.endOp(op);
+    T.eq([s.op, t.op], [0, 0], 'sin operación');
+    return true;
+}],
+['7 · orden de zona desde la ficha del escuadrón: el siguiente clic fija el centro', () => {
+    const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+    g.declareWar(es, fr);
+    const s = [...g.squadrons.values()].find(x => x.owner === es), [, target] = T.pair(g, es, fr);
+    ui.setTool('air'); ui.clickCell(s.base);
+    const sel = document.querySelector(`#card select[data-air-task="${s.id}"]`);
+    T.ok(sel && [...sel.options].some(o => o.value === 'zone') && [...sel.options].some(o => o.value === '0'), 'selector de encargo');
+    sel.value = 'zone'; sel.dispatchEvent(new Event('change', { bubbles: true }));
+    T.eq(ui.air.mode, 'zone', 'modo zona');
+    const box = document.querySelector('#card [data-action="zone-aim"][data-aim="fort"]');
+    T.ok(box, 'fines con casillas'); box.click();
+    ui.clickCell(target);
+    T.eq([s.task?.cell, s.task?.aims.includes('fort'), ui.air.mode], [target, true, null], 'orden puesta');
+    T.ok(/Orden de zona/.test(document.querySelector('#card').textContent), 'la ficha la enseña');
+    ui.setTool('command');
+    return true;
+}],
+['7 · móvil: la orden de zona y la operación con escuadrones caben en la hoja inferior', () => {
+    const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+    g.declareWar(es, fr);
+    const s = [...g.squadrons.values()].find(x => x.owner === es), [base, target] = T.pair(g, es, fr);
+    ui.setSheet('media'); ui.setTool('air'); ui.clickCell(s.base);
+    ui.airTaskChange(s.id, 'zone');
+    const m = T.mobileCard(), first = document.querySelector('#card .sec');
+    T.ok(!m.hidden && m.card <= m.stage * 0.42, `ficha: ${JSON.stringify(m)}`);
+    T.ok(/Orden de zona del escuadrón/.test(first.textContent), 'la orden de zona va primero');
+    ui.cancel(); ui.setTool('command');
+    const op = g.createOp(es, 'ofensiva', [base, target]); g.assignSquadron(s, op.id);
+    ui.select(-1); ui.tab = 'mando'; ui.drawerOpen = true; ui.focusOp = op.id; ui.render();
+    const drawer = document.querySelector('#drawer').getBoundingClientRect().height;
+    ui.drawerOpen = false; ui.focusOp = null; ui.render();
+    T.ok(drawer <= innerHeight * 0.5, `el panel tapa ${Math.round(drawer / innerHeight * 100)} %`);
+    return true;
+}],
+['7 · la leyenda explica la aviación en el mando', () => {
+    T.uiStart('es');
+    const t = document.querySelector('#legend').textContent;
+    T.ok(/fines/.test(t) && /Orden de zona/.test(t) && /reserva/.test(t), 'leyenda');
+    return true;
 }]
 ];
 

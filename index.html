@@ -177,6 +177,9 @@
         .air-sq.on .box { background: var(--signal); border-color: var(--signal); color: var(--ink); }
         .air-mission { display: grid; grid-template-columns: minmax(140px, auto) 1fr; gap: 10px; align-items: center; margin-top: 6px; }
         .air-mission .small { line-height: 1.25; }
+        .air-aims { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 10px; margin: 4px 0 2px; }
+        .air-task { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center; margin-top: 5px; font-size: 13.5px; }
+        .air-task select { min-width: 0; }
 
         /* Avisos */
         #toasts { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); display: grid; gap: 8px; width: min(460px, calc(100% - 24px)); z-index: 3; }
@@ -646,6 +649,11 @@ const CONFIG = {
 const AIR_KINDS = { army: 'Atacar ejército', roads: 'Cortar carreteras', fort: 'Bajar fortificación', aa: 'Destruir antiaéreo', airfield: 'Atacar aeródromo', patrol: 'Proteger casilla' };
 const AIR_KIND_INDEX = Object.fromEntries(Object.keys(AIR_KINDS).map((k, i) => [k, i]));
 const AIR_BLOCKED = 'Ese blanco ya ha recibido un acierto este turno.';
+// Aviación en el mando: blancos por operación y turno, casillas que protege como mucho, previsión mínima para
+// arriesgarse (acierto y derribo de cada escuadrón) y radio de una orden de zona.
+const AIR_TARGETS = 8, AIR_PATROLS = 2, AIR_MIN_HIT = 0.5, AIR_MAX_DOWN = 0.2, AIR_ZONE_KM = 170;
+// Orden de los blancos: más puntos primero; a igualdad, por casilla y misión (sin azar).
+const airTargetOrder = (x, y) => y.score - x.score || x.cell - y.cell || AIR_KIND_INDEX[x.kind] - AIR_KIND_INDEX[y.kind];
 
 // Ajustes de partida
 const AGGRESSION = {
@@ -1163,7 +1171,7 @@ class GameEngine {
             armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used, a.hunger || 0, a.disorgUntil || 0]),
             nextArmyId: this.nextArmyId,
             ops: [...this.ops.values()].map(o => ({ id: o.id, owner: o.owner, kind: o.kind, name: o.name, cells: o.cells, ratio: o.ratio, auto: o.auto,
-                paused: o.paused, fortify: o.fortify, since: o.since, waiting: o.waiting, front: o.front ?? -1, drawn: o.drawn, state: o.state, rel: o.rel, gold: o.gold, extra: o.extra ?? 0, poolTurn: o.poolTurn ?? 0, template: o.template, pool: o.pool, formed: o.formed,
+                paused: o.paused, fortify: o.fortify, since: o.since, waiting: o.waiting, front: o.front ?? -1, drawn: o.drawn, state: o.state, rel: o.rel, gold: o.gold, extra: o.extra ?? 0, poolTurn: o.poolTurn ?? 0, template: o.template, pool: o.pool, formed: o.formed, aims: o.aims,
                 form: o.form ? { name: o.form.name, units: o.form.units, zone: o.form.zone, recruited: o.form.recruited, pending: o.form.pending } : null })),
             armyForms: [...this.armies.values()].filter(a => a.form).map(a => [a.id, a.form]),
             nextOpId: this.nextOpId,
@@ -1172,7 +1180,7 @@ class GameEngine {
             orders: [...this.armies.values()].filter(a => a.order).map(a => [a.id, a.order.kind, a.order.dest, a.order.target, a.order.ratio, a.order.flee ? 1 : 0, a.order.since, a.order.stuck]),
             blocs: this.blocs.map(b => ({ id: b.id, name: b.name, founder: b.founder, secret: b.secret, since: b.since, members: [...b.members] })),
             nextBlocId: this.nextBlocId,
-            air: { sq: [...this.squadrons.values()].map(q => [q.id, q.owner, q.base, q.ready, q.flown, q.patrol, q.op]), nextSq: this.nextSquadronId,
+            air: { sq: [...this.squadrons.values()].map(q => [q.id, q.owner, q.base, q.ready, q.flown, q.patrol, q.op, q.task ? q.task.cell : -1, q.task ? q.task.aims : []]), nextSq: this.nextSquadronId,
                 fields: [...this.airfields].map(([c, f]) => [c, f.owner, f.left, f.downUntil]),
                 aa: [...this.aaSites].map(([c, s]) => [c, s.owner, s.left, s.hits, [...s.known]]),
                 hits: [...this.airHits].filter(([, t]) => t === this.turn).map(([k]) => k),
@@ -1334,7 +1342,8 @@ class GameEngine {
             g.ops.set(id, { id, owner: nat(o.owner), kind, name: str(o.name, 60) || 'Operación', cells: kind === 'ofensiva' ? cells : [...new Set(cells)],
                 ratio: [0, 1, 1.3, 1.8].includes(Number(o.ratio)) ? Number(o.ratio) : 1.3, auto: ['manual', 'asistida', 'auto'].find(k => k === o.auto) ?? 'manual',
                 paused: !!o.paused, fortify: !!o.fortify, since: int(o.since, 0, 1e6, g.turn), waiting: int(o.waiting, 0, 1e4, 0), uncovered: 0,
-                front: natOrNone(o.front ?? -1), extra: int(o.extra, 0, 1e7, 0), poolTurn: int(o.poolTurn, 0, 1e6, 0), gold: OP_GOLD.includes(Number(o.gold)) ? Number(o.gold) : 0, template: str(o.template, 12) || 'auto', pool: int(o.pool, 0, 1e7, 0), formed: int(o.formed, 0, 1e4, 0), form: null });
+                front: natOrNone(o.front ?? -1), extra: int(o.extra, 0, 1e7, 0), poolTurn: int(o.poolTurn, 0, 1e6, 0), gold: OP_GOLD.includes(Number(o.gold)) ? Number(o.gold) : 0, template: str(o.template, 12) || 'auto', pool: int(o.pool, 0, 1e7, 0), formed: int(o.formed, 0, 1e4, 0), form: null,
+                aims: Array.isArray(o.aims) ? [...new Set(o.aims.filter(k => Object.hasOwn(OP_AIMS, k)))] : [...OP_AIM_DEFAULT[kind]] });   // las de antes de la aviación, los de serie
             const op = g.ops.get(id);
             if (kind === 'defensa') {
                 const drawn = [...new Set(list(o.drawn).slice(0, 400).map(c => int(c, -1, G.N - 1, -1)).filter(c => c >= 0 && isLand(c)))];
@@ -1382,8 +1391,10 @@ class GameEngine {
                 const id = int(x?.[0], 1, 1e9, 0), owner = nat(x?.[1]), base = int(x?.[2], -1, G.N - 1, -1), op = g.ops.get(int(x?.[6], 0, 1e6, 0));
                 if (!id || g.squadrons.has(id) || g.airfields.get(base)?.owner !== owner || (based.get(base) ?? 0) >= CONFIG.AIR.PER_AIRFIELD) continue;
                 based.set(base, (based.get(base) ?? 0) + 1);
-                g.squadrons.set(id, { id, owner, base, ready: int(x?.[3], 0, 1e6, 0), flown: int(x?.[4], 0, 1e6, 0), patrol: int(x?.[5], -1, G.N - 1, -1),
-                    op: op && op.owner === owner ? op.id : 0, task: null });
+                const sq = { id, owner, base, ready: int(x?.[3], 0, 1e6, 0), flown: int(x?.[4], 0, 1e6, 0), patrol: int(x?.[5], -1, G.N - 1, -1),
+                    op: op && op.owner === owner ? op.id : 0, task: null };
+                if (!sq.op) g.setAirTask(sq, int(x?.[7], -1, G.N - 1, -1) >= 0 ? { cell: int(x[7], 0, G.N - 1, 0), aims: list(x?.[8]).slice(0, 8) } : null);
+                g.squadrons.set(id, sq);
             }
             g.nextSquadronId = Math.max(int(data.air.nextSq, 1, 1e9, 1), ...[...g.squadrons.keys()].map(x => x + 1), 1);
             for (const x of list(data.air.aa)) {
@@ -2351,6 +2362,157 @@ class GameEngine {
         return res;
     }
 
+    // --- Aviación en el mando: escuadrones en las operaciones, con sus fines, y órdenes de zona ---
+    // sq.op = operación a la que vuela cada turno; sq.task = { cell, aims }, la orden de zona de un escuadrón suelto. Son
+    // encargos excluyentes. Una misión a mano gasta el turno del escuadrón; al siguiente vuelve a su encargo.
+    // Punto clave de una operación: el objetivo de la ofensiva, el centro de la línea o la zona de la reserva.
+    opKey(op) { return op.kind === 'ofensiva' ? op.cells[op.cells.length - 1] : op.cells[Math.floor(op.cells.length / 2)]; }
+    // Mete un escuadrón en una operación de su mismo dueño (0: en ninguna); deja su orden de zona.
+    assignSquadron(sq, opId) {
+        if (!sq) return false;
+        const op = opId ? this.ops.get(opId) : null;
+        if (opId && (!op || op.owner !== sq.owner)) return false;
+        sq.op = op ? op.id : 0;
+        if (op) sq.task = null;
+        this.orderVersion++;
+        return true;
+    }
+    // Orden de zona de varios turnos (null la quita): ataca con sus fines en AIR_ZONE_KM alrededor de `task.cell`. Sale de
+    // su operación. Sin un fin válido no hay orden.
+    setAirTask(sq, task) {
+        if (!sq) return false;
+        const cell = Number.isInteger(task?.cell) && task.cell >= 0 && task.cell < G.N ? task.cell : -1;
+        const aims = [...new Set((Array.isArray(task?.aims) ? task.aims : []).filter(k => Object.hasOwn(OP_AIMS, k)))];
+        if (task && (cell < 0 || !aims.length)) return false;
+        sq.task = task ? { cell, aims } : null;
+        if (sq.task) sq.op = 0;
+        this.orderVersion++;
+        return true;
+    }
+    // Blancos para los fines `aims` en las casillas `cells`, con lo que `owner` ve, los mejores primero (como mucho
+    // AIR_TARGETS). Cada uno pasa por missionCheck con los escuadrones `pool` (por defecto, todos los suyos que pueden
+    // volar), así que solo quedan los que están a su alcance, en guerra y sin acierto este turno.
+    // - army: la fuerza de ataque del ejército enemigo que ve, el doble en el mar (allí pierde el doble).
+    // - fort: el nivel que conoce (si no, 1) × 10, y 20 más en el objetivo `obj`.
+    // - roads: los tramos intactos × 3, y 10 más a 4 casillas del objetivo o menos.
+    // - aa: la fuerza del antiaéreo que conoce × 2.
+    // - patrol: primero las casillas de mar de sus ejércitos `members` (escolta); luego sus casillas de `cells` según
+    //   la amenaza.
+    airTargets(owner, cells, aims, { obj = -1, members = [], pool = null } = {}) {
+        const sqs = pool ?? [...this.squadrons.values()].filter(q => q.owner === owner && this.canFly(q)), out = [];
+        if (!sqs.length) return out;
+        const want = new Set(aims), add = (kind, cell, score) => { if (score > 0 && !this.missionCheck(owner, sqs, kind, cell)) out.push({ kind, cell, score }); };
+        for (const c of cells) {
+            if (want.has('army')) {
+                const a = this.armyOn(c);
+                if (a && this.atWar(owner, a.owner) && this.sees(owner, c)) add('army', c, this.seenPower(owner, a, 'atk') * (afloat(c) ? 2 : 1));
+            }
+            if (!isLand(c) || !this.atWar(owner, this.owner[c])) continue;
+            if (want.has('fort') && this.fort[c]) add('fort', c, ((this.fortLevel(owner, c) ?? 0) + 1) * 10 + (c === obj ? 20 : 0));
+            if (want.has('roads')) {
+                let n = 0;
+                for (let d = 0; d < 6; d++) if (this.road[c * 6 + d] > 0) n++;
+                if (n) add('roads', c, n * 3 + (obj >= 0 && hexDist(c, obj) <= 4 ? 10 : 0));
+            }
+        }
+        if (want.has('aa')) {   // de la lista del antiaéreo, no casilla a casilla
+            const zone = new Set(cells), done = new Set();
+            for (const src of this.aaList()) {
+                if (done.has(src.cell) || !zone.has(src.cell) || !this.atWar(owner, src.owner)) continue;
+                const t = this.aaTarget(owner, src.cell);
+                if (t) { done.add(src.cell); add('aa', src.cell, t.power * 2); }
+            }
+        }
+        if (want.has('patrol')) {
+            const guard = new Set();
+            for (const a of members) if (afloat(a.cell) && !guard.has(a.cell)) { guard.add(a.cell); add('patrol', a.cell, 100 + countUnits(a.units)); }
+            for (const c of new Set(cells)) if (isLand(c) && (this.owner[c] === owner || this.allied(owner, this.owner[c]))) add('patrol', c, this.threat(owner, c));
+        }
+        return out.sort(airTargetOrder).slice(0, AIR_TARGETS);
+    }
+    // Vuela contra los blancos `targets`, por orden, con los escuadrones `pool`: para cada uno, el grupo más pequeño (de 1
+    // a 3, los de base más cercana primero) con el blanco a su alcance cuya previsión dé al menos AIR_MIN_HIT de acierto y
+    // como mucho AIR_MAX_DOWN de derribo por escuadrón; si no lo hay, no se arriesga. Proteger va de 1 en 1 y en
+    // AIR_PATROLS casillas como mucho. Los blancos ya alcanzados se saltan. Devuelve los escuadrones que han volado, los
+    // aciertos, las misiones de ataque y el parte de cada misión.
+    flyTargets(owner, pool, targets) {
+        const out = { flown: 0, hits: 0, strikes: 0, notes: [] }, R = this.airRange(owner);
+        let free = pool.filter(q => q && q.owner === owner), patrols = 0;
+        for (const t of targets) {
+            free = free.filter(q => this.squadrons.has(q.id) && this.canFly(q));
+            if (!free.length) break;
+            if (t.kind === 'patrol' && patrols >= AIR_PATROLS) continue;
+            const near = free.filter(q => hexDist(q.base, t.cell) <= R).sort((x, y) => hexDist(x.base, t.cell) - hexDist(y.base, t.cell) || x.id - y.id);
+            let group = null;
+            for (let k = 1; k <= Math.min(t.kind === 'patrol' ? 1 : 3, near.length); k++) {
+                const o = this.missionOdds(owner, near.slice(0, k), t.kind, t.cell);
+                if (o.why) break;   // ya alcanzado, o el blanco ya no está
+                if (o.hit >= AIR_MIN_HIT && o.down <= AIR_MAX_DOWN) { group = near.slice(0, k); break; }
+            }
+            if (!group) continue;
+            const res = this.airMission(owner, group.map(q => q.id), t.kind, t.cell);
+            if (res.result === 'invalid' || res.result === 'blocked') continue;
+            out.flown += group.filter(q => q.flown === this.turn).length;
+            out.notes.push(res.text);
+            if (t.kind === 'patrol') patrols++;
+            else { out.strikes++; if (res.result === 'hit') out.hits++; }
+            free = free.filter(q => !group.includes(q));
+        }
+        return out;
+    }
+    // La aviación de una operación este turno: sus escuadrones que pueden volar, contra los blancos de sus fines en su
+    // zona. Ofensiva: a 3 casillas de su objetivo y a 2 de sus ejércitos (lo que defiende el objetivo y el camino), y
+    // protege a sus ejércitos. Línea: a 3 casillas de la línea, y protege sus casillas más amenazadas. En manual, en pausa
+    // o en la reserva no vuela.
+    opAir(op) {
+        const id = op.owner, aims = op.aims ?? [];
+        if (op.kind === 'reserva' || op.auto === 'manual' || op.paused || !aims.length || this.over) return { flown: 0, hits: 0, strikes: 0, notes: [] };
+        const pool = [];
+        for (const q of this.squadrons.values()) if (q.op === op.id && q.owner === id && this.canFly(q)) pool.push(q);
+        if (!pool.length) return { flown: 0, hits: 0, strikes: 0, notes: [] };
+        const members = this.opMembers(op), zone = new Set(), obj = op.kind === 'ofensiva' ? op.cells[op.cells.length - 1] : -1;
+        const around = (c, k) => { for (const x of this.nearCells(c, k).keys()) zone.add(x); };
+        if (obj >= 0) { around(obj, 3); for (const a of members) around(a.cell, 2); } else for (const c of op.cells) around(c, 3);
+        const strike = aims.filter(k => k !== 'patrol'), opts = { obj, members, pool };
+        let targets = strike.length ? this.airTargets(id, [...zone], strike, opts) : [];
+        if (aims.includes('patrol')) targets = [...targets, ...this.airTargets(id, obj >= 0 ? members.map(a => a.cell) : op.cells, ['patrol'], opts)].sort(airTargetOrder).slice(0, AIR_TARGETS);
+        return this.flyTargets(id, pool, targets);
+    }
+    // Las órdenes de zona de los escuadrones sueltos de `id`: los que comparten zona y fines vuelan juntos.
+    stepAirTasks(id) {
+        const groups = new Map();
+        for (const q of this.squadrons.values()) {
+            if (q.owner !== id || q.op || !q.task || !this.canFly(q)) continue;
+            const k = `${q.task.cell}:${q.task.aims.join()}`;
+            if (!groups.has(k)) groups.set(k, []);
+            groups.get(k).push(q);
+        }
+        for (const pool of groups.values()) {
+            if (this.over) return;
+            const { cell, aims } = pool[0].task;
+            this.flyTargets(id, pool, this.airTargets(id, [...this.nearCells(cell, kmCells(AIR_ZONE_KM)).keys()], aims, { pool }));
+        }
+    }
+    playerAssignSquadron(sqId, opId) {
+        const q = this.squadrons.get(sqId);
+        return !!q && q.owner === this.player && !this.over && this.assignSquadron(q, opId);
+    }
+    // Orden de zona del jugador (null la quita); el parte la confirma.
+    playerAirTask(sqId, task) {
+        const q = this.squadrons.get(sqId);
+        if (!q || q.owner !== this.player || this.over || !this.setAirTask(q, task)) return false;
+        if (q.task) this.log(`Orden de zona: el escuadrón ${q.id} vuela cada turno a ${plural(kmCells(AIR_ZONE_KM), 'casilla', 'casillas')} de ${this.placeName(q.task.cell)} (${q.task.aims.map(k => OP_AIMS[k].toLowerCase()).join(', ')}).`);
+        return true;
+    }
+    // Marca o desmarca un fin de una operación del jugador (la reserva no tiene).
+    playerOpAim(opId, aim) {
+        const op = this.ops.get(opId);
+        if (!op || op.owner !== this.player || op.kind === 'reserva' || !Object.hasOwn(OP_AIMS, aim)) return false;
+        op.aims = op.aims.includes(aim) ? op.aims.filter(k => k !== aim) : [...op.aims, aim];
+        this.orderVersion++;
+        return true;
+    }
+
     // Hay un ejército enemigo (en guerra) en `u`, en `v` o en sus vecinas: no se trabaja en el tramo.
     repairBlocked(id, u, v) {
         const foes = this.enemiesOf(id);
@@ -2886,6 +3048,8 @@ class GameEngine {
         this.shareForces(id);
         // Luego las operaciones: las automáticas siempre; las asistidas, cuando se piden (botón o confirmación).
         this.executeOps(id, this.opsOf(id).filter(op => op.auto === 'auto' || (opts.assisted && op.auto === 'asistida')).map(op => op.id));
+        // Y los escuadrones sueltos con orden de zona.
+        this.stepAirTasks(id);
         if (id === this.player) {
             const parts = [];
             if (out.moved) parts.push(`${plural(out.moved, 'ejército avanza', 'ejércitos avanzan')}`);
@@ -3123,7 +3287,8 @@ class GameEngine {
         for (let i = 2; !opts.name && taken.has(name); i++) name = `${base} ${i}`;
         const op = { id: this.nextOpId++, owner, kind, name, cells: kind === 'ofensiva' ? cells : [...new Set(cells)],
             ratio: opts.ratio ?? (kind === 'defensa' ? 1.8 : POSTURES[this.nations[owner].command.posture].ratio), auto: opts.auto ?? 'auto', paused: false, fortify: !!opts.fortify,
-            since: this.turn, waiting: 0, uncovered: 0, drawn: kind === 'defensa' ? [...new Set(cells)] : null, state: 'aguanta', rel: null, gold: OP_GOLD.includes(opts.gold) ? opts.gold : 0, template: opts.template ?? 'auto', pool: 0, formed: 0, form: null };
+            since: this.turn, waiting: 0, uncovered: 0, drawn: kind === 'defensa' ? [...new Set(cells)] : null, state: 'aguanta', rel: null, gold: OP_GOLD.includes(opts.gold) ? opts.gold : 0, template: opts.template ?? 'auto', pool: 0, formed: 0, form: null,
+            aims: [...(opts.aims ?? OP_AIM_DEFAULT[kind])] };
         this.ops.set(op.id, op);
         this.orderVersion++;
         return op;
@@ -3180,6 +3345,7 @@ class GameEngine {
     endOp(op, why = '') {
         if (!this.ops.has(op.id)) return;
         for (const a of this.armies.values()) { if (a.op === op.id) a.op = 0; if (a.form === op.id) a.form = 0; if (a.from === op.id) a.from = 0; }
+        for (const q of this.squadrons.values()) if (q.op === op.id) q.op = 0;
         this.ops.delete(op.id);
         this.orderVersion++;
         if (op.owner === this.player) this.log(`${op.name}: ${why || 'operación terminada'}. Sus ejércitos quedan sin operación.`);
@@ -3220,7 +3386,7 @@ class GameEngine {
         const id = op.owner, rules = this.rules(id);
         const free = this.opMembers(op).filter(a => !a.order && a.direct !== this.turn)
             .sort((x, y) => unitPower(y.units, 'atk', rules) - unitPower(x.units, 'atk', rules) || x.id - y.id);
-        const tally = { moved: 0, attacked: 0, waiting: 0, fortified: 0, sent: [], notes: [] };
+        const tally = { moved: 0, attacked: 0, waiting: 0, fortified: 0, sent: [], sentAir: [], notes: [], air: null };
         const live = a => this.armies.has(a.id) && a.owner === id && this.armyOn(a.cell) === a && this.mp(a) > 0;
         if (op.kind === 'ofensiva') {
             const obj = op.cells[op.cells.length - 1];
@@ -3269,8 +3435,20 @@ class GameEngine {
                     tally.sent.push(o.name);
                     this.orderVersion++;
                 }
+                // Y escuadrones, en el mismo orden: uno a cada operación con fines que tenga su punto clave a su alcance.
+                const R = this.airRange(id), wings = [...this.squadrons.values()].filter(q => q.op === op.id && q.owner === id).sort((x, y) => x.id - y.id);
+                for (const [o] of needy) {
+                    if (!wings.length) break;
+                    const key = this.opKey(o), i = o.aims?.length ? wings.findIndex(q => hexDist(q.base, key) <= R) : -1;
+                    if (i < 0) continue;
+                    wings.splice(i, 1)[0].op = o.id;
+                    tally.sentAir.push(o.name);
+                    this.orderVersion++;
+                }
             }
         }
+        // La aviación de la operación vuela al final, con lo que ya han hecho sus ejércitos.
+        if (this.ops.has(op.id)) tally.air = this.opAir(op);
         if (id === this.player) {
             const parts = [];
             if (tally.moved) parts.push(plural(tally.moved, 'ejército se mueve', 'ejércitos se mueven'));
@@ -3279,6 +3457,10 @@ class GameEngine {
             if (tally.fortified) parts.push(plural(tally.fortified, 'casilla fortificada', 'casillas fortificadas'));
             if (op.kind === 'defensa' && op.uncovered) parts.push(`${plural(op.uncovered, 'casilla', 'casillas')} de la línea sin tropas`);
             for (const n of tally.sent) parts.push(`manda un ejército a ${n}`);
+            for (const n of tally.sentAir) parts.push(`manda un escuadrón a ${n}`);
+            const air = tally.air;
+            if (air?.notes.length) parts.push(air.strikes ? `${plural(air.notes.length, 'misión aérea', 'misiones aéreas')}, ${plural(air.hits, 'acierto', 'aciertos')}`
+                : plural(air.notes.length, 'misión aérea de protección', 'misiones aéreas de protección'));
             parts.unshift(...tally.notes);
             if (parts.length && this.ops.has(op.id)) this.log(`${op.name}: ${parts.join(', ')}.`);
         }
@@ -3899,13 +4081,13 @@ class GameEngine {
         return plan;
     }
 
-    // Movimientos que haría una operación asistida, sin hacerlos: se juegan en una copia de la partida.
+    // Movimientos, ataques y misiones aéreas que haría una operación asistida, sin hacerlos: se juegan en una copia.
     previewOps(id, ids) {
         const copy = GameEngine.load(JSON.parse(JSON.stringify(this.serialize())));
         for (const a of this.armies.values()) if (a.direct === this.turn && copy.armies.has(a.id)) copy.armies.get(a.id).direct = this.turn;
         copy.motion = [];
         copy.executeOps(id, ids);
-        return copy.motion.filter(ev => ev.kind === 'move' || ev.kind === 'battle');
+        return copy.motion.filter(ev => ev.kind === 'move' || ev.kind === 'battle' || ev.kind === 'air');
     }
 
     zoc(cell, a) {
@@ -5611,6 +5793,9 @@ const OP_KINDS = {
     defensa: { name: 'Defensa', icon: ICONS.line, how: 'Haz clic a lo largo de tu territorio para trazar la línea. Sus ejércitos ocupan las casillas más amenazadas primero, contraatacan y, si quieres, fortifican.' },
     reserva: { name: 'Reserva', icon: ICONS.zone, how: 'Haz clic en la zona de reunión. Sus ejércitos esperan allí y acuden a las operaciones que pidan ayuda.' }
 };
+// Fines de la aviación de una operación: qué buscan sus escuadrones cada turno. La reserva no vuela: manda escuadrones.
+const OP_AIMS = { army: 'Golpear ejércitos', roads: 'Cortar carreteras', fort: 'Bajar fortificaciones', aa: 'Destruir antiaéreo', patrol: 'Proteger y escoltar' };
+const OP_AIM_DEFAULT = { ofensiva: ['army', 'fort', 'roads'], defensa: ['army', 'patrol'], reserva: [] };
 const OP_LINE_STATES = { aguanta: 'Aguanta', repliega: 'Se repliega', restablece: 'Vuelve a la línea dibujada' };
 const OP_STANCES = [[1.8, 'Cauta', 'Solo ataca con clara ventaja (1,8 a 1)'], [1.3, 'Equilibrada', 'Ataca con 1,3 a 1, como la IA'], [1, 'Agresiva', 'Ataca con igualdad de fuerzas: avanza rápido y sangra']];
 const OP_AUTO = [['manual', 'Manual', 'Solo dibuja y calcula: no mueve nada'], ['asistida', 'Asistida', 'Al terminar el turno te enseña lo que haría y confirmas'], ['auto', 'Automática', 'La cumple sola al terminar tu turno']];
@@ -6389,13 +6574,13 @@ class MapView {
             ctx.strokeStyle = it.color; ctx.lineWidth = 2.5; ctx.strokeRect(x - 15, y - 11, 30, 19);
             labels.push({ x, y: y + 20, text: it.name, color: it.color });
         }
-        // Propuesta de las asistidas: movimientos en blanco discontinuo, ataques en rojo.
+        // Propuesta de las asistidas: movimientos en blanco discontinuo, ataques en rojo y misiones aéreas en azul, de
+        // cada base al blanco.
         const pr = ui?.proposal;
-        if (pr) for (const ev of pr.ghost) {
-            const cells = ev.kind === 'move' ? ev.cells : [ev.from, ev.cell];
+        if (pr) for (const [ev, cells] of pr.ghost.flatMap(ev => ev.kind === 'move' ? [[ev, ev.cells]] : ev.kind === 'air' ? ev.from.map(b => [ev, [b, ev.cell]]) : [[ev, [ev.from, ev.cell]]])) {
             const pts = cells.map(scr);
             if (pts.length < 2) continue;
-            const color = ev.kind === 'battle' ? '#ff8a78' : '#ffffff';
+            const color = ev.kind === 'battle' ? '#ff8a78' : ev.kind === 'air' ? '#9fd4ff' : '#ffffff';
             ctx.beginPath(); pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
             ctx.strokeStyle = 'rgba(21,26,18,0.85)'; ctx.lineWidth = 4.5; ctx.stroke();
             ctx.setLineDash([6, 4]); ctx.strokeStyle = color; ctx.lineWidth = 2.2; ctx.stroke(); ctx.setLineDash([]);
@@ -6799,6 +6984,7 @@ class GameUI {
             <li>${airIcon('field', '#9aa57a')} Aeródromo: hasta ${CONFIG.AIR.PER_AIRFIELD} escuadrones, con cuántos tiene en la esquina («?» si no lo sabes); atenuado y con un aspa, inservible. Los de todos los países se ven. En la vista realista, una pista con su hangar y un avión</li>
             <li>${airIcon('aa', '#9aa57a')} Antiaéreo fijo: cubre <span data-legend="aa-range"></span> con fuerza <span data-legend="aa-power"></span> (dañado, la cúpula a trazos y la mitad); unas casamatas en una ciudad traen el doble. El del enemigo solo se ve si lo conoces: con Reconocimiento 2 a la vista, con un espía o porque te ha disparado. En la vista realista, un lanzador con dos misiles</li>
             <li>Aviación (herramienta Aviación, tecla 6): elige un aeródromo tuyo y marca los escuadrones que vuelan; luego haz clic en un blanco a su alcance. Cada misión dice su probabilidad de acierto y lo que puedes perder según lo que sabes: con niebla, el antiaéreo que no conoces no cuenta y la ficha te avisa. Cada escuadrón vuela una vez por turno y cada blanco recibe como mucho un acierto por turno. En tu territorio se construyen aeródromos (en una ciudad) y antiaéreo (en cualquier casilla)</li>
+            <li>Aviación en el mando: una ofensiva o una línea llevan escuadrones, igual que ejércitos (pestaña Mando o «Encargo» en la ficha de Aviación), y marcan sus fines: golpear ejércitos, cortar carreteras, bajar fortificaciones, destruir antiaéreo o proteger y escoltar. Cada turno eligen, con lo que conoces, hasta ${AIR_TARGETS} blancos a su alcance y solo vuelan si la previsión es buena; respetan el modo manual, asistido o automático. La reserva manda sus escuadrones a la operación que pide ayuda. Orden de zona: un escuadrón suelto ataca turno a turno con sus fines a ${AIR_ZONE_KM} km de la casilla que marques. Una misión a mano gana a su encargo ese turno; al siguiente vuelve a él</li>
             <li>Con niebla de guerra, en sombra: lo que no ves. Ojo junto a una ciudad: tu espía</li>
             <li>${Object.entries(E.resourceTypes).map(([k, name]) => `${CONFIG.RESOURCE_ICON[k]} ${name}`).join(' &nbsp;')}</li>
             <li>Un yacimiento abastece a su provincia; si una carretera pasa por él, también a las ciudades que una (más renta y tropas más baratas). Más tenue: aún sin carretera</li></ul>`;
@@ -7271,7 +7457,8 @@ class GameUI {
     }
 
     // --- Herramienta Aviación ---
-    noAir() { return { base: -1, picked: new Set(), target: -1, mode: null }; }
+    // mode 'zone': el siguiente clic fija el centro de la orden de zona del escuadrón `zoneSq`, con los fines `zoneAims`.
+    noAir() { return { base: -1, picked: new Set(), target: -1, mode: null, zoneSq: 0, zoneAims: [] }; }
     // Escuadrones del jugador en el aeródromo `cell` que pueden volar ahora.
     readyAt(cell) { const g = this.game; return g.squadronsAt(cell).filter(q => q.owner === g.player && g.canFly(q)).sort((a, b) => a.id - b.id); }
     // Elige el aeródromo `cell` con sus escuadrones que pueden volar; el blanco se olvida.
@@ -7289,6 +7476,13 @@ class GameUI {
     // - sin escuadrones, una casilla tuya enseña lo que se puede construir en ella.
     airClick(cell) {
         const g = this.game, A = this.air, f = g.airfields.get(cell);
+        if (A.mode === 'zone') {   // orden de zona: esta casilla es su centro
+            if (!A.zoneAims.length) { this.flash('Marca al menos un fin para la orden de zona.'); return; }
+            if (g.playerAirTask(A.zoneSq, { cell, aims: A.zoneAims })) Object.assign(A, { mode: null, zoneSq: 0, zoneAims: [] });
+            this.selected = cell;
+            this.render();
+            return;
+        }
         if (f && f.owner === g.player && g.airfieldUp(cell) && (cell === A.base || !A.picked.size)) this.pickBase(cell);
         else if (A.picked.size) {
             A.target = cell;
@@ -7317,12 +7511,17 @@ class GameUI {
         if (g.turn < q.ready) return q.flown ? `Dañado: vuelve a volar el turno ${q.ready}` : `Nuevo: vuela a partir del turno ${q.ready}`;
         return q.flown === g.turn ? 'Ya ha volado' : 'Listo';
     }
+    // El encargo de un escuadrón, en pocas palabras ('' si no tiene).
+    squadronTask(q) {
+        const g = this.game, op = q.op ? g.ops.get(q.op) : null;
+        return op ? esc(op.name) : q.task ? `Orden de zona: ${esc(g.placeName(q.task.cell))}` : '';
+    }
     renderAirCard() {
         const g = this.game, el = $('#card'), p0 = g.player, A = this.air;
         const focus = A.target >= 0 ? A.target : this.selected;
-        const base = A.base >= 0 ? this.airBaseSection() : '', target = A.target >= 0 ? this.airTargetSection() : '';
-        // En el móvil, el blanco va primero: es lo que se ve en la hoja a media altura.
-        const sections = [...(isMobile() ? [target, base] : [base, target]), focus >= 0 && isLand(focus) && g.owner[focus] === p0 ? this.airBuildSection(focus) : ''].filter(Boolean);
+        const base = A.base >= 0 ? this.airBaseSection() : '', target = A.target >= 0 ? this.airTargetSection() : '', task = A.base >= 0 ? this.airTaskSection() : '';
+        // En el móvil, el blanco va primero (o la orden de zona que se está dando): es lo que se ve en la hoja a media altura.
+        const sections = [...(isMobile() ? (A.mode === 'zone' ? [task, target, base] : [target, base, task]) : [base, task, target]), focus >= 0 && isLand(focus) && g.owner[focus] === p0 ? this.airBuildSection(focus) : ''].filter(Boolean);
         if (!sections.length) { el.hidden = true; return; }
         el.hidden = false;
         el.style.setProperty('--owner', g.nations[p0].color);
@@ -7341,7 +7540,7 @@ class GameUI {
         const rows = sqs.map(q => {
             const on = A.picked.has(q.id);
             return `<button class="air-sq ${on ? 'on' : ''}" data-action="air-pick" data-id="${q.id}" aria-pressed="${on}" ${g.canFly(q) ? '' : 'disabled'}>
-                <span class="box">${on ? uiIcon('check', 11) : ''}</span>${ICONS.plane}<span>Escuadrón ${q.id}<small>${this.squadronState(q)}</small></span></button>`;
+                <span class="box">${on ? uiIcon('check', 11) : ''}</span>${ICONS.plane}<span>Escuadrón ${q.id}<small>${this.squadronState(q)}${this.squadronTask(q) ? ` · ${this.squadronTask(q)}` : ''}</small></span></button>`;
         }).join('');
         const n = A.picked.size;
         return `<section class="sec"><h3>Escuadrones en ${esc(g.placeName(A.base))}</h3>
@@ -7349,6 +7548,21 @@ class GameUI {
             ${sqs.length ? `<p class="small muted">${n ? `${n === 1 ? 'Va uno' : `Van ${n}`}: haz clic en un blanco a su alcance.` : 'Ninguno elegido: marca los que pueden volar.'}</p>` : ''}
             <div class="row" style="margin-top:8px"><button class="btn" data-action="air-buy" ${g.hangar(p0, A.base) && g.nations[p0].gold >= cost ? '' : 'disabled'}>Comprar un escuadrón (${cost} de oro)</button></div>
             <p class="note">Vuela a partir del turno que viene. Caben ${per} por aeródromo${sqs.length >= per ? ' y este ya está lleno' : ''}.</p></section>`;
+    }
+    // «Encargo»: lo que hace cada escuadrón del aeródromo por su cuenta, turno a turno: volar con una operación, una
+    // orden de zona (el siguiente clic en el mapa fija su centro) o nada. Una misión a mano gana a su encargo ese turno.
+    airTaskSection() {
+        const g = this.game, p0 = g.player, A = this.air, ops = g.opsOf(p0), sqs = g.squadronsAt(A.base).filter(q => q.owner === p0).sort((a, b) => a.id - b.id);
+        if (!sqs.length) return '';
+        const rows = sqs.map(q => `<label class="air-task"><span>Escuadrón ${q.id}</span><select data-air-task="${q.id}" aria-label="Encargo del escuadrón ${q.id}">
+            <option value="0" ${!q.op && !q.task && A.zoneSq !== q.id ? 'selected' : ''}>Sin encargo</option>
+            ${ops.map(o => `<option value="${o.id}" ${q.op === o.id ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}
+            <option value="zone" ${q.task || A.zoneSq === q.id ? 'selected' : ''}>Orden de zona${q.task ? `: ${esc(g.placeName(q.task.cell))}` : '…'}</option></select></label>`).join('');
+        const zone = A.mode === 'zone' ? `<div class="note" style="margin:2px 0 10px"><p class="small"><b>Orden de zona del escuadrón ${A.zoneSq}</b>: ${this.touch ? 'toca' : 'haz clic en'} el centro de la zona en el mapa. Cada turno atacará a ${plural(kmCells(AIR_ZONE_KM), 'casilla', 'casillas')} (${AIR_ZONE_KM} km) alrededor:</p>
+            <div class="air-aims">${Object.entries(OP_AIMS).map(([k, v]) => `<label class="check small"><input type="checkbox" data-action="zone-aim" data-aim="${k}" ${A.zoneAims.includes(k) ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div>
+            <div class="row" style="margin-top:6px"><button class="btn ghost" data-action="zone-cancel">Cancelar</button></div></div>` : '';
+        return `<section class="sec"><h3>Encargo</h3>${zone}${rows}
+            <p class="note">Con un encargo vuela solo cada turno, con lo que conoces. Una misión a mano gana a su encargo ese turno; al siguiente vuelve a él.</p></section>`;
     }
     // «Blanco: X»: una fila por misión posible con su previsión, hecha solo con lo que sabes, y sus avisos.
     airTargetSection() {
@@ -7443,9 +7657,10 @@ class GameUI {
         if (this.proposal) { this.endProposal(); return; }
         if (this.tool === 'op' && this.opDraft?.cells.length) { this.opDraft.cells.pop(); this.render(); return; }
         if (this.pending) { this.pending = null; this.view.preview = null; this.render(); return; }
-        if (this.tool === 'air') {   // primero el blanco, después el aeródromo y al final la herramienta
+        if (this.tool === 'air') {   // primero la orden de zona y el blanco, después el aeródromo y al final la herramienta
             const A = this.air;
-            if (A.target >= 0) { A.target = -1; this.selected = A.base; }
+            if (A.mode === 'zone') Object.assign(A, { mode: null, zoneSq: 0, zoneAims: [] });
+            else if (A.target >= 0) { A.target = -1; this.selected = A.base; }
             else if (A.base >= 0 || this.selected >= 0) { this.air = this.noAir(); this.selected = -1; }
             else { this.setTool('command'); return; }
             this.render();
@@ -7585,6 +7800,16 @@ class GameUI {
             case 'op-end': { const op = g.ops.get(+d.id); if (op) { g.endOp(op, 'terminada por orden tuya'); this.focusOp = null; } break; }
             case 'op-add-near': { const op = g.ops.get(+d.id); if (op) for (const a of g.nearbyFree(op, 4)) g.assignArmy(a, op.id); break; }
             case 'op-unassign': g.assignArmy(g.armies.get(+d.army), 0); break;
+            case 'op-aim': g.playerOpAim(+d.id, d.aim); break;
+            case 'op-air-unassign': g.playerAssignSquadron(+d.sq, 0); break;
+            case 'op-add-air': { const op = g.ops.get(+d.id); if (op) for (const q of this.freeSquadrons(op)) g.playerAssignSquadron(q.id, op.id); break; }
+            case 'air-open': {   // de la pestaña Mando a la herramienta Aviación, con ese aeródromo elegido
+                if (isMobile()) this.drawerOpen = false;
+                this.setTool('air'); this.pickBase(+d.cell); this.selected = +d.cell; this.view.centerOn(+d.cell, 6);
+                break;
+            }
+            case 'zone-aim': { const A = this.air; A.zoneAims = A.zoneAims.includes(d.aim) ? A.zoneAims.filter(k => k !== d.aim) : [...A.zoneAims, d.aim]; break; }
+            case 'zone-cancel': Object.assign(this.air, { mode: null, zoneSq: 0, zoneAims: [] }); break;
             case 'cmd': g.playerCommand(d.key, d.value); break;
             case 'op-suggest': {
                 this.opPreview = null;
@@ -7911,6 +8136,18 @@ class GameUI {
         }
     }
 
+    // El selector de encargo de un escuadrón: sin encargo, una operación o una orden de zona (espera el clic en su centro).
+    airTaskChange(id, value) {
+        const g = this.game, q = g.squadrons.get(id), A = this.air;
+        if (!q) return;
+        if (value === 'zone') Object.assign(A, { mode: 'zone', zoneSq: id, zoneAims: [...(q.task?.aims ?? ['army', 'roads'])] });
+        else {
+            if (A.zoneSq === id) Object.assign(A, { mode: null, zoneSq: 0, zoneAims: [] });
+            if (+value) g.playerAssignSquadron(id, +value);
+            else { g.playerAssignSquadron(id, 0); g.playerAirTask(id, null); }
+        }
+        this.render();
+    }
     onChange(e) {
         if (e.target.id === 'nation-select') { this.choice = +e.target.value; this.render(); }
         if (e.target.id === 'bloc-secret') this.blocSecret = e.target.checked;
@@ -7918,6 +8155,7 @@ class GameUI {
         if (e.target.id === 'peace-mine') { this.peace.mine = +e.target.value; this.renderPeaceDialog(); }
         if (e.target.id === 'peace-keep') { this.peace.keep = e.target.checked; this.renderPeaceDialog(); }
         if (e.target.dataset.opAssign !== undefined) { this.game.assignArmy(this.selectedArmy(), +e.target.value); this.render(); }
+        if (e.target.dataset.airTask !== undefined) this.airTaskChange(+e.target.dataset.airTask, e.target.value);
         if (e.target.dataset.opTemplate !== undefined) { const op = this.game.ops.get(+e.target.dataset.opTemplate); if (op) this.game.playerOpSet(op, 'template', e.target.value); this.render(); }
         if (e.target.id === 'op-name') { const op = this.game.ops.get(this.focusOp); if (op) this.game.playerOpSet(op, 'name', e.target.value); this.render(); }
     }
@@ -8477,10 +8715,12 @@ class GameUI {
         const g = this.game, el = $('#confirm'), plan = this.pending;
         el.classList.toggle('road', this.tool === 'road' && g.player !== null && !g.over && !this.proposal);
         if (this.proposal) {
-            const pr = this.proposal, moves = pr.ghost.filter(e => e.kind === 'move').length, fights = pr.ghost.filter(e => e.kind === 'battle').length;
+            const pr = this.proposal, count = k => pr.ghost.filter(e => e.kind === k).length, moves = count('move'), fights = count('battle'), air = count('air');
             const names = pr.ids.map(id => g.ops.get(id)?.name).filter(Boolean).map(esc).join(', ');
+            const parts = [moves || !air ? plural(moves, 'movimiento', 'movimientos') : '', fights ? plural(fights, 'ataque', 'ataques') : '', air ? plural(air, 'misión aérea', 'misiones aéreas') : ''].filter(Boolean);
+            const what = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} y ${parts[parts.length - 1]}` : parts[0];
             el.hidden = false;
-            el.innerHTML = `<span><b>${names}</b>: ${plural(moves, 'movimiento', 'movimientos')}${fights ? ` y ${plural(fights, 'ataque', 'ataques')}` : ''} propuestos.
+            el.innerHTML = `<span><b>${names}</b>: ${what} ${parts.length === 1 && air ? (air === 1 ? 'propuesta' : 'propuestas') : 'propuestos'}.
                 <span class="small muted">Toca un ejército para dejarlo fuera.</span></span>
                 <button class="btn primary" data-action="assist-yes">Confirmar y terminar el turno</button>
                 <button class="btn" data-action="assist-no">Terminar sin ellos</button>
@@ -8544,8 +8784,9 @@ class GameUI {
         else if (this.tool === 'cities') text = 'Ciudades: haz clic en tus provincias para añadirlas o quitarlas de la selección.';
         else if (this.tool === 'fort') text = this.anchor < 0 ? 'Fortificar: haz clic en una casilla tuya.' : 'Clic en otra casilla para fortificar la línea, o en la misma para solo esa. Clic derecho para terminar.';
         else if (this.tool === 'road') text = '';   // lo explica su panel
-        else if (this.proposal) text = 'Líneas blancas: lo que harían tus operaciones asistidas. Confirma, termina sin ellas o vuelve al turno.';
+        else if (this.proposal) text = 'Líneas blancas: lo que harían tus operaciones asistidas (en azul, sus misiones aéreas). Confirma, termina sin ellas o vuelve al turno.';
         else if (this.tool === 'op') text = `${OP_KINDS[this.opDraft.kind].name}: ${OP_KINDS[this.opDraft.kind].how}`;
+        else if (this.tool === 'air' && this.air.mode === 'zone') text = `Orden de zona: ${this.touch ? 'toca' : 'haz clic en'} el centro de la zona del escuadrón ${this.air.zoneSq}.${this.touch ? '' : ' Esc para cancelar.'}`;
         else if (this.tool === 'air') text = 'Aviación: elige uno de tus aeródromos y luego un blanco a su alcance. En tu territorio, construye aeródromos y antiaéreo.';
         else if (this.ordering) text = this.ordering.kind === 'follow' ? 'Haz clic en el ejército tuyo al que debe seguir. Esc para cancelar.'
             : `Haz clic en el destino: ${this.ordering.kind === 'attack' ? 'irá hasta allí y atacará lo que haya cuando tenga ventaja' : 'irá hasta allí aunque tarde varios turnos'}.${this.touch ? '' : ' Esc para cancelar.'}`;
@@ -8686,6 +8927,29 @@ class GameUI {
         if (op.kind === 'defensa') { const k = g.opNeed(op); return `${k} de sus ${plural(op.cells.length, 'casilla', 'casillas')} de línea ${k === 1 ? 'está' : 'están'} sin tropas; le ${k === 1 ? 'falta 1 ejército' : `faltan ${k} ejércitos`}, o acorta la línea`; }
         return `${plural(op.waiting, 'ejército espera', 'ejércitos esperan')} una ventaja de ${decimal(op.ratio)} a 1 que no tiene${op.waiting === 1 ? '' : 'n'}; dale más fuerzas o una postura más agresiva`;
     }
+    // Escuadrones sueltos del jugador (sin operación ni orden de zona) con el punto clave de la operación a su alcance.
+    freeSquadrons(op) {
+        const g = this.game, R = g.airRange(g.player), key = g.opKey(op);
+        return [...g.squadrons.values()].filter(q => q.owner === g.player && !q.op && !q.task && hexDist(q.base, key) <= R).sort((a, b) => a.id - b.id);
+    }
+    // Escuadrones de una operación y sus fines; la reserva no tiene fines: manda sus escuadrones a las que piden ayuda.
+    opAirSection(op) {
+        const g = this.game, p0 = g.player, R = g.airRange(p0), key = g.opKey(op), free = this.freeSquadrons(op).length;
+        const sqs = [...g.squadrons.values()].filter(q => q.op === op.id && q.owner === p0).sort((a, b) => a.id - b.id);
+        const rows = sqs.map(q => `<div class="op-member"><button class="link" data-action="air-open" data-cell="${q.base}" title="Abrir su aeródromo en la herramienta Aviación">Escuadrón ${q.id} · ${esc(g.placeName(q.base))}</button>
+            <span class="small muted">${this.squadronState(q)}${hexDist(q.base, key) > R ? ' · no llega a su punto clave' : ''}</span>
+            <button class="btn ghost" data-action="op-air-unassign" data-sq="${q.id}" title="Sacarlo de la operación" aria-label="Quitar">✕</button></div>`).join('');
+        const mode = op.auto === 'manual' ? ' En manual no vuelan.' : op.auto === 'asistida' ? ' En asistida vuelan al confirmar la propuesta.' : '';
+        const aims = op.kind === 'reserva' ? `<p class="note">La reserva no vuela: manda sus escuadrones, uno a cada operación que pide ayuda y tiene su objetivo o su línea a su alcance.${op.auto === 'manual' ? ' En manual no los manda.' : ''}</p>`
+            : `<p class="group-title">Fines de la aviación</p>
+            <div class="air-aims">${Object.entries(OP_AIMS).map(([k, v]) => `<label class="check small"><input type="checkbox" data-action="op-aim" data-id="${op.id}" data-aim="${k}" ${op.aims.includes(k) ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div>
+            <p class="note">${op.kind === 'ofensiva' ? 'Cada turno buscan blancos a 3 casillas del objetivo y a 2 de sus ejércitos; proteger escolta a los que van por mar.' : 'Cada turno buscan blancos a 3 casillas de la línea; proteger cubre sus casillas más amenazadas.'}
+                Solo atacan lo que conoces, y si la previsión da al menos un ${Math.round(AIR_MIN_HIT * 100)} % de acierto y poco riesgo de derribo.${mode}</p>`;
+        return `<p class="group-title">Escuadrones (${sqs.length})</p>
+            <div class="op-members">${rows || '<p class="note">Sin escuadrones. Añade los libres o dales este encargo desde su ficha de Aviación.</p>'}</div>
+            <button class="btn" style="margin-top:6px" data-action="op-add-air" data-id="${op.id}" ${free ? '' : 'disabled'}>Añadir ${free ? plural(free, 'escuadrón libre', 'escuadrones libres') : 'escuadrones libres'} a su alcance</button>
+            ${aims}`;
+    }
     // Pestaña Mando: operaciones del jugador y la abierta, con sus ejércitos y ajustes.
     renderCommand() {
         const g = this.game, p0 = g.player, body = $('#drawer-body'), ops = g.opsOf(p0), cap = g.commandCap(p0);
@@ -8733,6 +8997,7 @@ class GameUI {
                     <span class="small muted">${units(a)}${a.order ? ' · con orden propia' : ''}</span>
                     <button class="btn ghost" data-action="op-unassign" data-army="${a.id}" title="Sacarlo de la operación" aria-label="Quitar">✕</button></div>`).join('') || '<p class="note">Sin ejércitos. Añade los cercanos o asígnalos desde su ficha.</p>'}</div>
                 <button class="btn" style="margin-top:6px" data-action="op-add-near" data-id="${op.id}" ${near ? '' : 'disabled'}>Añadir los ${near || ''} ${op.kind === 'ofensiva' ? `libres a ${OP_GATHER_TURNS} turnos de marcha` : 'cercanos sin operación'}</button>
+                ${this.opAirSection(op)}
                 ${op.kind === 'reserva' ? '' : `<p class="group-title">Postura</p><div class="seg">${OP_STANCES.map(([v, l, t]) => `<button data-action="op-set" data-id="${op.id}" data-key="ratio" data-value="${v}" class="${op.ratio === v ? 'on' : ''}" title="${t}">${l}</button>`).join('')}</div>`}
                 <p class="group-title">Automatización</p>
                 <div class="seg">${OP_AUTO.map(([v, l, t]) => `<button data-action="op-set" data-id="${op.id}" data-key="auto" data-value="${v}" class="${op.auto === v ? 'on' : ''}" title="${t}">${l}</button>`).join('')}</div>
