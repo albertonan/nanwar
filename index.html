@@ -964,6 +964,7 @@ class GameEngine {
         this.broken = new Int8Array(G.N * 6);   // tramos rotos: la clase que tenían, en los dos sentidos
         this.fort = new Uint8Array(G.N);   // 1 = fortificación terminada
         this.fortWork = new Map();          // celda → { owner, left }: obras en curso
+        this.roadWork = new Map();          // tramo (edgeKey) → { owner, left, cls }: reparaciones en curso
         this.fortVersion = 0;
 
         this.owner = new Int16Array(G.N).fill(-1);
@@ -1035,6 +1036,7 @@ class GameEngine {
             settings: this.settings, logs: this.logs.slice(-150), proposals: this.proposals, proposed: [...this.proposedThisTurn],
             owner: runs, legal: compress(this.legal), dev: Array.from(this.dev), roads: this.roadEdges(), broken: this.brokenEdges(),
             forts: G.land.filter(i => this.fort[i]), fortWork: [...this.fortWork].map(([c, w]) => [c, w.owner, w.left]),
+            roadWork: [...this.roadWork].map(([k, w]) => [k, w.owner, w.left, w.cls]),
             spies: [...this.spies].map(([pid, s]) => [pid, s.since, s.revealedTurn]),
             sieges: [...this.sieges].map(([c, s]) => [c, s.by, s.prev, s.held]),
             nations: this.nations.map(n => ({ gold: n.gold, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord, templates: n.templates, command: n.command,
@@ -1121,6 +1123,14 @@ class GameEngine {
         }
         for (const c of list(data.forts)) g.fort[cellIdx(c)] = 1;
         g.fortWork = new Map(list(data.fortWork).map(w => [cellIdx(w?.[0]), { owner: nat(w?.[1]), left: int(w?.[2], 0, 100, 0) }]));
+        g.roadWork = new Map();
+        for (const w of list(data.roadWork)) {
+            const key = int(w?.[0], 0, G.N * 6 - 1, -1), cls = int(w?.[3], 1, 2, 0);
+            if (key < 0 || !cls) continue;
+            const u = Math.floor(key / 6), d = key % 6;
+            if (u >= G.N || G.nb[u * 6 + d] < 0 || edgeKey(u, d) !== key || !g.broken[u * 6 + d]) continue;   // solo sobre un tramo roto
+            g.roadWork.set(key, { owner: nat(w?.[1]), left: int(w?.[2], 0, 100, 0), cls });
+        }
         g.spies = new Map(list(data.spies).map(x => [provIdx(x?.[0]), { since: int(x?.[1], 0, 1e6, 0), revealedTurn: int(x?.[2], -1, 1e6, -1) }]));
         g.sieges = new Map(list(data.sieges).map(x => [cellIdx(x?.[0]), { by: nat(x?.[1]), prev: nat(x?.[2]), held: int(x?.[3], 0, CONFIG.SIEGE_TURNS, 0) }])
             .filter(([c]) => CITY_OF[c] >= 0));
@@ -1609,6 +1619,79 @@ class GameEngine {
         this.fortVersion++;
         return plan.cells.length;
     }
+    // Hay un ejército enemigo (en guerra) en `u`, en `v` o en sus vecinas: no se trabaja en el tramo.
+    repairBlocked(id, u, v) {
+        const foes = this.enemiesOf(id);
+        if (!foes.length) return false;
+        for (const c of [u, v]) {
+            for (let k = -1; k < 6; k++) {
+                const j = k < 0 ? c : G.nb[c * 6 + k];
+                const a = j >= 0 ? this.armyOn(j) : null;
+                if (a && foes.includes(a.owner)) return true;
+            }
+        }
+        return false;
+    }
+    // Tramos rotos de la casilla que `id` puede reparar: de su territorio, sin obra empezada y sin enemigos al lado.
+    // Cuesta la mitad de lo que costaría construirlos.
+    repairPlan(id, cell) {
+        if (cell < 0 || this.owner[cell] !== id) return null;
+        const edges = [], mult = this.rules(id).roadCost;
+        let cost = 0;
+        for (let d = 0; d < 6; d++) {
+            const cls = this.broken[cell * 6 + d], v = G.nb[cell * 6 + d];
+            if (!cls || v < 0 || this.owner[v] !== id || this.roadWork.has(edgeKey(cell, d)) || this.repairBlocked(id, cell, v)) continue;
+            edges.push([cell, d]);
+            cost += this.roadEdgeCost(cell, d, cls, mult) / 2;
+        }
+        return edges.length ? { edges, cost: Math.round(cost), cls: 'repair' } : null;
+    }
+    // Pone en obra los tramos del plan y cobra; devuelve cuántos.
+    startRepair(id, plan) {
+        const n = this.nations[id];
+        if (!plan?.edges?.length || plan.cost > n.gold) return 0;
+        let started = 0;
+        for (const [u, d] of plan.edges) {
+            const cls = this.broken[u * 6 + d], key = edgeKey(u, d);
+            if (!cls || this.roadWork.has(key) || this.owner[u] !== id || this.owner[G.nb[u * 6 + d]] !== id) continue;
+            this.roadWork.set(key, { owner: id, left: this.rules(id).fortTurns, cls });
+            started++;
+        }
+        if (!started) return 0;
+        n.gold -= plan.cost;
+        return started;
+    }
+    playerRepair(plan) {
+        if (this.over || !plan) return false;
+        if (plan.cost > this.nations[this.player].gold) { this.log(`Fondos insuficientes: la reparación cuesta ${plan.cost}g.`); return false; }
+        const n = this.startRepair(this.player, plan);
+        if (n) this.log(`Reparas ${plural(n, 'tramo', 'tramos')} de carretera por ${plan.cost}g.`);
+        return n > 0;
+    }
+    // La IA repara primero lo que toca ciudades o yacimientos y luego el resto, hasta agotar el presupuesto; devuelve el oro gastado.
+    aiRepairRoads(id, budget) {
+        const todo = [];
+        for (const c of G.land) {
+            if (this.owner[c] !== id) continue;
+            for (let d = 0; d < 3; d++) {
+                if (!this.broken[c * 6 + d]) continue;
+                const v = G.nb[c * 6 + d], key = edgeKey(c, d);
+                if (v < 0 || this.owner[v] !== id || this.roadWork.has(key)) continue;
+                const hot = CITY_OF[c] >= 0 || CITY_OF[v] >= 0 || RESOURCE_AT.has(c) || RESOURCE_AT.has(v);
+                todo.push({ c, d, hot });
+            }
+        }
+        todo.sort((x, y) => y.hot - x.hot);
+        let spent = 0;
+        for (const { c, d } of todo) {
+            const v = G.nb[c * 6 + d];
+            if (this.repairBlocked(id, c, v)) continue;
+            const cost = Math.round(this.roadEdgeCost(c, d, this.broken[c * 6 + d], this.rules(id).roadCost) / 2);
+            if (cost > budget - spent) break;
+            if (this.startRepair(id, { edges: [[c, d]], cost, cls: 'repair' })) spent += cost;
+        }
+        return spent;
+    }
     // Al tomar una casilla por la fuerza se rompen sus carreteras y se arrasa su fortificación.
     wreck(cell, prev, a) {
         const cut = this.breakRoads(cell) > 0;
@@ -1635,7 +1718,7 @@ class GameEngine {
             this.road[a * 6 + d] = plan.cls;
             this.road[b * 6 + (d + 3) % 6] = plan.cls;
             this.broken[a * 6 + d] = 0; this.broken[b * 6 + (d + 3) % 6] = 0;
-            this.roadWork?.delete(edgeKey(a, d));   // la obra de reparación (si la hay) sobra
+            this.roadWork.delete(edgeKey(a, d));   // la obra de reparación (si la hay) sobra
             built++;
         }
         if (!built) return 0;
@@ -2816,6 +2899,14 @@ class GameEngine {
                 if (id === this.player) this.log(`Directiva: se fortifica ${this.placeName(cell)}.`);
             }
         }
+        // Reparar los tramos rotos antes de construir nada nuevo.
+        if (c.pools.roads > 0) {
+            const before = this.roadWork.size, spent = this.aiRepairRoads(id, Math.min(c.pools.roads, n.gold));
+            if (spent) {
+                c.pools.roads -= spent;
+                if (id === this.player) this.log(`Directiva: se reparan ${plural(this.roadWork.size - before, 'tramo', 'tramos')}.`);
+            }
+        }
         // Carreteras hasta la ciudad más valiosa que aún no esté unida a la capital.
         if (c.pools.roads >= CONFIG.ROAD_COST * 2 && this.owner[n.capitalCell] === id) {
             const e = this.economy(id), loose = this.citiesOf(id).filter(p => !e.connected.has(p.id)).sort((x, y) => y.value - x.value)[0];
@@ -3510,6 +3601,22 @@ class GameEngine {
         if (done) {
             this.fortVersion++;
             if (id === this.player) this.log(`Fortificación terminada en ${done} casilla${done > 1 ? 's' : ''}.`);
+        }
+        let fixed = 0;
+        for (const [key, w] of [...this.roadWork]) {
+            if (w.owner !== id) continue;
+            const u = Math.floor(key / 6), d = key % 6, v = G.nb[u * 6 + d];
+            if (this.owner[u] !== id || this.owner[v] !== id || !this.broken[u * 6 + d]) { this.roadWork.delete(key); continue; }
+            if (this.repairBlocked(id, u, v)) continue;
+            if (--w.left <= 0) {
+                this.road[u * 6 + d] = w.cls; this.road[v * 6 + (d + 3) % 6] = w.cls;
+                this.broken[u * 6 + d] = 0; this.broken[v * 6 + (d + 3) % 6] = 0;
+                this.roadWork.delete(key); fixed++;
+            }
+        }
+        if (fixed) {
+            this.roadVersion++;
+            if (id === this.player) this.log(`Reparados ${plural(fixed, 'tramo', 'tramos')} de carretera.`);
         }
         this.nations[id].recruited.clear();
         if (id === this.player) this.spyTurn();
@@ -4267,6 +4374,7 @@ class GameEngine {
         const atWar = this.enemiesOf(id).length > 0;
         const n = this.nations[id], budget = atWar ? n.gold * 0.5 : n.gold - this.aiReserve(id) * 0.5;
         if (budget < CONFIG.ROAD_COST * 2) return;
+        const spent = this.aiRepairRoads(id, budget * 0.7);   // antes de las ruinas de la capital: arreglar vale aunque se haya perdido
         const e = this.economy(id);
         const cap = n.capitalCell;
         if (this.owner[cap] !== id) return;
@@ -4277,7 +4385,7 @@ class GameEngine {
         const loose = targets[0];
         if (!loose) return;
         const plan = this.planRoad(id, loose.cell, c => e.seen[c] === 1, 1);
-        if (plan && plan.cost <= budget * 0.7) this.buildRoad(id, plan);
+        if (plan && plan.cost <= budget * 0.7 - spent) this.buildRoad(id, plan);
     }
 }
 
