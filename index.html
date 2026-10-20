@@ -573,6 +573,7 @@ const CONFIG = {
     SURROUNDED_FACTOR: 0.5,         // ... ataque y defensa a la mitad y solo avanza una casilla
     HUNGER_TURNS: 3,                // turnos seguidos cercado en tierra ocupada para perder una unidad por hambre
     ISOLATED_FACTOR: 0.9,           // fuera de una ciudad y sin ejércitos propios o aliados al lado: ataque y defensa ×0,9
+    EMBARKED_DEF: 0.25,             // un ejército embarcado defiende a un cuarto: en el mar no hay dónde cubrirse
     NO_ROAD_FACTOR: 0.85,           // en territorio enemigo sin carretera intacta al alcance de un turno: ×0,85
     SIEGE_TURNS: 3,                 // turnos con tropas en una ciudad ajena para tomarla
     CAPITAL_LOST_RESOURCES: 0.5,    // sin su capital, un país saca la mitad de sus yacimientos e industria
@@ -684,7 +685,9 @@ const baseRules = () => ({
     spyCost: CONFIG.SPY_COST, spySuccess: CONFIG.SPY_SUCCESS, spySuccessHard: CONFIG.SPY_SUCCESS_HARD,
     spyCatchBase: CONFIG.SPY_CATCH_BASE, spyCatchPerTurn: CONFIG.SPY_CATCH_PER_TURN, spyCatchMax: CONFIG.SPY_CATCH_MAX,
     spyWide: false,                      // el espía informa también de las provincias vecinas y de galones, muros e investigación
-    commandOps: 3                        // operaciones a la vez (más una por cada 20 provincias)
+    commandOps: 3,                       // operaciones a la vez (más una por cada 20 provincias)
+    seaSpeed: 6,                         // casillas por turno de un ejército embarcado
+    amphibious: 0.5                      // ataque al desembarcar en una costa enemiga
 });
 
 const BASE_RULES = baseRules();
@@ -877,6 +880,7 @@ const G = (() => {
         width: W * (cols + 0.5), height: STEP * (rows - 1) + 2 * S, x0, y0 };
 })();
 const isLand = i => G.prov[i] >= 0;
+const afloat = i => !isLand(i);   // en el mar (o en un lago): donde solo se navega
 // Clave canónica de un tramo (los dos sentidos comparten): casilla de índice menor * 6 + su dirección.
 const edgeKey = (u, d) => { const v = G.nb[u * 6 + d]; return v >= 0 && v < u ? v * 6 + (d + 3) % 6 : u * 6 + d; };
 
@@ -898,6 +902,15 @@ for (let k = 0; k + 1 < (E.riverEdges ?? []).length; k += 2) {
 }
 const CITY_OF = new Int16Array(G.N).fill(-1);     // celda → provincia de la que es ciudad
 for (const p of PROVINCES) CITY_OF[p.city] = p.id;
+const SEA_PROV = new Int16Array(G.N).fill(-1);     // celda → provincia de la tierra más cercana (la suya, si es tierra)
+{
+    const queue = [];
+    for (const i of G.land) { SEA_PROV[i] = G.prov[i]; queue.push(i); }
+    for (let k = 0; k < queue.length; k++) {
+        const c = queue[k];
+        for (let d = 0; d < 6; d++) { const j = G.nb[c * 6 + d]; if (j >= 0 && SEA_PROV[j] < 0) { SEA_PROV[j] = SEA_PROV[c]; queue.push(j); } }
+    }
+}
 const CAPITAL_OF = new Int16Array(G.N).fill(-1);  // celda → país del que es capital
 E.countries.forEach((c, i) => { CAPITAL_OF[PROVINCES[c.capital].city] = i; });
 const START_PROVINCES = E.countries.map((c, i) => E.provinces.filter(p => p.country === i).length);
@@ -1192,7 +1205,7 @@ class GameEngine {
         const moveScale = data.move === MOVE ? 1 : MOVE / 6;
         for (const x of list(data.armies)) {
             const id = int(x?.[0], 1, 1e9, 1), cell = cellIdx(x?.[2]);
-            if (!isLand(cell) || g.armyAt[cell] || g.armies.has(id)) continue;
+            if (g.armyAt[cell] || g.armies.has(id)) continue;
             g.armies.set(id, { id, owner: nat(x?.[1]), cell, units: { infantry: int(x?.[3], 0, 1e6, 0), tank: int(x?.[4], 0, 1e6, 0), artillery: int(x?.[5], 0, 1e6, 0) }, used: Math.min(999, int(x?.[6], 0, 999, 0) * (x?.[6] >= 999 ? 1 : moveScale)), from: 0, hunger: int(x?.[7], 0, 99, 0) });
             g.armyAt[cell] = id;
         }
@@ -1754,7 +1767,7 @@ class GameEngine {
         let n = 0;
         for (let d = 0; d < 6; d++) {
             const j = G.nb[cell * 6 + d];
-            if (j >= 0 && this.armyAt[j] && this.atWar(owner, this.armies.get(this.armyAt[j]).owner)) n++;
+            if (j >= 0 && isLand(j) && this.armyAt[j] && this.atWar(owner, this.armies.get(this.armyAt[j]).owner)) n++;
         }
         return n;
     }
@@ -1770,7 +1783,7 @@ class GameEngine {
     isolated(owner, cell, selfId = 0) {
         if (CITY_OF[cell] >= 0) return false;
         for (let d = 0; d < 6; d++) {
-            const j = G.nb[cell * 6 + d], id = j >= 0 ? this.armyAt[j] : 0;
+            const j = G.nb[cell * 6 + d], id = j >= 0 && isLand(j) ? this.armyAt[j] : 0;   // un barco no es apoyo
             if (!id || id === selfId) continue;
             const o = this.armies.get(id).owner;
             if (o === owner || this.allied(owner, o)) return false;
@@ -1810,6 +1823,7 @@ class GameEngine {
     // Lo que pesa la situación de un ejército en su ataque y su defensa: rodeado o cercado, aislado y, en territorio
     // enemigo, sin carretera al alcance. Cada parte es [nombre, factor] y `mult` es su producto.
     armyState(owner, cell, units, selfId = 0) {
+        if (afloat(cell)) return { mult: 1, parts: [] };   // en el mar no hay rodeo, aislamiento ni carretera
         const parts = [], flank = this.flankFactor(owner, cell);
         if (flank < 1) parts.push([this.hostileSides(owner, cell) >= CONFIG.SURROUNDED_SIDES ? 'cercado' : 'rodeado', flank]);
         if (this.isolated(owner, cell, selfId)) parts.push(['aislado', CONFIG.ISOLATED_FACTOR]);
@@ -1817,6 +1831,7 @@ class GameEngine {
         return { mult: parts.reduce((m, [, x]) => m * x, 1), parts };
     }
     moveBudget(owner, cell, units, used) {
+        if (afloat(cell)) return Math.max(0, this.rules(owner).seaSpeed * MOVE - used);
         if (!this.inSupply(owner, cell)) return Math.max(0, 1 - used);
         const sides = this.hostileSides(owner, cell);
         if (sides >= CONFIG.SURROUNDED_SIDES) return Math.max(0, 1 - used);   // cercado: solo el paso mínimo
@@ -3110,7 +3125,7 @@ class GameEngine {
     zoc(cell, a) {
         for (let d = 0; d < 6; d++) {
             const j = G.nb[cell * 6 + d];
-            if (j >= 0 && this.armyAt[j] && this.atWar(a, this.armies.get(this.armyAt[j]).owner)) return true;
+            if (j >= 0 && isLand(j) && this.armyAt[j] && this.atWar(a, this.armies.get(this.armyAt[j]).owner)) return true;
         }
         return false;
     }
