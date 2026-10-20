@@ -571,6 +571,7 @@ const CONFIG = {
     FLANKED_FACTOR: 0.75,           // ... ataque y defensa ×0,75 y mueve la mitad
     SURROUNDED_SIDES: 5,            // con 5 o más lados: cercado...
     SURROUNDED_FACTOR: 0.5,         // ... ataque y defensa a la mitad y solo avanza una casilla
+    HUNGER_TURNS: 3,                // turnos seguidos cercado en tierra ocupada para perder una unidad por hambre
     SIEGE_TURNS: 3,                 // turnos con tropas en una ciudad ajena para tomarla
     CAPITAL_LOST_RESOURCES: 0.5,    // sin su capital, un país saca la mitad de sus yacimientos e industria
     LOOT_FACTOR: 2,                 // saqueo al tomar una ciudad: 2 × el peso de la provincia en la renta del defensor...
@@ -667,6 +668,7 @@ const baseRules = () => ({
     ignoreRiver: false,                 // al atacar, el defensor no tiene la orilla a favor
     flanked: CONFIG.FLANKED_FACTOR, surrounded: CONFIG.SURROUNDED_FACTOR,
     siegeTurns: CONFIG.SIEGE_TURNS,
+    hungerTurns: CONFIG.HUNGER_TURNS,
     winnerLoss: 1,                      // multiplicador de las pérdidas al ganar un combate
     recruitAll: 0, capitalRecruit: 2, highwayRecruit: 1, recruitMult: 1,
     researchTurns: 1, researchCost: 1, labs: 1,
@@ -719,7 +721,7 @@ const TECH_TREE = {
     doctrina: [
         ['Mando y control', { flanked: 0.85, surrounded: 0.65, commandOps: 4 }, [['Rodeado (3 o más lados)', '×0,75', '×0,85'], ['Cercado (5 o más lados)', '×0,5', '×0,65'], ['Operaciones a la vez', '3', '4']], 'Suaviza la penalización de los ejércitos rodeados sin anularla.'],
         ['Guerra de asedio', { siegeTurns: 2, commandOps: 5 }, [['Turnos para tomar una ciudad', '3', '2'], ['Operaciones a la vez', '4', '5']], 'Las ciudades caen antes de que llegue la ayuda.'],
-        ['Sanidad militar', { winnerLoss: 0.7, commandOps: 6 }, [['Pérdidas al ganar un combate', '100 %', '70 %'], ['Operaciones a la vez', '5', '6']], 'Ganar sale más barato: los ejércitos veteranos duran más campañas.']
+        ['Sanidad militar', { winnerLoss: 0.7, hungerTurns: 4, commandOps: 6 }, [['Pérdidas al ganar un combate', '100 %', '70 %'], ['Sin víveres: pierde una unidad cada', '3 turnos', '4 turnos'], ['Operaciones a la vez', '5', '6']], 'Ganar sale más barato: los ejércitos veteranos duran más campañas.']
     ],
     movilizacion: [
         ['Servicio militar', { recruitAll: 1 }, [['Reclutas por turno en cada provincia', 'base', 'base +1']], 'Aparece como «investigación +1» en el desglose de reclutas.'],
@@ -1037,7 +1039,7 @@ class GameEngine {
             nations: this.nations.map(n => ({ gold: n.gold, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord, templates: n.templates, command: n.command,
                 tech: { done: [...n.tech.done], progress: [...n.tech.progress], current: [...n.tech.current] } })),
             relations,
-            armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used]),
+            armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used, a.hunger || 0]),
             nextArmyId: this.nextArmyId,
             ops: [...this.ops.values()].map(o => ({ id: o.id, owner: o.owner, kind: o.kind, name: o.name, cells: o.cells, ratio: o.ratio, auto: o.auto,
                 paused: o.paused, fortify: o.fortify, since: o.since, waiting: o.waiting, front: o.front ?? -1, drawn: o.drawn, state: o.state, rel: o.rel, gold: o.gold, extra: o.extra ?? 0, poolTurn: o.poolTurn ?? 0, template: o.template, pool: o.pool, formed: o.formed,
@@ -1165,7 +1167,7 @@ class GameEngine {
         for (const x of list(data.armies)) {
             const id = int(x?.[0], 1, 1e9, 1), cell = cellIdx(x?.[2]);
             if (!isLand(cell) || g.armyAt[cell] || g.armies.has(id)) continue;
-            g.armies.set(id, { id, owner: nat(x?.[1]), cell, units: { infantry: int(x?.[3], 0, 1e6, 0), tank: int(x?.[4], 0, 1e6, 0), artillery: int(x?.[5], 0, 1e6, 0) }, used: Math.min(999, int(x?.[6], 0, 999, 0) * (x?.[6] >= 999 ? 1 : moveScale)), from: 0 });
+            g.armies.set(id, { id, owner: nat(x?.[1]), cell, units: { infantry: int(x?.[3], 0, 1e6, 0), tank: int(x?.[4], 0, 1e6, 0), artillery: int(x?.[5], 0, 1e6, 0) }, used: Math.min(999, int(x?.[6], 0, 999, 0) * (x?.[6] >= 999 ? 1 : moveScale)), from: 0, hunger: int(x?.[7], 0, 99, 0) });
             g.armyAt[cell] = id;
         }
         g.nextArmyId = Math.max(int(data.nextArmyId, 1, 1e9, 1), ...[...g.armies.keys()].map(x => x + 1), 1);
@@ -1623,7 +1625,7 @@ class GameEngine {
 
     // --- Ejércitos ---
     newArmy(owner, cell, units, used) {
-        const a = { id: this.nextArmyId++, owner, cell, units: copyUnits(units), used, from: 0 };
+        const a = { id: this.nextArmyId++, owner, cell, units: copyUnits(units), used, from: 0, hunger: 0 };
         this.armies.set(a.id, a);
         return a;
     }
@@ -1653,6 +1655,34 @@ class GameEngine {
         return Math.max(0, Math.floor(full) - used);
     }
     mp(a) { return this.moveBudget(a.owner, a.cell, a.units, a.used); }
+    // Sin víveres: en tierra ocupada (no legalmente suya) y sin ninguna casilla de tierra propia o aliada al lado
+    // (el mar no alimenta a nadie). Una casilla legal propia o una vecina propia bastan para comer.
+    starving(owner, cell) {
+        if (this.owner[cell] === owner && this.legal[cell] === owner) return false;
+        for (let d = 0; d < 6; d++) {
+            const j = G.nb[cell * 6 + d];
+            if (j >= 0 && isLand(j) && (this.owner[j] === owner || this.allied(owner, this.owner[j]))) return false;
+        }
+        return true;
+    }
+    // Turnos que faltan para perder la próxima unidad, o null si el ejército no pasa hambre.
+    hungerLeft(a) { return this.starving(a.owner, a.cell) ? Math.max(1, this.rules(a.owner).hungerTurns - (a.hunger || 0)) : null; }
+    // Al empezar el turno del país: el ejército sin víveres cuenta un turno más y, al llegar al límite, pierde una unidad.
+    feedArmies(id) {
+        for (const a of [...this.armies.values()]) {
+            if (a.owner !== id) continue;
+            if (!this.starving(id, a.cell)) { a.hunger = 0; continue; }
+            if (++a.hunger < this.rules(id).hungerTurns) continue;
+            a.hunger = 0;
+            const k = ['infantry', 'artillery', 'tank'].find(u => a.units[u] > 0);
+            a.units[k]--;
+            const where = this.placeName(a.cell), gone = countUnits(a.units) === 0;
+            if (gone) this.removeArmy(a);
+            if (id === this.player) this.log(`Tu ejército en ${where} pasa hambre: pierde ${k === 'infantry' ? 'una infantería' : k === 'tank' ? 'un tanque' : 'una artillería'}${gone ? ' y se disuelve' : ''}.`);
+            else if (this.sees(this.player, a.cell)) this.log(`El ejército enemigo en ${where} pierde una unidad por hambre.`);
+            this.armyVersion++;
+        }
+    }
     armyOn(cell) { const id = this.armyAt[cell]; return id ? this.armies.get(id) : null; }
     removeArmy(a) {
         this.armyVersion++;
@@ -3477,6 +3507,7 @@ class GameEngine {
 
     beginNationTurn(id) {
         for (const a of this.armies.values()) if (a.owner === id) a.used = 0;
+        this.feedArmies(id);
         this.advanceResearch(id);
         let done = 0;
         for (const [c, w] of this.fortWork) {
