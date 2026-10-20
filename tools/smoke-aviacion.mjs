@@ -1309,6 +1309,144 @@ const CHECKS = [
     T.ok(['aviacion1', 'antiaerea1'].includes(g.aiTechChoice(fr)), 'en guerra con aviación');
     return true;
 }],
+['10 · la tropa Antiaérea: 250 de oro, ataque 2, defensa 3, velocidad 4, y solo con Defensa aérea 3', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es); g.nations[es].gold = 5000;
+    const p = PROVINCES.find(x => x.city === g.nations[es].capitalCell);
+    T.ok(!g.recruit(es, p, 'antiair'), 'sin investigar, no');
+    T.learn(g, es, 'antiaerea1', 'antiaerea2', 'antiaerea3');
+    T.ok(g.recruit(es, p, 'antiair'), 'con Defensa aérea 3');
+    T.eq([CONFIG.TYPES.antiair.cost, g.rules(es).types.antiair], [250, { atk: 2, def: 3, speed: 4 }], 'tropa');
+    return true;
+}],
+['10 · protege su casilla y las vecinas con la mitad de un sitio por unidad', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr), nb = [0, 1, 2, 3, 4, 5].map(d => G.nb[target * 6 + d]).find(j => j >= 0 && isLand(j) && g.owner[j] === fr && !g.armyAt[j]);
+    if (g.armyOn(target)) g.removeArmy(g.armyOn(target));
+    g.settle(g.newArmy(fr, nb, { infantry: 2, antiair: 2 }, 0));
+    T.eq(g.aaCover(es, [base], target).fire, 10, 'dos unidades al lado: 2 × 0,5 × 10');
+    return true;
+}],
+['10 · en el mar protege al barco que la lleva', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [, s] = T.coast(g, fr, { near: g.nations[es].capitalCell }), base = T.baseFor(g, es, s);
+    g.settle(g.newArmy(fr, s, { infantry: 6, antiair: 2 }, 0));
+    T.eq(g.aaCover(es, [base], s).fire, 10, 'convoy con antiaéreo');
+    return true;
+}],
+['10 · con niebla, el antiaéreo móvil solo se conoce si se conoce el ejército que lo lleva', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [land, s] = T.coast(g, fr, { near: g.nations[es].capitalCell }), base = T.baseFor(g, es, s);
+    g.settle(g.newArmy(fr, s, { infantry: 6, antiair: 2 }, 0));
+    g.settle(g.newArmy(es, land, { infantry: 1 }, 0));   // con la casilla de mar a la vista
+    const blind = g.aaCover(es, [base], s);
+    T.eq([blind.fire, blind.seen.fire, blind.unknown], [10, 0, true], 'no sabe qué lleva el barco');
+    g.airSeen.set(es * G.N + s, g.turn);   // una misión suya este turno: sabe qué hay
+    const known = g.aaCover(es, [base], s);
+    T.eq([known.seen.fire, known.unknown], [10, false], 'lo conoce');
+    return true;
+}],
+['10 · destruir antiaéreo contra un ejército le quita sus antiaéreas', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const sq = T.squad(g, es, base, 3);
+    if (g.armyOn(target)) g.removeArmy(g.armyOn(target));
+    const a = g.settle(g.newArmy(fr, target, { infantry: 4, antiair: 4 }, 0)); T.luck(g, 0.99);
+    g.airMission(es, sq.map(s => s.id), 'aa', target);
+    T.eq([a.units.antiair, a.units.infantry], [3, 4], 'una menos');
+    return true;
+}],
+['10 · en el mar, destruir antiaéreo le quita el doble', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [, s] = T.coast(g, fr, { near: g.nations[es].capitalCell }), base = T.baseFor(g, es, s);
+    T.airfield(g, es, base); const sq = T.squad(g, es, base, 3);
+    const a = g.settle(g.newArmy(fr, s, { infantry: 2, antiair: 4 }, 0)); T.luck(g, 0.99);
+    T.eq(g.airMission(es, sq.map(q => q.id), 'aa', s).result, 'hit', 'acierta');
+    T.eq([a.units.antiair, a.units.infantry], [2, 2], 'dos menos: 4 × 0,25 × 2');
+    return true;
+}],
+['10 · se guarda; las partidas, plantillas y ejércitos de antes cargan con 0 antiaéreas', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    const [, c] = T.plainPair(g, es), a = g.settle(g.newArmy(es, c, { infantry: 1, antiair: 3 }, 0));
+    const data = JSON.parse(JSON.stringify(g.serialize()));
+    T.eq(GameEngine.load(JSON.parse(JSON.stringify(data))).armies.get(a.id).units.antiair, 3, 'se guarda');
+    for (const x of data.armies) x.length = 8;
+    const h = GameEngine.load(data);
+    T.ok([...h.armies.values()].every(x => x.units.antiair === 0) && Object.values(TEMPLATES).every(t => t.units.antiair === 0), 'antiguas con 0');
+    T.eq(countUnits({ infantry: 2, tank: 1, artillery: 0 }), 3, 'una clave que falta vale 0');
+    return true;
+}],
+['10 · un ejército sin la clave nueva se divide, se une, combate y pasa hambre', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(es, fr);
+    const [from, c] = T.plainPair(g, es), a = g.settle(g.newArmy(es, c, { infantry: 3 }, 0));
+    a.units = { infantry: 3, tank: 1, artillery: 0 };   // como en las pruebas y partidas de antes
+    const b = g.split(a, { infantry: 1, tank: 0, artillery: 0 });
+    T.eq([countUnits(a.units), countUnits(b.units), b.units.antiair], [3, 1, 0], 'se divide');
+    g.settle(b);
+    T.eq(countUnits(g.armyOn(c).units), 4, 'se une');
+    T.ok(UNIT_KEYS.every(k => Number.isFinite(g.armyOn(c).units[k] ?? 0)), 'sin NaN');
+    const lost = g.applyLosses({ infantry: 4, tank: 0, artillery: 0 }, 0.5, true);
+    T.ok(UNIT_KEYS.every(k => Number.isFinite(lost[k])), 'bajas sin NaN');
+    const e = g.settle(g.newArmy(fr, from, { antiair: 1 }, 0));
+    e.hunger = 99; g.starving = () => true;
+    g.feedArmies(fr);
+    T.ok(!g.armies.has(e.id), 'pierde su antiaérea por hambre');
+    return true;
+}],
+['10 · la IA con Defensa aérea 3 recluta alguna antiaérea contra un enemigo con aviación', () => {
+    const run = learn => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(fr, es);
+        if (learn) T.learn(g, fr, 'antiaerea1', 'antiaerea2', 'antiaerea3');
+        g.nations[fr].gold = 3000; T.luck(g, 0.97);
+        g.aiRecruit(fr);
+        return [...g.armies.values()].some(a => a.owner === fr && a.units.antiair > 0);
+    };
+    T.ok(!run(false), 'sin Defensa aérea 3, no');
+    T.ok(run(true), 'con ella, sí');
+    return true;
+}],
+['10 · el reclutamiento y el editor de plantillas enseñan la Antiaérea solo con Defensa aérea 3', () => {
+    const g = T.uiStart('es'), es = g.player, cap = g.nations[es].capitalCell;
+    const has = sel => !!document.querySelector(sel);
+    ui.select(cap); ui.render();
+    T.ok(has('[data-action="recruit"][data-unit="tank"]') && !has('[data-action="recruit"][data-unit="antiair"]'), 'sin investigar, no sale');
+    T.learn(g, es, 'antiaerea1', 'antiaerea2', 'antiaerea3'); ui.render();
+    T.ok(has('[data-action="recruit"][data-unit="antiair"]'), 'con Defensa aérea 3, sale');
+    ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+    T.ok(has('[data-action="tpl-step"][data-unit="antiair"]'), 'en el editor de plantillas');
+    return true;
+}],
+['10 · su ficha lleva el símbolo de defensa aérea, también embarcada', () => {
+    T.ok(NATO_MARK.antiair && /path|ellipse/.test(NATO_MARK.antiair), 'cúpula APP-6');
+    const g = T.uiStart('es'), es = g.player;
+    const [, c] = T.plainPair(g, es), [, s] = T.coast(g, es);
+    g.settle(g.newArmy(es, c, { antiair: 3 }, 0)); g.settle(g.newArmy(es, s, { infantry: 1, antiair: 2 }, 0));
+    // Se espía el dibujo: cada ficha antiaérea tiene que trazar media elipse (la cúpula) con la base abajo.
+    const v = ui.view, ctx = v.ctx, ellipse = ctx.ellipse, drawn = [];
+    let domes = 0;
+    ctx.ellipse = function (...args) { if (args[5] === Math.PI && args[6] === 0) domes++; return ellipse.apply(this, args); };
+    v.drawCounter = function (t, ...rest) {
+        const before = domes;
+        MapView.prototype.drawCounter.call(this, t, ...rest);
+        if (t.type === 'antiair') drawn.push([!!t.afloat, domes > before]);
+    };
+    try {
+        v.setMode('sencilla');
+        for (const cell of [c, s]) { v.centerOn(cell, 10); v.draw(); }
+    } finally { delete v.drawCounter; delete ctx.ellipse; }
+    T.ok(drawn.some(([sea, dome]) => !sea && dome), `en tierra, con la cúpula: ${JSON.stringify(drawn)}`);
+    T.ok(drawn.some(([sea, dome]) => sea && dome), `en el mar, con la cúpula: ${JSON.stringify(drawn)}`);
+    T.ok(drawn.every(([, dome]) => dome), 'todas con la cúpula');
+    return true;
+}],
 ['M · con seis guerras, la fase de la IA con aviación tarda como mucho 1,25 veces lo mismo sin ella', () => {
     const run = bare => {
         const g = T.game(11); g.start(T.nation('us'));
@@ -1434,6 +1572,56 @@ try {
         const state = await page.evaluate(() => ui.view.realistic.state);
         if (state !== 'ready' || page.errors.length) { failed++; console.log(`FALLA ${MAP_SHOTS}\n      vista realista: ${state}; ${page.errors.join('; ')}`); }
         else console.log(`ok    ${MAP_SHOTS} (${join(out, 'aviacion-sencilla.png')}, aviacion-realista.png)`);
+        await page.close();
+    }
+    // Capturas de ejércitos con antiaéreas en las dos vistas: uno solo de antiaéreas, uno mixto y otro embarcado, con la
+    // cobertura del móvil enemigo que se conoce en la herramienta Aviación.
+    const AA_SHOTS = '10 · capturas de la antiaérea en las dos vistas';
+    if (!filter || AA_SHOTS.includes(filter)) {
+        ran++;
+        const out = join(root, 'tools/cache/smoke');
+        mkdirSync(out, { recursive: true });
+        const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+        page.errors = [];
+        page.on('pageerror', e => page.errors.push(e.message));
+        await page.goto(`http://localhost:${port}/?seed=7&mapa=europa`);
+        await page.waitForFunction(() => typeof GameEngine === 'function' && typeof ui === 'object');
+        await page.evaluate(setup);
+        await page.evaluate(() => {
+            const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+            g.declareWar(es, fr); T.learn(g, es, 'antiaerea1', 'antiaerea2', 'antiaerea3');
+            const [land, s] = T.coast(g, fr, { near: g.nations[es].capitalCell }), near = [0, 1, 2, 3, 4, 5].map(d => G.nb[land * 6 + d]);
+            const free = near.filter(j => j >= 0 && isLand(j) && !g.armyAt[j]);
+            g.settle(g.newArmy(fr, s, { infantry: 4, antiair: 2 }, 0));
+            g.settle(g.newArmy(fr, free[0], { antiair: 3 }, 0));
+            g.settle(g.newArmy(fr, free[1] ?? land, { infantry: 2, tank: 1, antiair: 2 }, 0));
+            const base = T.baseFor(g, es, s);
+            if (!g.airfields.has(base)) T.airfield(g, es, base);
+            T.squad(g, es, base, 1);
+            ui.setTool('air'); ui.clickCell(base);
+            window.SHOT = { at: land };
+        });
+        await page.waitForFunction(() => ui.view.realistic.state === 'ready' || ui.view.realistic.state === 'failed', null, { timeout: 60000 });
+        const shot = async (name, mode) => {
+            await page.evaluate(m => new Promise(r => {
+                ui.view.setMode(m); ui.view.scale = 1; ui.view.centerOn(SHOT.at, 40); ui.view.ox += 170;
+                ui.render(); ui.view.draw(); requestAnimationFrame(() => requestAnimationFrame(r));
+            }), mode);
+            await page.waitForTimeout(800);
+            await page.screenshot({ path: join(out, `${name}.png`) });
+        };
+        await shot('antiaerea-sencilla', 'sencilla');
+        await shot('antiaerea-realista', 'realista');
+        // La ficha de la capital con los cuatro botones de reclutar, en el escritorio y en el móvil.
+        await page.evaluate(() => { ui.setTool('command'); ui.select(ui.game.nations[ui.game.player].capitalCell); ui.render(); document.querySelector('#card .recruit').scrollIntoView({ block: 'center' }); });
+        await page.screenshot({ path: join(out, 'antiaerea-ficha.png') });
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.evaluate(() => { ui.drawerOpen = false; ui.render(); document.querySelector('#card .recruit').scrollIntoView({ block: 'center' }); });
+        await page.waitForTimeout(300);
+        await page.screenshot({ path: join(out, 'antiaerea-ficha-movil.png') });
+        const state = await page.evaluate(() => ui.view.realistic.state);
+        if (state !== 'ready' || page.errors.length) { failed++; console.log(`FALLA ${AA_SHOTS}\n      vista realista: ${state}; ${page.errors.join('; ')}`); }
+        else console.log(`ok    ${AA_SHOTS} (${join(out, 'antiaerea-sencilla.png')}, antiaerea-realista.png, antiaerea-ficha.png, antiaerea-ficha-movil.png)`);
         await page.close();
     }
     for (const page of pages.values()) if (page.errors.length) { failed++; console.log(`FALLA errores en la página:\n      ${page.errors.join('\n      ')}`); }

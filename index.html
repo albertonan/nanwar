@@ -156,7 +156,7 @@
         .meter i { display: block; height: 100%; background: var(--go); }
         .note { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
         .note.warn { color: #ffb347; }
-        .recruit { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+        .recruit { display: grid; grid-template-columns: repeat(auto-fit, minmax(64px, 1fr)); gap: 6px; }   /* tres o cuatro tropas en una fila */
         .recruit .btn { flex-direction: column; gap: 3px; padding: 8px 4px; font-size: 13px; }
         .recruit .btn small { font-weight: 400; color: var(--muted); font-size: 11.5px; }
         .recruit .btn b { color: var(--signal); }
@@ -584,7 +584,8 @@ const CONFIG = {
     RESOURCE_DISCOUNT: {            // abaratamiento de las tropas por yacimiento controlado
         infantry: { minerales: 0.04 },
         tank: { hierro: 0.06, petroleo: 0.08, minerales: 0.04 },
-        artillery: { hierro: 0.06, carbon: 0.05, minerales: 0.04 }
+        artillery: { hierro: 0.06, carbon: 0.05, minerales: 0.04 },
+        antiair: { hierro: 0.04, minerales: 0.04 }
     },
     MAX_DISCOUNT: 0.5,
     MAX_DEFENSE_BONUS: 3,           // tope del producto terreno × ciudad × capital × fortificación
@@ -618,11 +619,11 @@ const CONFIG = {
     // sitios), pérdidas ante el antiaéreo conocido (del blanco y del camino que no se puede rodear) y la constante de
     // la probabilidad de fracaso. Misiones: lo que quita un ataque a un ejército (una parte fija y otra al azar, el
     // doble en el mar), cuánto y cuántos turnos suyos lo deja desorganizado, aciertos que aguanta un antiaéreo fijo,
-    // antiaéreas que quita un acierto a un ejército y, en el combate aéreo, derribo y daño del que pierde y daño del
-    // que gana.
+    // antiaéreas que quita un acierto a un ejército (por cada una que lleva; el doble en el mar), lo que vale cada
+    // antiaérea (en sitios) y, en el combate aéreo, derribo y daño del que pierde y daño del que gana.
     AIR: { PER_SQUADRON: 24, PER_AIRFIELD: 4, SQUADRON_COST: 300, AIRFIELD_COST: 150, DOWN_TURNS: 2,
         POWER: 10, AA_COST: 60, AA_TURNS: 2, INTEGRATED: 2, AA_CAP: 4, KNOWN_TARGET: 0.75, KNOWN_PATH: 0.5, FAIL_K: 1.7,
-        STRIKE: 0.10, STRIKE_RAND: 0.05, SEA_STRIKE: 2, DISORG: 0.8, DISORG_TURNS: 2, AA_HITS: 2, MOBILE_HIT: 0.25,
+        STRIKE: 0.10, STRIKE_RAND: 0.05, SEA_STRIKE: 2, DISORG: 0.8, DISORG_TURNS: 2, AA_HITS: 2, MOBILE_HIT: 0.25, MOBILE: 0.5,
         DOG_DOWN: 0.4, DOG_DAMAGED: 0.4, DOG_WINNER: 0.1 },
     // Terreno de cada casilla, sacado de datos reales (relieve, bosques, humedales y lagos): coste de entrar y defensa.
     TERRAIN: {
@@ -639,7 +640,8 @@ const CONFIG = {
     TYPES: {
         infantry:  { name: "Infantería", short: "I", cost: 50,  atk: 5,  def: 6,  speed: 4 },
         tank:      { name: "Tanque",     short: "T", cost: 150, atk: 20, def: 15, speed: 7 },
-        artillery: { name: "Artillería", short: "A", cost: 200, atk: 40, def: 3,  speed: 3 }
+        artillery: { name: "Artillería", short: "A", cost: 200, atk: 40, def: 3,  speed: 3 },
+        antiair:   { name: "Antiaérea",  short: "AA", cost: 250, atk: 2,  def: 3,  speed: 4 }   // con Defensa aérea 3 (rules.mobileAA)
     },
     RESOURCE_ICON: { petroleo: '⛽', gas: '🔥', carbon: '⛏', hierro: '⚙', minerales: '💎' },
     RESOURCE_COLOR: { petroleo: '#1b1b1b', gas: '#1f4e79', carbon: '#3d3d3d', hierro: '#7b3f1d', minerales: '#145a5a' }
@@ -655,6 +657,8 @@ const AIR_TARGETS = 8, AIR_PATROLS = 2, AIR_MIN_HIT = 0.5, AIR_MAX_DOWN = 0.2, A
 // La aviación de la IA: escuadrones por operación, los que quiere por cada uno enemigo (y cuántos más), parte de la
 // renta que aparta para comprarlos y probabilidad de poner un antiaéreo cada turno.
 const AI_WINGS = 6, AI_AIR_RATIO = 0.8, AI_AIR_EXTRA = 2, AI_AIR_SHARE = 0.25, AI_AA_CHANCE = 0.35;
+// Con el antiaéreo móvil, la tirada de reclutar de la IA a partir de la que sale una antiaérea (una de cada veinte).
+const AI_ANTIAIR = 0.95;
 // Solo aparta oro para la aviación el país al que un escuadrón le cuesta como mucho estos turnos de renta: al pobre le
 // hacen más falta las tropas.
 const AI_AIR_TURNS = 3;
@@ -682,13 +686,13 @@ const UNIT_KEYS = Object.keys(CONFIG.TYPES);
 
 // Plantillas de ejército: recetas que reclutan las operaciones para reforzarse. El escalón OTAN sale del tamaño.
 const TEMPLATES = {
-    guarnicion: { name: 'Guarnición', units: { infantry: 3, tank: 0, artillery: 0 }, why: 'Defensa barata para ciudades de la retaguardia.' },
-    infanteria: { name: 'Brigada de infantería', units: { infantry: 10, tank: 0, artillery: 2 }, why: 'La defensa más barata por oro, con algo de fuego.' },
-    mecanizada: { name: 'Brigada mecanizada', units: { infantry: 8, tank: 4, artillery: 0 }, why: 'Equilibrada: aguanta y avanza a velocidad 4.' },
-    acorazada: { name: 'Brigada acorazada', units: { infantry: 4, tank: 8, artillery: 0 }, why: 'Ataque y defensa altos; la infantería la frena a velocidad 4.' },
-    punta: { name: 'Punta de lanza', units: { infantry: 0, tank: 10, artillery: 0 }, why: 'Solo tanques: velocidad 7, para cerrar pinzas en llano.' },
-    artilleria: { name: 'Grupo de artillería', units: { infantry: 2, tank: 0, artillery: 6 }, why: 'El mejor ataque por oro para romper defensas, pero frágil y lento (velocidad 3).' },
-    division: { name: 'División', units: { infantry: 20, tank: 8, artillery: 4 }, why: 'Tres brigadas juntas: el escalón XX.' }
+    guarnicion: { name: 'Guarnición', units: { infantry: 3, tank: 0, artillery: 0, antiair: 0 }, why: 'Defensa barata para ciudades de la retaguardia.' },
+    infanteria: { name: 'Brigada de infantería', units: { infantry: 10, tank: 0, artillery: 2, antiair: 0 }, why: 'La defensa más barata por oro, con algo de fuego.' },
+    mecanizada: { name: 'Brigada mecanizada', units: { infantry: 8, tank: 4, artillery: 0, antiair: 0 }, why: 'Equilibrada: aguanta y avanza a velocidad 4.' },
+    acorazada: { name: 'Brigada acorazada', units: { infantry: 4, tank: 8, artillery: 0, antiair: 0 }, why: 'Ataque y defensa altos; la infantería la frena a velocidad 4.' },
+    punta: { name: 'Punta de lanza', units: { infantry: 0, tank: 10, artillery: 0, antiair: 0 }, why: 'Solo tanques: velocidad 7, para cerrar pinzas en llano.' },
+    artilleria: { name: 'Grupo de artillería', units: { infantry: 2, tank: 0, artillery: 6, antiair: 0 }, why: 'El mejor ataque por oro para romper defensas, pero frágil y lento (velocidad 3).' },
+    division: { name: 'División', units: { infantry: 20, tank: 8, artillery: 4, antiair: 0 }, why: 'Tres brigadas juntas: el escalón XX.' }
 };
 // Aviación inicial de cada país, por su clave: aviones de combate en servicio en 2024 (cazas, cazabombarderos y
 // aviones de ataque; sin entrenadores, transportes ni helicópteros). Los que no tienen ninguno no salen.
@@ -873,7 +877,7 @@ const TECHS = RESEARCH_BRANCHES.flatMap(b => TECH_TREE[b.id].map(([name, fx, cha
 const TECH_BY_ID = new Map(TECHS.map(t => [t.id, t]));
 const BRANCH_BY_ID = new Map(RESEARCH_BRANCHES.map(b => [b.id, b]));
 // Rama cuyo nivel muestran los galones de cada tipo de tropa.
-const UNIT_BRANCH = { infantry: 'infanteria', tank: 'blindados', artillery: 'artilleria' };
+const UNIT_BRANCH = { infantry: 'infanteria', tank: 'blindados', artillery: 'artilleria', antiair: 'antiaerea' };
 const mergeFx = (into, fx) => {
     for (const [k, v] of Object.entries(fx)) {
         if (v && typeof v === 'object') mergeFx(into[k], v);
@@ -932,14 +936,17 @@ class MinHeap {
     }
 }
 
-const emptyUnits = () => ({ infantry: 0, tank: 0, artillery: 0 });
+// Unidades de un ejército por tipo. Una clave que falta vale 0: los ejércitos y plantillas de antes de la Antiaérea
+// no la traen. fullUnits las completa todas.
+const emptyUnits = () => ({ infantry: 0, tank: 0, artillery: 0, antiair: 0 });
+const fullUnits = u => Object.fromEntries(UNIT_KEYS.map(k => [k, u?.[k] || 0]));
 const copyUnits = u => ({ ...u });
-const countUnits = u => UNIT_KEYS.reduce((s, k) => s + u[k], 0);
-const unitPower = (u, stat, rules = null) => UNIT_KEYS.reduce((s, k) => s + u[k] * (rules ? rules.types[k][stat] : CONFIG.TYPES[k][stat]), 0);
+const countUnits = u => UNIT_KEYS.reduce((s, k) => s + (u[k] || 0), 0);
+const unitPower = (u, stat, rules = null) => UNIT_KEYS.reduce((s, k) => s + (u[k] || 0) * (rules ? rules.types[k][stat] : CONFIG.TYPES[k][stat]), 0);
 const unitText = u => UNIT_KEYS.filter(k => u[k] > 0).map(k => `${u[k]}${CONFIG.TYPES[k].short}`).join(' ');
 const unitWords = u => UNIT_KEYS.filter(k => u[k] > 0).map(k => `${u[k]} ${CONFIG.TYPES[k].name.toLowerCase()}`).join(', ');
 const speedOf = (u, rules = null) => Math.min(...UNIT_KEYS.filter(k => u[k] > 0).map(k => (rules ? rules.types[k].speed : CONFIG.TYPES[k].speed)), 99);
-const sameUnits = (a, b) => UNIT_KEYS.every(k => a[k] === b[k]);
+const sameUnits = (a, b) => UNIT_KEYS.every(k => (a[k] || 0) === (b[k] || 0));
 const fmtMp = sub => String(Math.round(sub / MOVE * 10) / 10).replace('.', ',');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
@@ -1135,7 +1142,7 @@ class GameEngine {
         this.armyAt = new Int32Array(G.N);
         this.nextArmyId = 1;
         for (const p of PROVINCES) {
-            const units = { infantry: 1, tank: 0, artillery: 0 };   // guarnición en cada ciudad
+            const units = { ...emptyUnits(), infantry: 1 };   // guarnición en cada ciudad
             if (p.forces) for (const k of UNIT_KEYS) units[k] += p.forces[k] ?? 0;
             this.settle(this.newArmy(p.country, p.city, units, 0));
         }
@@ -1199,7 +1206,7 @@ class GameEngine {
             nations: this.nations.map(n => ({ gold: n.gold, airFund: n.airFund, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord, templates: n.templates, command: n.command,
                 tech: { done: [...n.tech.done], progress: [...n.tech.progress], current: [...n.tech.current] } })),
             relations,
-            armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used, a.hunger || 0, a.disorgUntil || 0]),
+            armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used, a.hunger || 0, a.disorgUntil || 0, a.units.antiair || 0]),
             nextArmyId: this.nextArmyId,
             ops: [...this.ops.values()].map(o => ({ id: o.id, owner: o.owner, kind: o.kind, name: o.name, cells: o.cells, ratio: o.ratio, auto: o.auto,
                 paused: o.paused, fortify: o.fortify, since: o.since, waiting: o.waiting, front: o.front ?? -1, drawn: o.drawn, state: o.state, rel: o.rel, gold: o.gold, extra: o.extra ?? 0, poolTurn: o.poolTurn ?? 0, template: o.template, pool: o.pool, formed: o.formed, aims: o.aims,
@@ -1235,6 +1242,7 @@ class GameEngine {
         const provIdx = v => int(v, 0, PROVINCES.length - 1, 0);
         const list = v => (Array.isArray(v) ? v : []);
         const str = (v, max = 300) => String(v ?? '').slice(0, max);
+        const units = (u, max = 99) => Object.fromEntries(UNIT_KEYS.map(k => [k, int(u?.[k], 0, max, 0)]));   // la que falta, 0
 
         const g = new GameEngine(int(data.seed, 1, 2147483646, 1));
         g.rng.state = int(data.rng, -2147483648, 2147483647, 0);
@@ -1334,7 +1342,7 @@ class GameEngine {
                 out.warned = [...new Set(list(c.warned).map(nat))];
                 return out;
             })(),
-            templates: list(n?.templates).slice(0, 12).map(t => ({ name: str(t?.name, 40) || 'Plantilla', units: { infantry: int(t?.units?.infantry, 0, 99, 0), tank: int(t?.units?.tank, 0, 99, 0), artillery: int(t?.units?.artillery, 0, 99, 0) } }))
+            templates: list(n?.templates).slice(0, 12).map(t => ({ name: str(t?.name, 40) || 'Plantilla', units: units(t?.units) }))
                 .filter(t => countUnits(t.units) > 0),
             tech: techOf(n?.tech)
         }));
@@ -1349,12 +1357,13 @@ class GameEngine {
         g.warVersion++;
         g.armies = new Map();
         g.armyAt = new Int32Array(G.N);
-        // Las partidas de antes de los doceavos contaban el movimiento en sextos: el gastado se duplica.
+        // Las partidas de antes de los doceavos contaban el movimiento en sextos: el gastado se duplica. Las de antes de la
+        // Antiaérea no traen el índice 9: 0 antiaéreas.
         const moveScale = data.move === MOVE ? 1 : MOVE / 6;
         for (const x of list(data.armies)) {
             const id = int(x?.[0], 1, 1e9, 1), cell = cellIdx(x?.[2]);
             if (g.armyAt[cell] || g.armies.has(id)) continue;
-            g.armies.set(id, { id, owner: nat(x?.[1]), cell, units: { infantry: int(x?.[3], 0, 1e6, 0), tank: int(x?.[4], 0, 1e6, 0), artillery: int(x?.[5], 0, 1e6, 0) }, used: Math.min(999, int(x?.[6], 0, 999, 0) * (x?.[6] >= 999 ? 1 : moveScale)), from: 0, hunger: int(x?.[7], 0, 99, 0), disorgUntil: int(x?.[8], 0, 1e6, 0) });
+            g.armies.set(id, { id, owner: nat(x?.[1]), cell, units: { infantry: int(x?.[3], 0, 1e6, 0), tank: int(x?.[4], 0, 1e6, 0), artillery: int(x?.[5], 0, 1e6, 0), antiair: int(x?.[9], 0, 1e6, 0) }, used: Math.min(999, int(x?.[6], 0, 999, 0) * (x?.[6] >= 999 ? 1 : moveScale)), from: 0, hunger: int(x?.[7], 0, 99, 0), disorgUntil: int(x?.[8], 0, 1e6, 0) });
             g.armyAt[cell] = id;
         }
         g.nextArmyId = Math.max(int(data.nextArmyId, 1, 1e9, 1), ...[...g.armies.keys()].map(x => x + 1), 1);
@@ -1383,7 +1392,7 @@ class GameEngine {
                 op.state = ['aguanta', 'repliega', 'restablece'].find(k => k === o.state) ?? 'aguanta';
                 op.rel = Number.isFinite(o.rel) ? Math.max(0, Math.min(1e3, o.rel)) : null;
             } else { op.drawn = null; op.state = 'aguanta'; op.rel = null; }
-            const f = o.form, units = u => ({ infantry: int(u?.infantry, 0, 99, 0), tank: int(u?.tank, 0, 99, 0), artillery: int(u?.artillery, 0, 99, 0) });
+            const f = o.form;
             const zone = int(f?.zone, -1, G.N - 1, -1);
             if (f && zone >= 0 && isLand(zone)) op.form = { name: str(f.name, 40), units: units(f.units), zone, recruited: units(f.recruited),
                 pending: list(f.pending).slice(0, 200).map(x => [int(x?.[0], -1, G.N - 1, -1), units(x?.[1])]).filter(([c]) => c >= 0 && CITY_OF[c] >= 0) };
@@ -2043,7 +2052,8 @@ class GameEngine {
     // Alcance del antiaéreo de `id`, en casillas.
     aaRadius(id) { return kmCells(this.rules(id).aaRangeKm); }
     // El antiaéreo que puede disparar ahora: los sitios terminados en una casilla de su dueño (los dañados, a media
-    // fuerza) y las ciudades con casamatas, que traen el integrado de la calidad que tenga investigada su dueño.
+    // fuerza), las ciudades con casamatas, que traen el integrado de la calidad que tenga investigada su dueño, y los
+    // ejércitos con antiaéreas (el móvil), que cubren su casilla y sus vecinas, en tierra y en el mar.
     aaList() {
         const key = `${this.airVersion}:${this.fortVersion}:${this.techVersion}:${this.version}:${this.armyVersion}`;
         if (this.aaCache?.key === key) return this.aaCache.list;
@@ -2057,6 +2067,10 @@ class GameEngine {
             if (this.fort[cell] !== 4 || owner < 0) continue;   // solo con casamatas
             list.push({ cell, owner, kind: 'integrated', power: CONFIG.AIR.INTEGRATED * this.rules(owner).aaPower, radius: this.aaRadius(owner), site: null });
         }
+        for (const a of this.armies.values()) {
+            if (!a.units.antiair || this.armyAt[a.cell] !== a.id) continue;
+            list.push({ cell: a.cell, owner: a.owner, kind: 'mobile', power: CONFIG.AIR.MOBILE * this.rules(a.owner).aaPower * a.units.antiair, radius: 1, site: null, army: a });
+        }
         this.aaCache = { key, list };
         return list;
     }
@@ -2069,9 +2083,11 @@ class GameEngine {
         return this.rules(viewer).intelExact && (viewer !== this.player || this.sees(viewer, cell));
     }
     // ¿Conoce `viewer` esta fuente de antiaéreo? Un sitio, si le ha disparado o si lo ve; el integrado, si conoce el
-    // nivel de la fortificación de la ciudad.
+    // nivel de la fortificación de la ciudad; el móvil, si conoce el tipo y el número del ejército que lo lleva (el
+    // jugador, además, con la casilla a la vista: no se sabe qué lleva un ejército que no se ve).
     aaKnown(viewer, src) {
         if (src.kind === 'integrated') return this.fortLevel(viewer, src.cell) !== null;
+        if (src.kind === 'mobile') return this.knownCell(viewer, src.cell);
         return src.site.known.has(viewer) || this.aaVisible(viewer, src.cell);
     }
     // Antiaéreo enemigo que se encuentra una misión de `owner` que sale de `bases` contra `cell`, en línea recta.
@@ -2160,12 +2176,14 @@ class GameEngine {
         const R = this.airRange(owner);
         return sqs.filter(q => q && q.owner === owner && this.canFly(q) && hexDist(q.base, cell) <= R).sort((a, b) => a.id - b.id);
     }
-    // El antiaéreo de `cell` que `viewer` conoce y que `owner` puede atacar: un sitio fijo y, si no hay, el integrado.
+    // El antiaéreo de `cell` que `viewer` conoce y que `owner` puede atacar: un sitio fijo; si no hay, las antiaéreas del
+    // ejército que haya; y si tampoco, el integrado.
     aaTarget(owner, cell, viewer = owner) {
+        const rank = { site: 3, mobile: 2, integrated: 1 };
         let best = null;
         for (const src of this.aaList()) {
             if (src.cell !== cell || !this.atWar(owner, src.owner) || !this.aaKnown(viewer, src)) continue;
-            if (!best || (src.kind === 'site' && best.kind !== 'site')) best = src;
+            if (!best || rank[src.kind] > rank[best.kind]) best = src;
         }
         return best;
     }
@@ -2290,6 +2308,14 @@ class GameEngine {
             case 'fort': return this.lowerFort(cell);
             case 'aa': {
                 if (src.kind === 'integrated') return `la ciudad ${this.lowerFort(cell)} y pierde su antiaéreo`;
+                if (src.kind === 'mobile') {   // una parte de sus antiaéreas, el doble a un ejército embarcado
+                    const a = src.army, lost = Math.min(a.units.antiair, Math.max(1, Math.round(a.units.antiair * A.MOBILE_HIT * (afloat(cell) ? A.SEA_STRIKE : 1))));
+                    a.units.antiair -= lost;
+                    this.armyVersion++;
+                    if (countUnits(a.units) > 0) return `el ejército pierde ${plural(lost, 'antiaérea', 'antiaéreas')}`;
+                    this.removeArmy(a);
+                    return `el ejército pierde ${plural(lost, 'antiaérea', 'antiaéreas')} y se disuelve`;
+                }
                 this.airVersion++;
                 if (++src.site.hits < A.AA_HITS) return 'queda dañado y dispara a media fuerza';
                 this.aaSites.delete(cell);
@@ -2663,7 +2689,7 @@ class GameEngine {
 
     // --- Ejércitos ---
     newArmy(owner, cell, units, used) {
-        const a = { id: this.nextArmyId++, owner, cell, units: copyUnits(units), used, from: 0, hunger: 0, disorgUntil: 0 };
+        const a = { id: this.nextArmyId++, owner, cell, units: fullUnits(units), used, from: 0, hunger: 0, disorgUntil: 0 };
         this.armies.set(a.id, a);
         return a;
     }
@@ -2771,11 +2797,11 @@ class GameEngine {
             if (!this.starving(id, a.cell)) { a.hunger = 0; continue; }
             if (++a.hunger < this.rules(id).hungerTurns) continue;
             a.hunger = 0;
-            const k = ['infantry', 'artillery', 'tank'].find(u => a.units[u] > 0);
+            const k = ['infantry', 'artillery', 'tank', 'antiair'].find(u => a.units[u] > 0);
             a.units[k]--;
             const where = this.placeName(a.cell), gone = countUnits(a.units) === 0;
             if (gone) this.removeArmy(a);
-            if (id === this.player) this.log(`Tu ejército en ${where} pasa hambre: pierde ${k === 'infantry' ? 'una infantería' : k === 'tank' ? 'un tanque' : 'una artillería'}${gone ? ' y se disuelve' : ''}.`);
+            if (id === this.player) this.log(`Tu ejército en ${where} pasa hambre: pierde ${k === 'infantry' ? 'una infantería' : k === 'tank' ? 'un tanque' : k === 'antiair' ? 'una antiaérea' : 'una artillería'}${gone ? ' y se disuelve' : ''}.`);
             else if (this.player !== null && this.atWar(this.player, id) && this.sees(this.player, a.cell)) this.log(`El ejército enemigo en ${where} pierde una unidad por hambre.`);
             this.armyVersion++;
         }
@@ -2792,7 +2818,7 @@ class GameEngine {
         if (!other) { this.armyAt[a.cell] = a.id; return a; }
         if (other === a.id) return a;
         const o = this.armies.get(other);
-        for (const k of UNIT_KEYS) o.units[k] += a.units[k];
+        for (const k of UNIT_KEYS) if (a.units[k]) o.units[k] = (o.units[k] || 0) + a.units[k];
         o.used = Math.max(o.used, a.used);
         o.hunger = Math.max(o.hunger || 0, a.hunger || 0);
         o.disorgUntil = Math.max(o.disorgUntil || 0, a.disorgUntil || 0);   // desorganizado: el que más dure
@@ -2802,7 +2828,7 @@ class GameEngine {
     }
     split(a, send) {
         if (sameUnits(a.units, send)) return a;
-        for (const k of UNIT_KEYS) a.units[k] -= send[k];
+        for (const k of UNIT_KEYS) if (send[k]) a.units[k] -= send[k];
         const b = this.newArmy(a.owner, a.cell, send, a.used);
         b.disorgUntil = a.disorgUntil || 0;
         if (a.op) b.op = a.op;
@@ -3782,7 +3808,7 @@ class GameEngine {
         const sug = this.suggestTemplate(op);
         return { ...this.templateOf(op.owner, sug.key), why: sug.why, auto: true };
     }
-    templateCost(id, units) { return UNIT_KEYS.reduce((sum, k) => sum + units[k] * this.unitCost(id, k), 0); }
+    templateCost(id, units) { return UNIT_KEYS.reduce((sum, k) => sum + (units[k] || 0) * this.unitCost(id, k), 0); }
     // Zona de reunión de los refuerzos: casilla libre suya, sin ciudad, junto al punto de partida de la operación.
     formZone(op) {
         const id = op.owner, anchor = op.kind === 'defensa' ? op.cells[Math.floor(op.cells.length / 2)] : op.cells[0];
@@ -3828,7 +3854,7 @@ class GameEngine {
             const g = this.armyOn(city);
             if (!g || g.owner !== id) return false;
             const take = emptyUnits();
-            for (const k of UNIT_KEYS) take[k] = Math.min(units[k], g.units[k]);
+            for (const k of UNIT_KEYS) take[k] = Math.min(units[k] || 0, g.units[k] || 0);
             if (!countUnits(take)) return false;
             const mover = sameUnits(take, g.units) ? g : this.split(g, take);
             if (mover !== g) mover.op = 0;
@@ -3848,16 +3874,16 @@ class GameEngine {
     recruitOne(op, ctx) {
         const id = op.owner, n = this.nations[id], f = op.form;
         if (!f || !ctx || ctx.done) return false;
-        const missing = UNIT_KEYS.filter(k => f.recruited[k] < f.units[k]).sort((x, y) => f.recruited[x] / f.units[x] - f.recruited[y] / f.units[y]);
+        const missing = UNIT_KEYS.filter(k => (f.recruited[k] || 0) < (f.units[k] || 0)).sort((x, y) => (f.recruited[x] || 0) / f.units[x] - (f.recruited[y] || 0) / f.units[y]);
         const p = missing.length ? ctx.cities.find(c => c.city !== f.zone && this.canRecruitAt(id, c) && ctx.path.to(c.city) < Infinity) : null;
         // El tipo más atrasado que se pueda pagar (si la artillería no llega, una infantería).
         const type = p && missing.find(k => { const c = this.unitCost(id, k, p.id); return op.pool >= c && n.gold >= c; });
         if (!type || !this.recruit(id, p, type)) { ctx.done = true; return false; }
         const cost = this.unitCost(id, type, p.id);
         op.pool -= cost;
-        f.recruited[type]++;
+        f.recruited[type] = (f.recruited[type] || 0) + 1;
         const entry = f.pending.find(([c]) => c === p.city);
-        if (entry) entry[1][type]++; else { const u = emptyUnits(); u[type] = 1; f.pending.push([p.city, u]); }
+        if (entry) entry[1][type] = (entry[1][type] || 0) + 1; else { const u = emptyUnits(); u[type] = 1; f.pending.push([p.city, u]); }
         return true;
     }
     // Quien perdió su marcha deja la formación; la formación completa entra en la operación.
@@ -3867,7 +3893,7 @@ class GameEngine {
         // Quien perdió su marcha (sin paso tres turnos) deja la formación.
         for (const a of this.armies.values()) if (a.form === op.id && a.owner === id && !a.order && a.cell !== f.zone) a.form = 0;
         // Formación completa: el ejército de la zona entra en la operación.
-        const at = this.armyOn(f.zone), done = UNIT_KEYS.every(k => f.recruited[k] >= f.units[k]) && !f.pending.length;
+        const at = this.armyOn(f.zone), done = UNIT_KEYS.every(k => (f.recruited[k] || 0) >= (f.units[k] || 0)) && !f.pending.length;
         const marching = [...this.armies.values()].some(a => a.form === op.id && a !== at && a.owner === id);
         if (done && !marching) {
             const whole = at && at.owner === id && at.form === op.id;
@@ -4369,6 +4395,7 @@ class GameEngine {
     applyLosses(units, frac, keepOne) {
         const before = copyUnits(units), lost = emptyUnits();
         for (const k of UNIT_KEYS) {
+            if (k === 'antiair' && !units[k]) continue;   // sin antiaéreas no tira: las tiradas de siempre no cambian
             lost[k] = Math.min(units[k], Math.floor(units[k] * frac + this.rng()));
             units[k] -= lost[k];
         }
@@ -4586,7 +4613,7 @@ class GameEngine {
             const units = emptyUnits();
             for (const c of p.cells) {
                 const a = this.armyOn(c);
-                if (a && a.owner !== this.player && !this.allied(this.player, a.owner)) for (const k of UNIT_KEYS) units[k] += a.units[k];
+                if (a && a.owner !== this.player && !this.allied(this.player, a.owner)) for (const k of UNIT_KEYS) units[k] += a.units[k] || 0;
             }
             let extra = '';
             if (this.rules(this.player).spyWide) {   // Agentes dobles: también muros e investigación
@@ -4747,7 +4774,10 @@ class GameEngine {
         const ar = this.armyOn(p.city);
         return this.owner[p.city] === nation && this.legal[p.city] === nation && (!ar || ar.owner === nation) && this.recruitLeft(nation, p) > 0;
     }
+    // Tropas que puede reclutar `id`: la Antiaérea, solo con Defensa aérea 3.
+    recruitTypes(id) { return UNIT_KEYS.filter(k => k !== 'antiair' || this.rules(id).mobileAA); }
     recruit(nation, p, type) {
+        if (!Object.hasOwn(CONFIG.TYPES, type) || (type === 'antiair' && !this.rules(nation).mobileAA)) return false;
         const n = this.nations[nation], cost = this.unitCost(nation, type, p.id);
         if (n.gold < cost || !this.canRecruitAt(nation, p)) return false;
         n.gold -= cost;
@@ -5038,7 +5068,7 @@ class GameEngine {
     // --- Acciones del jugador ---
     playerMove(army, send, dest) {
         if (this.over || army.owner !== this.player) return null;
-        if (UNIT_KEYS.some(k => send[k] < 0 || send[k] > army.units[k]) || countUnits(send) === 0) return null;
+        if (UNIT_KEYS.some(k => (send[k] || 0) < 0 || (send[k] || 0) > (army.units[k] || 0)) || countUnits(send) === 0) return null;
         const r = this.reach(army.owner, army.cell, this.moveBudget(army.owner, army.cell, send, army.used), army.used === 0);
         const isAttack = r.attacks.has(dest);
         if (!isAttack && !this.destinations(r).has(dest)) return null;
@@ -5391,7 +5421,7 @@ class GameEngine {
         if (!tech) {
             const war = this.enemiesOf(id).length > 0, fierce = ['agresiva', 'caos'].includes(this.settings.aggression);
             const troops = emptyUnits();
-            for (const a of this.armies.values()) if (a.owner === id) for (const k of UNIT_KEYS) troops[k] += a.units[k] * CONFIG.TYPES[k].cost;
+            for (const a of this.armies.values()) if (a.owner === id) for (const k of UNIT_KEYS) troops[k] += (a.units[k] || 0) * CONFIG.TYPES[k].cost;
             let land = 0, rough = 0;
             for (const i of G.land) if (this.owner[i] === id) { land++; if (['mountain', 'hills', 'forest', 'marsh'].includes(CELL_TERRAIN[i])) rough++; }
             // Aviación: la suya (escuadrones), la de sus enemigos y la de sus vecinos mueven Aviación, Defensa aérea y Espacio.
@@ -5452,12 +5482,16 @@ class GameEngine {
                 [cities[i], cities[j]] = [cities[j], cities[i]];
             }
         }
+        // Con Defensa aérea 3 y en guerra contra quien tiene escuadrones, de vez en cuando una antiaérea (con la misma
+        // tirada que elige el tipo: no gasta números aleatorios de más).
+        const aa = enemies.length && this.rules(id).mobileAA && [...this.squadrons.values()].some(q => enemies.includes(q.owner));
         for (let guard = 0; guard < 200 && n.gold - reserve >= this.unitCost(id, 'infantry'); guard++) {
             const p = cities.find(c => this.canRecruitAt(id, c));
             if (!p) break;
             const r = this.rng(), budget = n.gold - reserve;
             let type = 'infantry';
-            if (budget >= this.unitCost(id, 'artillery', p.id) && r < 0.2) type = 'artillery';
+            if (aa && budget >= this.unitCost(id, 'antiair', p.id) && r >= AI_ANTIAIR) type = 'antiair';
+            else if (budget >= this.unitCost(id, 'artillery', p.id) && r < 0.2) type = 'artillery';
             else if (budget >= this.unitCost(id, 'tank', p.id) && r < 0.55) type = 'tank';
             if (!this.recruit(id, p, type)) break;
         }
@@ -5961,11 +5995,13 @@ const OP_LINE_STATES = { aguanta: 'Aguanta', repliega: 'Se repliega', restablece
 const OP_STANCES = [[1.8, 'Cauta', 'Solo ataca con clara ventaja (1,8 a 1)'], [1.3, 'Equilibrada', 'Ataca con 1,3 a 1, como la IA'], [1, 'Agresiva', 'Ataca con igualdad de fuerzas: avanza rápido y sangra']];
 const OP_AUTO = [['manual', 'Manual', 'Solo dibuja y calcula: no mueve nada'], ['asistida', 'Asistida', 'Al terminar el turno te enseña lo que haría y confirmas'], ['auto', 'Automática', 'La cumple sola al terminar tu turno']];
 
-// Símbolo OTAN de cada tipo de unidad (SVG para el panel; el mapa lo dibuja en canvas).
+// Símbolo OTAN de cada tipo de unidad (SVG para el panel; el mapa lo dibuja en canvas). La Antiaérea, la cúpula de
+// defensa aérea de APP-6: un semicírculo apoyado en el borde de abajo del marco.
 const NATO_MARK = {
     infantry: '<path d="M1 1l24 14M25 1 1 15" stroke="#151a12" stroke-width="1.4"/>',
     tank: '<ellipse cx="13" cy="8" rx="7" ry="3.6" fill="none" stroke="#151a12" stroke-width="1.4"/>',
-    artillery: '<circle cx="13" cy="8" r="2.7" fill="#151a12"/>'
+    artillery: '<circle cx="13" cy="8" r="2.7" fill="#151a12"/>',
+    antiair: '<path d="M5.5 15A7.5 8 0 0 1 20.5 15" fill="none" stroke="#151a12" stroke-width="1.4"/>'
 };
 // Icono APP-6 de aviación de ala fija en el lienzo: la hélice de dos palas en horizontal, de `half` de punta a centro
 // (el mismo trazo que ICONS.plane).
@@ -6728,7 +6764,7 @@ class MapView {
             if (!members.length) continue;
             const units = emptyUnits();
             let wx = 0, wy = 0;
-            for (const a of members) { for (const k of UNIT_KEYS) units[k] += a.units[k]; wx += G.cx[a.cell]; wy += G.cy[a.cell]; }
+            for (const a of members) { for (const k of UNIT_KEYS) units[k] += a.units[k] || 0; wx += G.cx[a.cell]; wy += G.cy[a.cell]; }
             const [x, y] = this.toScreen(wx / members.length, wy / members.length), n = countUnits(units);
             if (x < -40 || y < -40 || x > this.w + 40 || y > this.h + 40) continue;
             this.drawCounter({ owner: g.player, type: dominantType(units), n, echelon: echelonOf(n).mark, level: 0, mine: true, alpha: 1 }, x, y, 12, font);
@@ -6995,6 +7031,11 @@ class MapView {
         if (t.type === 'infantry') { ctx.moveTo(x - sx, cy - sy); ctx.lineTo(x + sx, cy + sy); ctx.moveTo(x + sx, cy - sy); ctx.lineTo(x - sx, cy + sy); ctx.stroke(); }
         else if (t.type === 'tank') { ctx.ellipse(x, cy, t.afloat ? rad * 0.62 : w * 0.28, t.afloat ? rad * 0.34 : hh * 0.24, 0, 0, Math.PI * 2); ctx.stroke(); }
         else if (t.type === 'artillery') { ctx.arc(x, cy, hh * 0.17, 0, Math.PI * 2); ctx.fillStyle = INK; ctx.fill(); }
+        else if (t.type === 'antiair') {   // la cúpula de defensa aérea, sobre el borde de abajo (en el círculo, del cuadrado inscrito)
+            if (t.afloat) ctx.ellipse(x, cy + sy, sx * 0.85, sy * 1.15, 0, Math.PI, 0);
+            else ctx.ellipse(x, y0 + hh, w * 0.3, hh * 0.57, 0, Math.PI, 0);
+            ctx.stroke();
+        }
         else if (t.type === 'air') strokePropeller(ctx, x, cy, w * 0.36);   // escuadrón: aviación de ala fija
         // sin tipo conocido: el marco queda vacío, como en un mapa militar
         ctx.lineWidth = t.selected ? 3 : t.starving || t.flanked || t.noSupply ? 2.6 : 1.6;
@@ -7144,6 +7185,7 @@ class GameUI {
             <li>${airIcon('sq', '#9aa57a')} Escuadrón (ala fija): vuela una vez por turno desde su aeródromo hasta <span data-legend="air-range"></span>, con fuerza <span data-legend="air-power"></span>. En el mapa, la ficha a la derecha de una casilla es una patrulla que la protege hasta tu próximo turno; una misión se ve como un trazo de la base al blanco</li>
             <li>${airIcon('field', '#9aa57a')} Aeródromo: hasta ${CONFIG.AIR.PER_AIRFIELD} escuadrones, con cuántos tiene en la esquina («?» si no lo sabes); atenuado y con un aspa, inservible. Los de todos los países se ven. En la vista realista, una pista con su hangar y un avión</li>
             <li>${airIcon('aa', '#9aa57a')} Antiaéreo fijo: cubre <span data-legend="aa-range"></span> con fuerza <span data-legend="aa-power"></span> (dañado, la cúpula a trazos y la mitad); unas casamatas en una ciudad traen el doble. El del enemigo solo se ve si lo conoces: con Reconocimiento 2 a la vista, con un espía o porque te ha disparado. En la vista realista, un lanzador con dos misiles</li>
+            <li>${unitIcon('antiair', '#9aa57a')} Antiaérea (tropa, con Defensa aérea 3): va con su ejército y cubre su casilla y las vecinas; cada una vale la mitad de un antiaéreo fijo. En el mar es el único antiaéreo que protege a un barco. La del enemigo la conoces si conoces su ejército, y «Destruir antiaéreo» contra él le quita una parte (el doble embarcado). En la vista realista, un camión lanzador con dos misiles</li>
             <li>Aviación (herramienta Aviación, tecla 6): elige un aeródromo tuyo y marca los escuadrones que vuelan; luego haz clic en un blanco a su alcance. Cada misión dice su probabilidad de acierto y lo que puedes perder según lo que sabes: con niebla, el antiaéreo que no conoces no cuenta y la ficha te avisa. Cada escuadrón vuela una vez por turno y cada blanco recibe como mucho un acierto por turno. En tu territorio se construyen aeródromos (en una ciudad) y antiaéreo (en cualquier casilla)</li>
             <li>Aviación en el mando: una ofensiva o una línea llevan escuadrones, igual que ejércitos (pestaña Mando o «Encargo» en la ficha de Aviación), y marcan sus fines: golpear ejércitos, cortar carreteras, bajar fortificaciones, destruir antiaéreo o proteger y escoltar. Cada turno eligen, con lo que conoces, hasta ${AIR_TARGETS} blancos a su alcance y solo vuelan si la previsión es buena; respetan el modo manual, asistido o automático. La reserva manda sus escuadrones a la operación que pide ayuda. Orden de zona: un escuadrón suelto ataca turno a turno con sus fines a ${AIR_ZONE_KM} km de la casilla que marques. Una misión a mano gana a su encargo ese turno; al siguiente vuelve a él</li>
             <li>Con niebla de guerra, en sombra: lo que no ves. Ojo junto a una ciudad: tu espía</li>
@@ -7585,7 +7627,7 @@ class GameUI {
                 <div class="row" style="margin-bottom:8px"><span class="small">Por ciudad</span><div class="seg" style="flex:1">
                     ${[['1', '×1'], ['5', '×5'], ['max', 'Máximo']].map(([v, label]) => `<button data-action="recruit-qty" data-qty="${v}" class="${String(qty) === v || (v === 'max' && qty === Infinity) ? 'on' : ''}">${label}</button>`).join('')}
                 </div></div>
-                <div class="recruit">${UNIT_KEYS.map(k => { const pl = this.multiPlan(k, qty); return `<button class="btn" data-action="multi-recruit" data-unit="${k}" ${pl.units ? '' : 'disabled'}>
+                <div class="recruit">${g.recruitTypes(p0).map(k => { const pl = this.multiPlan(k, qty); return `<button class="btn" data-action="multi-recruit" data-unit="${k}" ${pl.units ? '' : 'disabled'}>
                     ${unitIcon(k, color)}${CONFIG.TYPES[k].name}<b>${pl.units} uds</b><small>${pl.cost} oro</small></button>`; }).join('')}</div>
                 <p class="note">Se recluta ciudad por ciudad hasta agotar el oro o el cupo de cada una.</p></section>
             <section class="sec"><h3>Fortificar</h3>
@@ -7862,7 +7904,7 @@ class GameUI {
         const g = this.game, a = this.selectedArmy();
         this.reachInfo = null;
         if (a) {
-            for (const k of UNIT_KEYS) this.send[k] = Math.min(this.send[k], a.units[k]);
+            for (const k of UNIT_KEYS) this.send[k] = Math.min(this.send[k], a.units[k] || 0);
             if (countUnits(this.send) > 0) {
                 const r = g.reach(a.owner, a.cell, g.moveBudget(a.owner, a.cell, this.send, a.used), a.used === 0);
                 this.reachInfo = { moves: g.destinations(r), attacks: new Set(r.attacks.keys()), from: r.attacks };
@@ -7982,7 +8024,7 @@ class GameUI {
             }
             case 'goal': g.toggleGoal(g.player, +d.pid); break;
             case 'open-command': this.tab = 'mando'; this.drawerOpen = true; if (+d.id && g.ops.has(+d.id)) this.focusOp = +d.id; break;
-            case 'tpl-step': { const u = this.tplDraft.units; u[d.unit] = Math.max(0, Math.min(60, u[d.unit] + +d.delta)); this.tplOpen = true; break; }
+            case 'tpl-step': { const u = this.tplDraft.units; u[d.unit] = Math.max(0, Math.min(60, (u[d.unit] || 0) + +d.delta)); this.tplOpen = true; break; }
             case 'tpl-save': if (g.playerSaveTemplate(this.tplDraft.name, this.tplDraft.units)) this.tplDraft = null; this.tplOpen = true; break;
             case 'tpl-del': g.playerDeleteTemplate(+d.index); this.tplOpen = true; break;
             case 'op-goto': {
@@ -8541,7 +8583,7 @@ class GameUI {
                 <div class="row" style="margin-bottom:8px"><span class="small">Cantidad</span><div class="seg" style="flex:1">
                     ${[['1', '×1'], ['5', '×5'], ['max', 'Máximo']].map(([v, label]) => `<button data-action="recruit-qty" data-qty="${v}" class="${String(this.recruitQty ?? 1) === v || (v === 'max' && this.recruitQty === Infinity) ? 'on' : ''}">${label}</button>`).join('')}
                 </div></div>
-                <div class="recruit">${UNIT_KEYS.map(k => {
+                <div class="recruit">${g.recruitTypes(p0).map(k => {
                     const t = CONFIG.TYPES[k];
                     const cost = g.unitCost(p0, k, p.id);
                     return `<button class="btn" data-action="recruit" data-unit="${k}" ${!ok || gold < cost ? 'disabled' : ''} title="${cost < t.cost ? `Tus yacimientos lo abaratan: ${t.cost} → ${cost}` : ''}">
@@ -9027,7 +9069,7 @@ class GameUI {
             ${tr.in || tr.out ? `<dt>Tributo</dt><dd>${tr.in ? `+${tr.in}` : ''}${tr.out ? ` −${tr.out}` : ''}</dd>` : ''}
             ${e.capitalLost ? `<dt>Capital</dt><dd class="warn-text">perdida: tus yacimientos y tu industria rinden la mitad hasta que la recuperes</dd>` : ''}
             <dt>Total</dt><dd><b>${g.income(id)} de oro por turno</b></dd>
-            <dt>Precios en la capital</dt><dd>${UNIT_KEYS.map(k => `${CONFIG.TYPES[k].name.toLowerCase()} ${g.unitCost(id, k, G.prov[g.nations[id].capitalCell])}`).join(', ')}</dd>
+            <dt>Precios en la capital</dt><dd>${g.recruitTypes(id).map(k => `${CONFIG.TYPES[k].name.toLowerCase()} ${g.unitCost(id, k, G.prov[g.nations[id].capitalCell])}`).join(', ')}</dd>
         </dl>`;
     }
 
@@ -9244,8 +9286,8 @@ class GameUI {
             ${n.templates.map((t, i) => row(t.name, t.units, `<button class="btn ghost" data-action="tpl-del" data-index="${i}" aria-label="Borrar" title="Borrar">✕</button>`)).join('')}
             <div class="tpl-edit">
                 <input type="text" id="tpl-name" maxlength="40" placeholder="Nombre de tu plantilla" value="${esc(d.name)}" aria-label="Nombre de la plantilla">
-                ${UNIT_KEYS.map(k => `<div class="unit-row">${unitIcon(k, g.nations[g.player].color)}<div>${CONFIG.TYPES[k].name}</div>
-                    <div class="stepper"><button data-action="tpl-step" data-unit="${k}" data-delta="-1" ${d.units[k] ? '' : 'disabled'} aria-label="Una menos">−</button><output>${d.units[k]}</output>
+                ${g.recruitTypes(g.player).map(k => `<div class="unit-row">${unitIcon(k, g.nations[g.player].color)}<div>${CONFIG.TYPES[k].name}</div>
+                    <div class="stepper"><button data-action="tpl-step" data-unit="${k}" data-delta="-1" ${d.units[k] ? '' : 'disabled'} aria-label="Una menos">−</button><output>${d.units[k] || 0}</output>
                     <button data-action="tpl-step" data-unit="${k}" data-delta="1" aria-label="Una más">+</button></div></div>`).join('')}
                 <p class="small muted">${facts(d.units)}</p>
                 <button class="btn" data-action="tpl-save" ${countUnits(d.units) && n.templates.length < 12 ? '' : 'disabled'}>Guardar plantilla</button>

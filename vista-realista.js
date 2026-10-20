@@ -768,7 +768,7 @@ class RealisticMap {
         if (pending) v.requestFrame();
     }
 
-    // Miniatura de un ejército: carro, pelotón o cañón sobre una peana del color del país. Si no se sabe qué es
+    // Miniatura de un ejército: carro, pelotón, cañón o lanzador antiaéreo sobre una peana del color del país. Si no se sabe qué es
     // (niebla de guerra sin inteligencia), un camión con lona y el escalón de la OTAN en lugar del número. Embarcado
     // (o.afloat), la peana es el casco de un barco de transporte que se mece con las olas.
     drawArmy(ctx, o) {
@@ -796,6 +796,7 @@ class RealisticMap {
         ctx.translate(x, y + U * 0.22); ctx.scale(k * facing, k);
         if (type === 'tank') miniTank(ctx, now, moving, color);
         else if (type === 'artillery') miniGun(ctx, now, moving);
+        else if (type === 'antiair') miniAA(ctx, now, moving);
         else if (type === null) miniTruck(ctx, now, moving);
         else { miniSoldier(ctx, -8, -1, now, moving, 0); miniSoldier(ctx, 9, -1, now, moving, 2.1); miniSoldier(ctx, 0.5, 1.5, now, moving, 1.1); }
         ctx.restore();
@@ -1059,6 +1060,24 @@ function miniJet(ctx, color) {
     ctx.fillStyle = '#b2b8bc'; ctx.beginPath(); ctx.moveTo(13, 0); ctx.quadraticCurveTo(8, -1.7, 0, -1.6); ctx.lineTo(-14, -1); ctx.lineTo(-14, 1); ctx.lineTo(0, 1.6); ctx.quadraticCurveTo(8, 1.7, 13, 0); ctx.fill(); ctx.stroke();   // fuselaje
     ctx.fillStyle = 'rgba(40,60,80,0.8)'; ctx.beginPath(); ctx.ellipse(7, 0, 2.4, 0.8, 0, 0, TAU); ctx.fill();   // cabina
     ctx.fillStyle = color; miniPoly(ctx, [[-3.6, -5], [-5.4, -5], [-6.3, -6.8], [-4.4, -6.8]]); ctx.fill(); miniPoly(ctx, [[-3.6, 5], [-5.4, 5], [-6.3, 6.8], [-4.4, 6.8]]); ctx.fill();
+}
+// Antiaéreo autopropulsado: un camión con la rampa alzada hacia delante y dos misiles en ella.
+function miniAA(ctx, now, moving) {
+    ctx.translate(0, moving ? Math.sin(now / 50) * 0.3 : 0);
+    ctx.fillStyle = '#2a2a22';
+    for (const x of [-9, 0, 9]) { ctx.beginPath(); ctx.arc(x, -1.5, 2.6, 0, TAU); ctx.fill(); }
+    ctx.fillStyle = '#4b5530'; miniRect(ctx, -14, -6, 28, 4, 1.5); ctx.fill();
+    ctx.fillStyle = '#6b7342'; miniRect(ctx, 6, -12, 8, 7, 2); ctx.fill();
+    ctx.fillStyle = 'rgba(200,220,230,0.5)'; ctx.fillRect(9.5, -11, 3.5, 2.8);
+    ctx.fillStyle = '#3e4428'; miniRect(ctx, -9, -9, 4, 3.5, 0.8); ctx.fill();   // el pedestal de la rampa
+    ctx.save(); ctx.translate(-7, -9); ctx.rotate(-0.5);
+    ctx.fillStyle = '#5f6b3c'; miniRect(ctx, -6, -1, 16, 2, 0.6); ctx.fill();
+    for (const dy of [-2.6, -5.2]) {
+        ctx.fillStyle = '#e8e6dc'; miniRect(ctx, -5, dy, 13, 2.2, 1.1); ctx.fill();
+        ctx.fillStyle = '#b8473a'; ctx.beginPath(); ctx.moveTo(8, dy); ctx.lineTo(10.4, dy + 1.1); ctx.lineTo(8, dy + 2.2); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#9a988c'; ctx.fillRect(-5, dy - 0.6, 1.6, 3.4);
+    }
+    ctx.restore();
 }
 function miniGun(ctx, now, moving) {
     ctx.strokeStyle = '#4a4a35'; ctx.lineWidth = 2.2; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(-2, -4); ctx.lineTo(-15, 0); ctx.stroke();
