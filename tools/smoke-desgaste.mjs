@@ -107,7 +107,52 @@ const setup = () => {
 };
 
 const CHECKS = [
-
+    ['A1 · un ejército solo fuera de una ciudad pierde un 10 %; con un compañero al lado o en una ciudad, no', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        const [n, c] = T.plainPair(g, es);
+        const a = T.army(g, es, c, 3);
+        T.eq(g.armyState(es, c, a.units, a.id).mult, 0.9, 'aislado');
+        T.army(g, es, n, 1);
+        T.eq(g.armyState(es, c, a.units, a.id).mult, 1, 'con apoyo');
+        const city = PROVINCES.find(p => g.owner[p.city] === es).city;   // al empezar, todas sus ciudades tienen guarnición
+        T.eq(g.armyState(es, city, a.units).mult, 1, 'en ciudad no cuenta');
+        return true;
+    }],
+    ['A1 · atacar desde la casilla de al lado no cuenta al propio atacante como apoyo', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        const [n, c] = T.plainPair(g, es);
+        const a = T.army(g, es, c, 3);
+        T.eq(g.armyState(es, n, a.units, a.id).parts.some(([k]) => k === 'aislado'), true, 'solo él cerca de n: aislado');
+        return true;
+    }],
+    ['A2 · en territorio enemigo sin carretera al alcance pierde un 15 %; con una carretera a su alcance, no', () => {
+        const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+        g.start(es); g.declareWar(es, pt);
+        const [, theirs] = T.border(g, es, pt);
+        for (const c of g.nearCells(theirs, 8).keys()) for (let d = 0; d < 6; d++) g.road[c * 6 + d] = 0;
+        g.roadVersion++;
+        g.capture(theirs, es, true);
+        const units = { infantry: 3, tank: 0, artillery: 0 };
+        T.ok(g.armyState(es, theirs, units).parts.some(([k, x]) => k === 'sin carretera' && x === 0.85), 'sin carretera');
+        const d = [0, 1, 2, 3, 4, 5].find(k => G.nb[theirs * 6 + k] >= 0 && isLand(G.nb[theirs * 6 + k]));
+        const j = G.nb[theirs * 6 + d], k = [0, 1, 2, 3, 4, 5].find(x => G.nb[j * 6 + x] >= 0 && G.nb[j * 6 + x] !== theirs);
+        g.road[j * 6 + k] = 1; g.road[G.nb[j * 6 + k] * 6 + (k + 3) % 6] = 1; g.roadVersion++;
+        T.ok(!g.armyState(es, theirs, units).parts.some(([n]) => n === 'sin carretera'), 'carretera enemiga a una casilla: sirve');
+        return true;
+    }],
+    ['A1+A2 · el combate y su parte llevan los factores nuevos', () => {
+        const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+        g.start(es); g.declareWar(es, pt);
+        const [mine, theirs] = T.border(g, es, pt);
+        for (let d = 0; d < 6; d++) { const x = g.armyOn(G.nb[mine * 6 + d]); if (x && x.owner === es) g.removeArmy(x); }   // atacante aislado seguro
+        const a = T.army(g, es, mine, 3), def = T.army(g, pt, theirs, 3);
+        const fx = g.combatFactors(es, a.units, mine, def, theirs, a.id);
+        T.eq(fx.atk, fx.baseAtk * fx.attState.mult, 'ataque con su estado');
+        T.ok(g.battleReport(es, pt, PROVINCES[G.prov[theirs]], fx, fx.atk, fx.dfn, true, 3, 3, 3, 1, '').includes('aislado'), 'el parte lo dice');
+        return true;
+    }]
 ];
 
 const exe = process.env.CHROME ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome'].find(existsSync);
