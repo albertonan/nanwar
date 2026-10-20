@@ -351,16 +351,67 @@ const CHECKS = [
     T.ok(/Ficha con borde violeta: ejército sin víveres/.test(document.querySelector('#legend').textContent), 'leyenda');
     return true;
 }],
-['A · la IA saca de la bolsa a un ejército que pasa hambre si puede', () => {
+['A · la IA saca de la bolsa a un ejército que pasa hambre, antes de sus ataques', () => {
     const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
     g.start(es); g.declareWar(fr, es);
     const [, c] = T.plainPair(g, fr);
     T.pocket(g, fr, es, c);
-    const hole = G.nb[c * 6 + [0, 1, 2, 3, 4, 5].find(d => isLand(G.nb[c * 6 + d]))];
-    g.owner[hole] = fr; g.legal[hole] = fr; g.version++;   // una salida
     const a = T.army(g, fr, c, 3);
+    T.ok(g.starving(fr, c), 'pasa hambre antes');
+    let early = null;
+    const command = g.aiCommand;
+    g.aiCommand = function (...x) { const b = this.armies.get(a.id); early = !!b && b.cell !== c && !this.starving(fr, b.cell); return command.apply(this, x); };
     g.aiStep(fr);
-    T.ok(!g.starving(fr, g.armies.get(a.id)?.cell ?? c), 'ha salido');
+    T.ok(early, 'ya ha salido cuando la IA manda sus operaciones');
+    const b = g.armies.get(a.id);
+    T.ok(b && b.cell !== c && !g.starving(fr, b.cell), 'fuera de la bolsa y comiendo');
+    return true;
+}],
+['A · la IA no busca su casa al otro lado de tierra que no puede pisar', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+    g.start(es); g.declareWar(fr, es);
+    const c = G.land.find(x => g.owner[x] === fr && CELL_TERRAIN[x] === 'plain' && T.free(g, x)
+        && [...g.nearCells(x, 5)].every(([j]) => isLand(j) && g.owner[j] === fr && CAPITAL_OF[j] < 0));
+    T.ok(c !== undefined, 'hay sitio');
+    const ring = [...g.nearCells(c, 4)];
+    for (const [j, k] of ring) if (k >= 1 && k <= 3) { const x = g.armyOn(j); if (x) g.removeArmy(x); g.owner[j] = es; g.legal[j] = es; }
+    g.legal[c] = es;
+    // Una casilla francesa a 3 pasos, pero rodeada de Portugal (en paz): no se puede llegar a ella.
+    const island = ring.find(([, k]) => k === 3)[0];
+    g.owner[island] = fr; g.legal[island] = fr;
+    for (let d = 0; d < 6; d++) { const j = G.nb[island * 6 + d]; g.owner[j] = pt; g.legal[j] = pt; }
+    g.version++;
+    const a = T.army(g, fr, c, 3);
+    T.ok(g.starving(fr, c), 'pasa hambre');
+    const home = g.nearestHome(fr, c);
+    T.ok(home >= 0 && home !== island && g.owner[home] === fr && !g.starving(fr, home), 'su casa es Francia, no la isla');
+    g.aiPockets(fr);
+    const b = g.armies.get(a.id);
+    T.ok(b && b.cell !== c && g.landSteps(fr, [home])[b.cell] < g.landSteps(fr, [home])[c], 'da el paso hacia Francia');
+    return true;
+}],
+['A · sin poder atacar, va a la casilla propia que alcance donde no pasa hambre', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es);
+    // Una ciudad española tomada por Francia, en medio de España: con suministro (es ciudad propia) se mueve entero.
+    const p = PROVINCES.find(q => CAPITAL_OF[q.city] < 0 && [...g.nearCells(q.city, 3)].every(([j]) => isLand(j) && g.owner[j] === es));
+    T.ok(p, 'hay sitio');
+    const c = p.city;
+    for (const [j] of g.nearCells(c, 3)) { const x = g.armyOn(j); if (x) g.removeArmy(x); }
+    g.owner[c] = fr; g.version++;
+    const a = T.army(g, fr, c, 0, 3);
+    T.ok(g.starving(fr, c), 'pasa hambre');
+    const two = [...g.nearCells(c, 2)].filter(([j, k]) => k === 2 && T.free(g, j)).map(([j]) => j);
+    const r0 = g.reach(fr, c, g.mp(a), true), can = new Set(g.destinations(r0));
+    const reached = two.filter(j => can.has(j)), hungry = reached[0];
+    const fed = reached.find(j => j !== hungry && G.dirTo(j, hungry) < 0);   // no vecinas entre sí
+    T.ok(fed !== undefined && hungry !== undefined, 'alcanza dos casillas a 2 pasos y no vecinas');
+    g.owner[hungry] = fr;                    // tomada y rodeada de España: allí también pasaría hambre
+    g.owner[fed] = fr; g.legal[fed] = fr;    // francesa de verdad: allí come
+    g.version++;
+    T.ok(g.starving(fr, hungry) && !g.starving(fr, fed), 'una con hambre y otra sin');
+    const out = g.breakOut(fr, a, [g.nearestHome(fr, c)]);
+    T.eq(out?.cell, fed, 'a la que come');
     return true;
 }],
 ['A · la IA rompe el cerco atacando a un vecino con previsión de al menos 1', () => {

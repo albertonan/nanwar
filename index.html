@@ -2596,10 +2596,11 @@ class GameEngine {
     }
     // Cumple una línea de defensa este turno con sus ejércitos libres.
     // Saca a un ejército de una bolsa. Rodeado o sin víveres, rompe el cerco atacando, con una previsión de al menos 1, la
-    // casilla que más lo acerque a `towards`. Si no puede, marcha a la casilla que más valga según `value` (de entre las de
-    // igual valor, la más cercana); por defecto, la propia o aliada más cercana que alcance. Si nada vale y pasa hambre,
-    // da el paso que más lo acerque a `towards`. Devuelve null si ha atacado; si no, el ejército, se haya movido o no.
-    breakOut(id, a, towards, value = c => this.owner[c] === id || this.allied(id, this.owner[c]) ? 1 : 0) {
+    // casilla que más lo acerque a `towards`. Si no puede, marcha a la casilla que alcance este turno que más valga según
+    // `value` (de entre las de igual valor, la de menos coste de movimiento); por defecto, la propia o aliada donde no pase
+    // hambre. Si no alcanza ninguna que valga y pasa hambre, da el paso que más lo acerque a `towards` por tierra que pueda
+    // pisar (propia, aliada o en guerra). Devuelve null si ha atacado; si no, el ejército, se haya movido o no.
+    breakOut(id, a, towards, value = c => (this.owner[c] === id || this.allied(id, this.owner[c])) && !this.starving(id, c) ? 1 : 0) {
         const r = this.reach(id, a.cell, this.mp(a), a.used === 0);
         const near = c => towards.length ? Math.min(...towards.map(t => (G.cx[t] - G.cx[c]) ** 2 + (G.cy[t] - G.cy[c]) ** 2)) : 0;
         const hungry = this.starving(id, a.cell);
@@ -2619,11 +2620,11 @@ class GameEngine {
             if (val > bv || (val === bv && val > 0 && cost < bc)) { best = v; bv = val; bc = cost; }
         }
         if (best === a.cell && hungry && towards.length) {
-            let bd = near(a.cell);
+            const steps = this.landSteps(id, towards);
+            let bd = steps[a.cell];
             for (const v of this.destinations(r)) {
                 if (this.armyAt[v] || !isLand(v)) continue;
-                const d = near(v);
-                if (d < bd) { bd = d; best = v; }
+                if (steps[v] < bd) { bd = steps[v]; best = v; }
             }
         }
         return best !== a.cell ? this.moveArmy(a, best, r) : a;
@@ -4418,7 +4419,7 @@ class GameEngine {
     }
 
     // Cada ejército que pasa hambre y no tiene una orden en marcha (aguantar no cuenta) intenta salir de la bolsa hacia
-    // la casilla propia o aliada más cercana: atacando si tiene una previsión de al menos 1 o marchando si no.
+    // la casilla propia o aliada más cercana donde coma: atacando si tiene una previsión de al menos 1 o marchando si no.
     aiPockets(id) {
         for (const a of [...this.armies.values()]) {
             if (this.over) return;
@@ -4428,18 +4429,35 @@ class GameEngine {
             this.breakOut(id, a, home < 0 ? [] : [home]);
         }
     }
-    // Casilla propia o aliada más cercana a `cell` por tierra (en pasos), o −1.
+    // Tierra que `id` puede pisar: propia, aliada o de un país en guerra con él.
+    enterable(id, c) { const o = this.owner[c]; return o === id || this.allied(id, o) || this.atWar(id, o); }
+    // Casilla propia o aliada donde no pasaría hambre más cercana a `cell`, en pasos por tierra que pueda pisar, o −1.
     nearestHome(id, cell) {
         const seen = new Set([cell]), queue = [cell];
-        for (let i = 0; i < queue.length && i < 4000; i++) {
+        for (let i = 0; i < queue.length; i++) {
             for (let d = 0; d < 6; d++) {
                 const j = G.nb[queue[i] * 6 + d];
-                if (j < 0 || !isLand(j) || seen.has(j)) continue;
-                if (this.owner[j] === id || this.allied(id, this.owner[j])) return j;
+                if (j < 0 || !isLand(j) || seen.has(j) || !this.enterable(id, j)) continue;
+                if ((this.owner[j] === id || this.allied(id, this.owner[j])) && !this.starving(id, j)) return j;
                 seen.add(j); queue.push(j);
             }
         }
         return -1;
+    }
+    // Pasos hasta `sources` por tierra que `id` puede pisar (1e9 si no se llega).
+    landSteps(id, sources) {
+        const dist = new Int32Array(G.N).fill(1e9), queue = [];
+        for (const c of sources) { dist[c] = 0; queue.push(c); }
+        for (let i = 0; i < queue.length; i++) {
+            const u = queue[i];
+            for (let d = 0; d < 6; d++) {
+                const v = G.nb[u * 6 + d];
+                if (v < 0 || !isLand(v) || dist[v] <= dist[u] + 1 || !this.enterable(id, v)) continue;
+                dist[v] = dist[u] + 1;
+                queue.push(v);
+            }
+        }
+        return dist;
     }
 
     // La IA manda con el mismo sistema que el jugador: en cada frente, una ofensiva sobre la ciudad enemiga más cercana
