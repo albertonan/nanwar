@@ -474,6 +474,24 @@ const CHECKS = [
     T.eq(g.aaKnown(es, src()), g.fortLevel(es, target) !== null, 'el integrado, si se conoce la fortificación');
     return true;
 }],
+['3 · con Reconocimiento 2 y sin conocer las fortificaciones, el integrado de unas casamatas sigue siendo antiaéreo que no conoces', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    T.learn(g, es, 'reconocimiento1', 'reconocimiento2');
+    T.eq([g.rules(es).intelExact, g.rules(es).intelLevels], [true, false], 'información exacta, sin niveles');
+    // Ejércitos españoles junto al camino y al blanco, para tenerlo todo a la vista.
+    const [base, target] = T.pair(g, es, fr, () => true, 1);
+    for (const c of [target, ...flightPath(base, target)]) {
+        if (!isLand(c) || g.owner[c] !== fr || g.sees(es, c)) continue;
+        T.army(g, es, [...g.nearCells(c, 3).keys()].find(x => x !== target && T.free(g, x)));
+    }
+    g.fort[target] = 0; g.fortVersion++;
+    T.eq(g.aaCover(es, [base], target).unknown, false, 'todo a la vista y sin antiaéreo');
+    g.fort[target] = 4; g.fortVersion++;
+    const c = g.aaCover(es, [base], target);
+    T.eq([c.fire, c.seen.fire, c.unknown], [20, 0, true], 'casamatas: dispara y no lo sabes');
+    return true;
+}],
 ['3 · el jugador construye un antiaéreo: cobra, lo anota en el parte y no repite casilla', () => {
     const g = T.uiStart('es'), es = g.player;
     T.bare(g); g.nations[es].gold = 100;

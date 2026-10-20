@@ -1075,6 +1075,7 @@ class GameEngine {
         this.nextSquadronId = 1;
         this.airfields = new Map();   // casilla → { owner, left, downUntil }: left, turnos de obra; downUntil, inservible hasta
         this.aaSites = new Map();     // casilla → { owner, left, hits, known }: antiaéreo fijo; known, quién lo conoce
+        this.aaCache = null;          // aaList(): el antiaéreo que dispara, con la clave de versiones con que se calculó
         this.airVersion = 0;          // cambia con escuadrones, aeródromos y antiaéreos
         this.seedAir();
         this.configure({ aggression: 'normal', alliances: 'reales', victory: 0.5, fog: true });
@@ -1996,14 +1997,16 @@ class GameEngine {
     // - Lo que solo cubre el camino derriba: el que no se conoce, de lleno; el conocido se rodea si sobra alcance y, si
     //   no, se sobrevuela a media eficacia. Con varias bases, cuenta el camino que peor lo tenga.
     // Cada fuente cuenta una vez, y las sumas tienen el tope del defensor (el ejército de la casilla o, si no, su dueño).
-    // `seen` es lo mismo con solo lo que conoce `viewer`; `unknown`, si en el blanco o en el camino queda tierra enemiga
-    // donde podría haber antiaéreo que no conoce.
+    // Los pesos de las pérdidas salen de lo que conoce el atacante (`owner`), que es con lo que vuela la misión; `seen`
+    // es lo mismo con solo las fuentes que conoce `viewer`. `unknown`: hay antiaéreo que dispara y `viewer` no conoce
+    // (también el integrado de una ciudad cuya fortificación no conoce), o tierra enemiga en el blanco o en el camino
+    // donde podría haberlo sin que lo sepa.
     aaCover(owner, bases, cell, { viewer = owner, range = this.airRange(owner) } = {}) {
         const A = CONFIG.AIR, def = this.armyOn(cell)?.owner ?? this.owner[cell];
         const cap = A.AA_CAP * (def >= 0 ? this.rules(def) : BASE_RULES).aaPower;
         const paths = bases.map(b => ({ base: b, d: hexDist(b, cell), cells: flightPath(b, cell) }));
         const sources = [];
-        let fire = 0, loss = 0, seenFire = 0, seenLoss = 0;
+        let fire = 0, loss = 0, seenFire = 0, seenLoss = 0, unseen = false;
         for (const src of this.aaList()) {
             if (!this.atWar(owner, src.owner)) continue;
             const r = src.radius, dt = hexDist(src.cell, cell);
@@ -2011,6 +2014,7 @@ class GameEngine {
             const over = dt <= r ? null : paths.filter(p => hexDist(src.cell, p.base) + dt <= p.d + 2 * r && p.cells.some(x => hexDist(x, src.cell) <= r));
             if (over && !over.length) continue;
             const known = this.aaKnown(owner, src), seen = viewer === owner ? known : this.aaKnown(viewer, src);
+            if (!seen) unseen = true;
             let w = 0;   // peso en las pérdidas
             if (!over) {
                 w = known ? A.KNOWN_TARGET : 1;
@@ -2025,7 +2029,7 @@ class GameEngine {
             if (!sources.includes(src.cell)) sources.push(src.cell);
         }
         const hidden = c => isLand(c) && this.atWar(owner, this.owner[c]) && !this.aaVisible(viewer, c);
-        const unknown = hidden(cell) || paths.some(p => p.cells.some(hidden));
+        const unknown = unseen || hidden(cell) || paths.some(p => p.cells.some(hidden));
         const top = x => Math.min(cap, x);
         return { fire: top(fire), loss: top(loss), cap, unknown, sources, seen: { fire: top(seenFire), loss: top(seenLoss) } };
     }
