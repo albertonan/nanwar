@@ -316,6 +316,105 @@ const CHECKS = [
     T.ok(g.roadWork.has(edgeKey(a, d)), 'obra empezada');
     return true;
 }],
+['A · la ficha del ejército explica aislado, sin carretera y sin víveres', () => {
+    const g = T.uiStart('es'), es = g.player, pt = T.nation('pt');
+    g.declareWar(es, pt);
+    const [, c] = T.plainPair(g, es);
+    T.pocket(g, es, pt, c);
+    const a = T.army(g, es, c, 3);
+    g.beginNationTurn(es);
+    ui.select(a.cell);
+    const txt = document.body.textContent;
+    T.ok(/Aislado ×0,9/.test(txt), 'aislado');
+    T.ok(/Sin víveres: pierde 1 unidad dentro de 2 turnos/.test(txt), 'hambre con su cuenta');
+    return true;
+}],
+['A · la ficha al pasar el ratón también lo dice, con «sin carretera al alcance»', () => {
+    const g = T.uiStart('es'), es = g.player, pt = T.nation('pt');
+    g.declareWar(es, pt);
+    const [, c] = T.plainPair(g, es);
+    T.pocket(g, es, pt, c);
+    for (const x of g.nearCells(c, 8).keys()) for (let d = 0; d < 6; d++) g.road[x * 6 + d] = 0;
+    g.roadVersion++;
+    const a = T.army(g, es, c, 3);
+    g.beginNationTurn(es);
+    ui.cellFromEvent = () => a.cell;
+    try { ui.hover({ clientX: 0, clientY: 0 }); } finally { delete ui.cellFromEvent; }
+    const txt = document.querySelector('#tooltip').textContent;
+    T.ok(/Aislado ×0,9/.test(txt), 'aislado: ' + txt);
+    T.ok(/Sin carretera al alcance ×0,85/.test(txt), 'sin carretera: ' + txt);
+    T.ok(/Sin víveres: pierde 1 unidad dentro de 2 turnos/.test(txt), 'hambre: ' + txt);
+    return true;
+}],
+['A · la leyenda explica el borde de sin víveres', () => {
+    T.uiStart('es');
+    T.ok(/Ficha con borde violeta: ejército sin víveres/.test(document.querySelector('#legend').textContent), 'leyenda');
+    return true;
+}],
+['A · la IA saca de la bolsa a un ejército que pasa hambre si puede', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es);
+    const [, c] = T.plainPair(g, fr);
+    T.pocket(g, fr, es, c);
+    const hole = G.nb[c * 6 + [0, 1, 2, 3, 4, 5].find(d => isLand(G.nb[c * 6 + d]))];
+    g.owner[hole] = fr; g.legal[hole] = fr; g.version++;   // una salida
+    const a = T.army(g, fr, c, 3);
+    g.aiStep(fr);
+    T.ok(!g.starving(fr, g.armies.get(a.id)?.cell ?? c), 'ha salido');
+    return true;
+}],
+['A · la IA rompe el cerco atacando a un vecino con previsión de al menos 1', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es);
+    const [n, c] = T.plainPair(g, fr);
+    T.pocket(g, fr, es, c);
+    const weak = T.army(g, es, n, 1), a = T.army(g, fr, c, 4, 2);
+    T.ok(g.starving(fr, c), 'pasa hambre');
+    let hit = -1;
+    const attack = g.attack;
+    g.attack = function (army, from, target, r) { if (army.owner === fr) hit = target; return attack.call(this, army, from, target, r); };
+    g.aiPockets(fr);
+    T.eq(hit, weak.cell, 'ataca al vecino débil');
+    return true;
+}],
+['A · sin nadie a quien atacar, la IA marcha hacia lo suyo', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es);
+    const [, c] = T.plainPair(g, fr);
+    T.pocket(g, fr, es, c);
+    const a = T.army(g, fr, c, 3);
+    g.aiPockets(fr);
+    const b = g.armies.get(a.id);
+    T.ok(b && b.cell !== c, 'se ha movido');
+    T.ok(!g.starving(fr, b.cell), 'ya come');
+    return true;
+}],
+['A · la IA no saca de la bolsa a quien tiene una orden', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es);
+    const [, c] = T.plainPair(g, fr);
+    T.pocket(g, fr, es, c);
+    const a = T.army(g, fr, c, 3);
+    a.order = { kind: 'march', dest: c, stuck: 0 };
+    g.aiPockets(fr);
+    T.eq(g.armies.get(a.id)?.cell, c, 'quieto');
+    return true;
+}],
+['A · declarar la guerra o firmar la paz renueva la carretera al alcance', () => {
+    const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+    g.start(es);
+    const [mine, theirs] = T.border(g, es, pt);
+    for (const x of g.nearCells(mine, 8).keys()) for (let d = 0; d < 6; d++) g.road[x * 6 + d] = 0;
+    const k = [0, 1, 2, 3, 4, 5].find(x => { const j = G.nb[theirs * 6 + x]; return j >= 0 && j !== mine && isLand(j) && g.owner[j] === pt; });
+    g.road[theirs * 6 + k] = 1; g.road[G.nb[theirs * 6 + k] * 6 + (k + 3) % 6] = 1; g.roadVersion++;
+    const units = { infantry: 3, tank: 0, artillery: 0 };
+    T.eq(g.roadInReach(es, mine, units), false, 'en paz no se cruza Portugal');
+    g.declareWar(es, pt);
+    T.eq(g.roadInReach(es, mine, units), true, 'en guerra, la carretera portuguesa está a su alcance');
+    g.makePeace(es, pt, true);
+    T.eq(g.roadInReach(es, mine, units), false, 'con la paz, otra vez no');
+    return true;
+}],
 ];
 
 const exe = process.env.CHROME ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome'].find(existsSync);

@@ -704,7 +704,7 @@ class RealisticMap {
     // Miniatura de un ejército: carro, pelotón o cañón sobre una peana del color del país. Si no se sabe qué es
     // (niebla de guerra sin inteligencia), un camión con lona y el escalón de la OTAN en lugar del número.
     drawArmy(ctx, o) {
-        const { x, y, hexPx, color, type, n, mine, spent, flanked, noSupply, selected, moving, facing, now } = o;
+        const { x, y, hexPx, color, type, n, mine, spent, flanked, noSupply, starving, selected, moving, facing, now } = o;
         const alpha = (o.alpha ?? 1) * (spent ? 0.6 : 1);
         ctx.save();
         ctx.globalAlpha = alpha;
@@ -726,8 +726,8 @@ class RealisticMap {
             ctx.beginPath(); ctx.ellipse(x, y + U * 0.34, U, U * 0.38, 0, 0, Math.PI); ctx.stroke();
         }
         ctx.fillStyle = color; ctx.beginPath(); ctx.ellipse(x, y + U * 0.25, U, U * 0.36, 0, 0, TAU); ctx.fill();
-        if (flanked || noSupply) {
-            ctx.strokeStyle = flanked ? '#e05a47' : '#ff9f1c'; ctx.lineWidth = 2.4;
+        if (starving || flanked || noSupply) {   // la misma señal que el borde de la ficha: sin víveres, rodeado, sin suministro
+            ctx.strokeStyle = starving ? HUNGER : flanked ? '#e05a47' : '#ff9f1c'; ctx.lineWidth = 2.4;
             ctx.beginPath(); ctx.ellipse(x, y + U * 0.3, U, U * 0.37, 0, 0, TAU); ctx.stroke();
         } else {
             ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1;
