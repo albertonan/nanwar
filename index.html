@@ -702,6 +702,7 @@ const RESEARCH_BRANCHES = [
     { id: 'industria', area: 'Estado', name: 'Industria', sub: 'Recursos más eficientes', icon: 'ind' },
     { id: 'infraestructura', area: 'Terreno', name: 'Infraestructura', sub: 'Carreteras que llevan más lejos', icon: 'road' },
     { id: 'movilidad', area: 'Terreno', name: 'Movilidad', sub: 'Mejor paso por cada terreno', icon: 'mnt' },
+    { id: 'naval', area: 'Terreno', name: 'Transporte naval', sub: 'Barcos más rápidos y desembarcos', icon: 'ship' },
     { id: 'fortificacion', area: 'Terreno', name: 'Fortificación', sub: 'Fortalezas aún más duras', icon: 'fort' },
     { id: 'reconocimiento', area: 'Inteligencia', name: 'Reconocimiento', sub: 'Ver más sin espías', icon: 'eye' },
     { id: 'espionaje', area: 'Inteligencia', name: 'Espionaje', sub: 'Espías más baratos y duraderos', icon: 'spy' }
@@ -752,6 +753,11 @@ const TECH_TREE = {
         ['Tropas de montaña', { terrainCost: { mountain: 2, hills: 1.5 } }, [['Entrar en montaña', '3', '2'], ['Entrar en colinas', '2', '1,5']], 'Clave en los Alpes, los Pirineos, los Cárpatos o los Balcanes.'],
         ['Tropas de bosque y pantano', { terrainCost: { forest: 1.5, marsh: 2 } }, [['Entrar en bosque', '2', '1,5'], ['Entrar en pantano', '3', '2']], 'Pensada para Escandinavia, el Báltico y las marismas de Polesia.'],
         ['Pontoneros', { riverCrossing: 0, terrainCost: { lake: 2 }, ignoreRiver: true }, [['Cruzar un río sin puente', '+½', '+0'], ['Cruzar un lago', '4', '2'], ['Defensa del río frente a ti', '×1,25', '×1']], 'Al atacar, el defensor pierde su orilla.']
+    ],
+    naval: [
+        ['Buques de desembarco anfibio', { seaSpeed: 8 }, [['Velocidad en el mar', '6 casillas', '8 casillas']], 'Canarias o Baleares, un turno antes.'],
+        ['Lanchas de desembarco sobre colchón de aire', { amphibious: 0.65 }, [['Fuerza del asalto anfibio', '×0,5', '×0,65']], 'Una playa defendida deja de ser una carnicería, aunque sigue costando sangre.'],
+        ['Transportes rápidos de alta velocidad', { seaSpeed: 10 }, [['Velocidad en el mar', '8 casillas', '10 casillas']], 'Un ejército cruza el Mediterráneo o el Báltico en un par de turnos.']
     ],
     fortificacion: [
         ['Hormigón armado', { fortDefense: 2, fortTurns: 2 }, [['Defensa en casilla fortificada', '×1,75', '×2'], ['Turnos de obra', '3', '2']], 'En montaña o en una capital ya pasa del tope ×3: por eso el nivel 2 lo sube.'],
@@ -4370,7 +4376,7 @@ class GameEngine {
             const weight = {
                 infanteria: 1, blindados: 1, artilleria: 1, doctrina: war ? 2 : 0.6,
                 movilizacion: war ? 1 : 2, ciencia: war ? 0.5 : 3, industria: war ? 0.5 : 2.5, infraestructura: war ? 0.5 : 2,
-                movilidad: rough > land * 0.3 ? 2 : 0.5, fortificacion: war ? 2 : 0.5, reconocimiento: 0, espionaje: 0
+                movilidad: rough > land * 0.3 ? 2 : 0.5, naval: this.needsSea(id) ? 2 : 0.3, fortificacion: war ? 2 : 0.5, reconocimiento: 0, espionaje: 0
             };
             weight[main] += war ? 2 : 0.5;
             if (fierce) for (const b of ['infanteria', 'blindados', 'artilleria', 'doctrina']) weight[b] *= 1.5;
@@ -4494,6 +4500,23 @@ class GameEngine {
             }
         }
         return -1;
+    }
+    // ¿Le hace falta el mar? Tiene alguna provincia sin camino por tierra hasta su capital, o está en guerra con un país
+    // con el que no comparte frontera de tierra. Se calcula una vez por país y turno.
+    needsSea(id) {
+        const key = `${this.turn}:${this.version}`, c = (this.seaNeed ??= new Map()).get(id);
+        if (c?.key === key) return c.need;
+        const cap = this.nations[id].capitalCell, dist = this.landSteps(id, [cap]);
+        let need = false;
+        const foes = new Set(this.enemiesOf(id)), touch = new Set();
+        for (const i of G.land) {
+            if (this.owner[i] !== id) continue;
+            if (dist[i] >= 1e9) need = true;
+            for (let d = 0; d < 6; d++) { const v = G.nb[i * 6 + d]; if (v >= 0 && isLand(v) && foes.has(this.owner[v])) touch.add(this.owner[v]); }
+        }
+        for (const e of foes) if (!touch.has(e)) need = true;
+        this.seaNeed.set(id, { key, need });
+        return need;
     }
     // Pasos hasta `sources` por tierra que `id` puede pisar (1e9 si no se llega).
     landSteps(id, sources) {
@@ -4667,6 +4690,7 @@ const RS_ICON = {
     sci: '<path d="M12 4.5h8M13.5 4.5v8.2L6.6 24.3A2.5 2.5 0 0 0 8.8 28h14.4a2.5 2.5 0 0 0 2.2-3.7l-6.9-11.6V4.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.6 21h12.8l2.4 4.2c.4.7-.1 1.3-.8 1.3H8c-.7 0-1.2-.6-.8-1.3z" fill="currentColor"/>',
     ind: '<path d="M3 28V15.5l7 4v-4l7 4v-4l5 2.9V5.5h5V28z" fill="currentColor"/><path d="M7 23.5h3M13 23.5h3M19 23.5h3" stroke="#000" stroke-opacity=".3" stroke-width="2"/>',
     road: RS_FRAME + '<path d="M9 20v-6h14v6M16 14v6" fill="none" stroke="currentColor" stroke-width="2.2"/>',
+    ship: '<circle cx="16" cy="6.5" r="3" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M16 9.5V27M10.5 14.5h11M4.5 18.5c.6 5.4 5.4 8.5 11.5 8.5s10.9-3.1 11.5-8.5M4.5 18.5l-2 3M27.5 18.5l2 3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>',
     mnt: '<path d="M2 27L11.5 10l5 8.5 3.5-5L30 27z" fill="currentColor"/><path d="M9.2 14.2l2.3-4.2 2.4 4.2-1.2-.6-1.2.9-1.1-.9z" fill="#fff" fill-opacity=".5"/>',
     fort: '<path fill="currentColor" fill-rule="evenodd" d="M4 24A12 11 0 0 1 28 24zM10 17.5h12v2.6H10z"/><rect x="2" y="24" width="28" height="3.4" rx="1.4" fill="currentColor"/>',
     eye: '<rect x="5" y="7" width="8" height="11" rx="2.5" fill="currentColor"/><rect x="19" y="7" width="8" height="11" rx="2.5" fill="currentColor"/><rect x="12" y="10" width="8" height="5" fill="currentColor"/><circle cx="9" cy="21" r="6.5" fill="currentColor"/><circle cx="23" cy="21" r="6.5" fill="currentColor"/><circle cx="9" cy="21" r="3.4" fill="#000" fill-opacity=".3"/><circle cx="23" cy="21" r="3.4" fill="#000" fill-opacity=".3"/>',

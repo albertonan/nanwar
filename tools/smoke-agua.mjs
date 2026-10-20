@@ -23,6 +23,7 @@ const setup = () => {
         game(seed = 7, fog = false) { const g = new GameEngine(seed); g.configure({ aggression: 'normal', alliances: 'ninguna', victory: 1, fog }); return g; },
         nation: key => E.countries.findIndex(c => c.key === key),
         eq(a, b, msg) { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${msg}: ${JSON.stringify(a)} ≠ ${JSON.stringify(b)}`); },
+        learn(g, id, ...ids) { for (const t of ids) g.nations[id].tech.done.add(t); g.techVersion++; },
         ok(c, msg) { if (!c) throw new Error(msg); },
         // Ejército nuevo de `owner` en `cell` (sin moverse aún este turno).
         army(g, owner, cell, inf = 1, tank = 0, art = 0) { return g.settle(g.newArmy(owner, cell, { infantry: inf, tank, artillery: art }, 0)); },
@@ -265,7 +266,19 @@ const CHECKS = [
     g.battle(boat, def, c);
     T.eq(boat.cell, c, 'desembarca');
     return true;
-}]
+}],
+['4 · Transporte naval acelera los barcos y mejora el asalto', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    const [, s] = T.coast(g, es);
+    const a = T.embark(g, es, s, 3);
+    T.learn(g, es, 'naval1');
+    T.eq(g.mp(a), 8 * MOVE, 'nivel 1');
+    T.learn(g, es, 'naval2', 'naval3');
+    T.eq([g.mp(a), g.rules(es).amphibious], [10 * MOVE, 0.65], 'niveles 2 y 3');
+    return true;
+}],
+['4 · el árbol tiene 13 ramas y 39 investigaciones', () => { T.eq([RESEARCH_BRANCHES.length, TECHS.length], [13, 39], 'árbol'); return true; }]
 ];
 
 const exe = process.env.CHROME ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome'].find(existsSync);
