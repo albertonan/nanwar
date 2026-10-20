@@ -1003,7 +1003,8 @@ const edgeKey = (u, d) => { const v = G.nb[u * 6 + d]; return v >= 0 && v < u ? 
 const kmCells = km => Math.max(1, Math.round(km / MAP.cellKm));
 // El mayor radio que puede tener un antiaéreo fijo con la investigación, en casillas: lo que se supone de quien no se
 // sabe qué investiga.
-const AA_MAX_RADIUS = kmCells(Math.max(BASE_RULES.aaRangeKm, ...TECHS.map(t => t.fx.aaRangeKm ?? 0)));
+const AA_MAX_KM = Math.max(BASE_RULES.aaRangeKm, ...TECHS.map(t => t.fx.aaRangeKm ?? 0));
+const AA_MAX_RADIUS = kmCells(AA_MAX_KM);
 // Coordenadas cúbicas de una casilla (las filas impares van desplazadas a la derecha) y vuelta a su índice.
 const cubeOf = i => { const r = Math.floor(i / G.cols), q = i % G.cols - (r - (r & 1)) / 2; return [q, r, -q - r]; };
 const cubeCell = (q, r) => r * G.cols + q + (r - (r & 1)) / 2;
@@ -3185,7 +3186,7 @@ class GameEngine {
         const range = 2 * this.rules(a.owner).seaSpeed;
         const wait = this.opMembers(op).some(b => b !== a && afloat(b.cell) && shore(b) === -1
             && Math.hypot(G.cx[b.cell] - G.cx[coast], G.cy[b.cell] - G.cy[coast]) / G.W <= range);
-        if (!wait) return false;
+        if (!wait) { a.seaWait = 0; return false; }
         a.seaWait ||= this.turn;
         return this.turn - a.seaWait < 2;
     }
@@ -7560,8 +7561,9 @@ class GameUI {
                 if (m.down) out.push(`<span class="warn-text">Inservible hasta el turno ${g.airfields.get(cell).downUntil}</span>`);
             } else if (m.kind === 'aa') {
                 if (m.left) { out.push(`Antiaéreo fijo en obras: ${plural(m.left, 'turno', 'turnos')}`); continue; }
-                const R = g.aaRadius(m.owner);
-                out.push(`Antiaéreo fijo${who(m.owner)}${m.down ? ' (dañado)' : ''}: cubre ${plural(R, 'casilla', 'casillas')} (${g.rules(m.owner).aaRangeKm} km)`);
+                // Solo se enseña el alcance real si se conoce la investigación de su dueño; si no, el que se supone.
+                const known = g.knowsResearch(g.player, m.owner), R = g.aaReach(g.player, m.owner), km = known ? g.rules(m.owner).aaRangeKm : AA_MAX_KM;
+                out.push(`Antiaéreo fijo${who(m.owner)}${m.down ? ' (dañado)' : ''}: cubre ${plural(R, 'casilla', 'casillas')} (${km} km)`);
             } else if (m.kind === 'patrol') {
                 out.push(`${m.owner === g.player ? 'Protegida por tus escuadrones hasta tu próximo turno' : `Protegida por escuadrones${who(m.owner)}`}: ${plural(m.n, 'escuadrón', 'escuadrones')}`);
             }
@@ -7621,7 +7623,7 @@ class GameUI {
             if (w?.up && lv !== null) lines.push(`Reparando la fortificación: ${plural(w.left, 'turno', 'turnos')}`);
             else if (g.owner[cell] === g.player && g.fort[cell] < g.fortMax(g.player)) {   // dañada: si se puede reparar ahora y, si no, por qué
                 const why = g.fortRepairWhy(g.player, cell);
-                lines.push(`<span class="muted">Dañada: ${why ? `no se puede reparar: ${why}` : 'se repara con Fortificar'}</span>`);
+                lines.push(`<span class="muted">Dañada${why ? `; no se puede reparar porque ${why}` : ': se repara con Fortificar'}</span>`);
             }
         }
         else if (g.fortWork.has(cell)) lines.push(`Fortificando: ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}`);
@@ -7931,7 +7933,7 @@ class GameUI {
     airPick() {
         const g = this.game, p0 = g.player, A = this.air;
         if (p0 === null || A.base < 0) return null;
-        const known = g.aaList().filter(s => g.atWar(p0, s.owner) && g.aaKnown(p0, s)).map(s => ({ cell: s.cell, owner: s.owner, radius: s.radius, kind: s.kind }));
+        const known = g.aaList().filter(s => g.atWar(p0, s.owner) && g.aaKnown(p0, s)).map(s => ({ cell: s.cell, owner: s.owner, radius: g.knowsResearch(p0, s.owner) ? s.radius : AA_MAX_RADIUS, kind: s.kind }));
         return { bases: [A.base], range: g.airRange(p0), target: A.target, path: A.target >= 0 ? flightPath(A.base, A.target) : null, known };
     }
     // Estado de un escuadrón, en pocas palabras.
@@ -8023,7 +8025,7 @@ class GameUI {
                 const k = a && g.armyView(p0, a).n !== null ? g.strikeLoss(p0, a, 0.5) : 0;
                 what = `<span class="small" title="Cada escuadrón: ${pct(o.down)} % de que lo derriben y ${pct(o.damaged)} % de que vuelva dañado">${pct(o.hit)} % de acierto, ${lost >= 0.5 ? `pierdes unos ${Math.round(lost)}` : 'casi sin pérdidas'}${k ? `; le quitarías ${k === 1 ? 'una unidad' : `unas ${k} unidades`}` : ''}</span>`;
                 if (!o.known) warn.add(`A ciegas: rinde ${r.blindHit === 0.5 ? 'la mitad' : `el ${pct(r.blindHit)} %`}. Con la casilla a la vista y Reconocimiento 2 o un espía, acertarías más.`);
-                if (o.unknown) warn.add('Puede haber antiaéreo que no conoces.');
+                if (o.unknown) warn.add('Puede haber antiaéreo que no conoces. Lo aclaran ver la zona y la ruta (Reconocimiento 2 o un satélite) y espiar su investigación.');
                 if (o.patrol) guarded.push([kind, o]);
                 if (o.fire || o.loss) seen = `Antiaéreo que conoces: ${Math.round(o.fire)} de fuerza sobre el blanco${o.loss > o.fire ? ' y más en el camino' : ''}, contra los ${Math.round(o.power)} de tus escuadrones.`;
             }

@@ -797,6 +797,7 @@ const CHECKS = [
     T.eq([o.fire, o.unknown], [0, true], 'no cuenta');
     const text = () => document.querySelector('#card').textContent;
     T.ok(/Puede haber antiaéreo que no conoces/.test(text()), 'avisa');
+    T.ok(/Puede haber antiaéreo que no conoces. Lo aclaran.*Reconocimiento 2.*espiar su investigación/.test(text()), 'y dice qué lo aclara');
     T.ok(/A ciegas: rinde la mitad/.test(text()), 'a ciegas');
     T.ok(!ui.view.airPick.known.some(k => k.cell === target), 'el mapa no lo dibuja');
     T.luck(g, 0.2);
@@ -932,6 +933,22 @@ const CHECKS = [
     const g = T.uiStart('es'), es = g.player;
     const [, c] = T.plainPair(g, es), a = T.army(g, es, c, 4); a.disorgUntil = g.turn + 1;
     T.ok(ui.wearLines(a).some(l => /Desorganizado ×0,8/.test(l)), 'línea');
+    return true;
+}],
+['Pend B · el alcance de un antiaéreo conocido no delata su investigación: sin conocerla, se enseña el mayor', () => {
+    const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr');
+    g.declareWar(es, fr); T.bare(g);
+    const [, target] = T.pair(g, es, fr), shown = () => [T.hover(target), ui.view.airPick?.known.find(k => k.cell === target)?.radius];
+    T.site(g, fr, target).known.add(es);
+    ui.setTool('air');
+    const want = `cubre ${AA_MAX_RADIUS} casillas (150 km)`;
+    T.ok(!g.knowsResearch(es, fr), 'no conoce su investigación');
+    const [t0] = shown();
+    T.ok(t0.includes(want), `sin Defensa aérea 2: ${t0}`);
+    T.learn(g, fr, 'antiaerea1', 'antiaerea2'); g.airVersion++;
+    T.ok(g.aaRadius(fr) === AA_MAX_RADIUS, 'el real ya es el mayor');
+    const [t1] = shown();
+    T.eq(t1.match(/cubre[^)]*[)]/)?.[0], t0.match(/cubre[^)]*[)]/)?.[0], 'con Defensa aérea 2, lo mismo');
     return true;
 }],
 ['6 · la tarjeta del ratón: aeródromo, inservible, antiaéreo dañado y casilla protegida', () => {
@@ -1744,7 +1761,7 @@ const CHECKS = [
     T.ok(/Dañada: se repara con Fortificar/.test(T.hover(c)), 'se puede');
     g.declareWar(es, fr); T.army(g, fr, a, 1);
     const t = T.hover(c);
-    T.ok(!/se repara con Fortificar/.test(t) && /no se puede reparar: hay un enemigo al lado/.test(t), `con el enemigo al lado: ${t}`);
+    T.ok(!/se repara con Fortificar/.test(t) && /Dañada; no se puede reparar porque hay un enemigo al lado/.test(t), `con el enemigo al lado: ${t}`);
     return true;
 }],
 ['Pend 5 · solo repara su dueño legal: la tierra ocupada no', () => {
