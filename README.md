@@ -28,6 +28,15 @@ De lejos solo se ven las capitales y, de los ejércitos, los tuyos, los de tus e
 
 El terreno de cada casilla sale de datos reales y cuenta en las reglas (coste de mover y defensa): llanura 1, urbano 1 (×1,4), bosque 2 (×1,25), colinas 2 (×1,3), montaña 3 (×1,6), pantano 3 (×1,2) y lago 4. Cruzar un río sin carretera cuesta medio punto más, y quien defiende al otro lado tiene ×1,25.
 
+**Desgaste.** Conquistar una casilla a la fuerza no borra sus carreteras: deja los tramos rotos. Un tramo roto no vale para mover, ni para la renta (red unida a la capital), ni para el suministro; se dibuja a trazos con una marca de corte, y la capa Logística resalta los tuyos. Para repararlo, con la herramienta Carretera pulsa la casilla y elige «Reparar N tramos»: cuesta la mitad de construirlo de nuevo, tarda lo que una obra de fortificación (3 turnos, menos con Fortificación) y exige que ambas casillas sean tuyas. La obra se para mientras haya un ejército enemigo en guerra sobre la casilla o al lado. Al acabar, el tramo vuelve a ser lo que era (una autopista sigue siendo autopista). Construir encima de un tramo roto también lo arregla.
+
+Tres reglas más castigan al ejército que se interna sin apoyo, y se multiplican entre sí y con rodeado y cercado:
+- **Aislado:** fuera de una ciudad y sin ejército propio o aliado en las seis casillas vecinas, ataque y defensa ×0,9.
+- **Sin carretera al alcance:** en tierra cuyo dueño legal es un enemigo en guerra, si no llega con todo su movimiento de un turno a ningún tramo de carretera intacto (de quien sea), ×0,85.
+- **Sin víveres:** en tierra ocupada de un enemigo en guerra con las seis vecinas también enemigas, mar o borde del mapa, pierde 1 unidad cada 3 turnos seguidos (primero infantería, luego artillería y luego blindados); con Doctrina 3 (Sanidad militar), cada 4. Se ve por el borde violeta de la ficha, y la ficha dice cuánto falta.
+
+Todo aparece en la ficha del ejército, en la tarjeta al pasar el ratón y en el parte de batalla.
+
 Las partidas se guardan en el propio dispositivo (autoguardado al final de cada turno y tres ranuras por mapa). Para pasar una partida a otro dispositivo, usa «Partida → Exportar a archivo» e «Importar archivo». Cargar o importar una partida del otro mapa cambia a ese mapa.
 
 ## Investigación
@@ -56,7 +65,7 @@ Para que una guerra larga no obligue a mover ficha a ficha, se manda en tres esc
 - **Plantillas y refuerzos**: siete plantillas de serie (guarnición, brigadas de infantería, mecanizada y acorazada, punta de lanza, grupo de artillería y división) y hasta doce propias. Con oro por turno, una operación recluta su plantilla (o la sugerida según su tipo, su objetivo y el terreno) en las ciudades más cercanas; las tropas marchan a la zona de reunión y, completa, entra en la operación.
 - **Directiva nacional** (pestaña Mando): postura (defensa total, desgaste, ofensiva limitada o guerra total), objetivos estratégicos marcados desde la ficha de cada provincia, con aviso al cumplirlos, y un presupuesto opcional (apagado al empezar) que reparte parte de la renta entre refuerzos, investigación, fortificación y carreteras. Las operaciones se agrupan por frente, con prioridad alta, media o baja; un frente en guerra sin línea lo avisa una vez y propone una línea sobre el tramo por donde aprieta el enemigo, llevada al mejor terreno cercano con su relación prevista (se ve en el mapa al pasar por el botón), y una ofensiva; el resto del frente queda a las guarniciones. La retaguardia manda a la reserva lo que sobra en las ciudades sin peligro. De lejos se ve una ficha por operación y, al volver al turno, un parte de operaciones.
 
-La IA manda con el mismo sistema: en cada frente, una ofensiva si es lo bastante fuerte y una línea en buen terreno si no, que se repliega igual que las tuyas. Sus ofensivas se ven venir con un espía en la provincia de salida o del objetivo, o con Reconocimiento aéreo.
+La IA manda con el mismo sistema: en cada frente, una ofensiva si es lo bastante fuerte y una línea en buen terreno si no, que se repliega igual que las tuyas. Sus ofensivas se ven venir con un espía en la provincia de salida o del objetivo, o con Reconocimiento aéreo. También repara carreteras (primero las que tocan ciudades o recursos) y saca del cerco a los ejércitos sin víveres, atacando o marchando a la casilla propia más cercana.
 
 ## Archivos
 
@@ -75,6 +84,7 @@ La IA manda con el mismo sistema: en cada frente, una ofensiva si es lo bastante
 | `tools/build-terrain.mjs` | Añade al `europa-data.js` existente el terreno real por casilla y los ríos, y genera `relieve.png`. Descarga los datos la primera vez a `tools/cache/` (unos 50 s). |
 | `tools/smoke-research.mjs` | Pruebas del motor y de la interfaz en el navegador (Playwright): investigación, sus efectos en las reglas, la IA, la inteligencia y las insignias. |
 | `tools/smoke-mando.mjs` | Pruebas del mando estratégico en el navegador (Playwright): órdenes de varios turnos, operaciones, plantillas y refuerzos, directiva, teatros y la IA con operaciones. |
+| `tools/smoke-desgaste.mjs` | Pruebas del desgaste en el navegador (Playwright): carreteras rotas y su reparación, aislado, sin carretera, sin víveres, y la IA que rompe bolsas. |
 | `tools/smoke-vista.mjs` | Prueba en el navegador (Playwright): empieza una partida, comprueba la vista realista y las animaciones y guarda capturas. |
 | `tools/perf-mapa.mjs` | Mide cuánto cuesta dibujar el mapa al arrastrar y al hacer zoom, en las dos vistas y los dos mapas. |
 | `tools/smoke-mundo.mjs` | Prueba en el navegador (Playwright) del selector de mapas y del mapa del mundo: relieve, turnos de la IA, fotogramas y cargar una partida del otro mapa. |
