@@ -136,6 +136,59 @@ const CHECKS = [
     const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
     T.eq([h.road[a * 6 + d], h.broken[a * 6 + d], h.broken[b * 6 + (d + 3) % 6]], [0, 1, 1], 'igual tras cargar');
     return true;
+}],
+['B6 · reparar cuesta la mitad, tarda los turnos de una fortificación y devuelve la autopista', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    const [a, b] = T.plainPair(g, es), d = G.dirTo(a, b);
+    g.broken[a * 6 + d] = 2; g.broken[b * 6 + (d + 3) % 6] = 2;
+    const full = g.roadEdgeCost(a, d, 2, g.rules(es).roadCost);
+    const plan = g.repairPlan(es, a);
+    T.eq([plan.edges.length, plan.cost], [1, Math.round(full / 2)], 'un tramo a mitad de precio');
+    const gold = g.nations[es].gold = 1e4;
+    T.eq(g.startRepair(es, plan), 1, 'en obra');
+    T.eq(g.nations[es].gold, gold - plan.cost, 'cobrado');
+    T.eq(g.repairPlan(es, a), null, 'no se puede empezar dos veces');
+    for (let i = 0; i < g.rules(es).fortTurns; i++) g.beginNationTurn(es);
+    T.eq([g.road[a * 6 + d], g.broken[a * 6 + d], g.roadWork.size], [2, 0, 0], 'autopista otra vez');
+    return true;
+}],
+['B6 · la obra se para con el enemigo al lado y no se puede reparar un tramo con una casilla ajena', () => {
+    const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+    g.start(es); g.declareWar(es, pt);
+    const [mine, theirs] = T.border(g, es, pt), d = G.dirTo(mine, theirs);
+    g.broken[mine * 6 + d] = 1; g.broken[theirs * 6 + (d + 3) % 6] = 1;
+    T.eq(g.repairPlan(es, mine)?.edges.some(([u, k]) => edgeKey(u, k) === edgeKey(mine, d)) ?? false, false, 'el tramo hacia Portugal no se ofrece');
+    const [a, b] = T.plainPair(g, es), k = G.dirTo(a, b);
+    g.broken[a * 6 + k] = 1; g.broken[b * 6 + (k + 3) % 6] = 1;
+    g.nations[es].gold = 1e4;
+    g.startRepair(es, g.repairPlan(es, a));
+    const foeCell = [0, 1, 2, 3, 4, 5].map(x => G.nb[a * 6 + x]).find(j => j >= 0 && j !== b && T.free(g, j));
+    T.army(g, pt, foeCell, 1);
+    const left = g.roadWork.get(edgeKey(a, k)).left;
+    g.beginNationTurn(es);
+    T.eq(g.roadWork.get(edgeKey(a, k)).left, left, 'parada');
+    return true;
+}],
+['B6 · la IA repara sus carreteras rotas', () => {
+    const g = T.game(), fr = T.nation('fr');
+    g.start(T.nation('es'));
+    const [a, b] = T.plainPair(g, fr), d = G.dirTo(a, b);
+    g.broken[a * 6 + d] = 1; g.broken[b * 6 + (d + 3) % 6] = 1;
+    g.nations[fr].gold = 1e4;
+    T.ok(g.aiRepairRoads(fr, 1e4) > 0, 'gasta en reparar');
+    T.ok(g.roadWork.has(edgeKey(a, d)), 'obra empezada');
+    return true;
+}],
+['B6 · las obras de reparación se guardan', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    const [a, b] = T.plainPair(g, es), d = G.dirTo(a, b);
+    g.broken[a * 6 + d] = 1; g.broken[b * 6 + (d + 3) % 6] = 1;
+    g.nations[es].gold = 1e4; g.startRepair(es, g.repairPlan(es, a));
+    const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+    T.eq([...h.roadWork], [...g.roadWork], 'misma obra');
+    return true;
 }]
 ];
 
