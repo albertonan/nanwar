@@ -1654,27 +1654,32 @@ class GameEngine {
         }
         return edges.length ? { edges, cost: Math.round(cost), cls: 'repair' } : null;
     }
-    // Pone en obra los tramos del plan y cobra; devuelve cuántos.
+    // Pone en obra los tramos del plan que aún se puedan reparar y cobra solo esos (la mitad de construirlos); devuelve
+    // cuántos. Se salta los que ya no están rotos, ya están en obra, tienen una casilla ajena o un enemigo al lado.
     startRepair(id, plan) {
-        const n = this.nations[id];
-        if (!plan?.edges?.length || plan.cost > n.gold) return 0;
-        let started = 0;
+        const n = this.nations[id], mult = this.rules(id).roadCost;
+        if (!plan?.edges?.length) return 0;
+        const go = [];
+        let cost = 0;
         for (const [u, d] of plan.edges) {
-            const cls = this.broken[u * 6 + d], key = edgeKey(u, d);
-            if (!cls || this.roadWork.has(key) || this.owner[u] !== id || this.owner[G.nb[u * 6 + d]] !== id) continue;
-            this.roadWork.set(key, { owner: id, left: this.rules(id).fortTurns, cls });
-            started++;
+            const cls = this.broken[u * 6 + d], key = edgeKey(u, d), v = G.nb[u * 6 + d];
+            if (!cls || this.roadWork.has(key) || this.owner[u] !== id || this.owner[v] !== id || this.repairBlocked(id, u, v)) continue;
+            go.push([key, cls]);
+            cost += this.roadEdgeCost(u, d, cls, mult) / 2;
         }
-        if (!started) return 0;
+        cost = Math.round(cost);
+        if (!go.length || cost > n.gold) return 0;
+        for (const [key, cls] of go) this.roadWork.set(key, { owner: id, left: this.rules(id).fortTurns, cls });
         this.roadVersion++;
-        n.gold -= plan.cost;
-        return started;
+        n.gold -= cost;
+        return go.length;
     }
     playerRepair(plan) {
         if (this.over || !plan) return false;
-        if (plan.cost > this.nations[this.player].gold) { this.log(`Fondos insuficientes: la reparación cuesta ${plan.cost}g.`); return false; }
+        const nat = this.nations[this.player], gold = nat.gold;
+        if (plan.cost > gold) { this.log(`Fondos insuficientes: la reparación cuesta ${plan.cost}g.`); return false; }
         const n = this.startRepair(this.player, plan);
-        if (n) this.log(`Reparas ${plural(n, 'tramo', 'tramos')} de carretera por ${plan.cost}g.`);
+        if (n) this.log(`Reparas ${plural(n, 'tramo', 'tramos')} de carretera por ${gold - nat.gold}g.`);
         return n > 0;
     }
     // La IA repara primero lo que toca ciudades o yacimientos y luego el resto, hasta agotar el presupuesto; devuelve el oro gastado.
@@ -1696,7 +1701,7 @@ class GameEngine {
             const v = G.nb[c * 6 + d];
             if (this.repairBlocked(id, c, v)) continue;
             const cost = Math.round(this.roadEdgeCost(c, d, this.broken[c * 6 + d], this.rules(id).roadCost) / 2);
-            if (cost > budget - spent) break;
+            if (cost > budget - spent) continue;   // otro tramo más barato puede caber aún
             if (this.startRepair(id, { edges: [[c, d]], cost, cls: 'repair' })) spent += cost;
         }
         return spent;
@@ -1843,7 +1848,7 @@ class GameEngine {
             const where = this.placeName(a.cell), gone = countUnits(a.units) === 0;
             if (gone) this.removeArmy(a);
             if (id === this.player) this.log(`Tu ejército en ${where} pasa hambre: pierde ${k === 'infantry' ? 'una infantería' : k === 'tank' ? 'un tanque' : 'una artillería'}${gone ? ' y se disuelve' : ''}.`);
-            else if (this.sees(this.player, a.cell)) this.log(`El ejército enemigo en ${where} pierde una unidad por hambre.`);
+            else if (this.player !== null && this.atWar(this.player, id) && this.sees(this.player, a.cell)) this.log(`El ejército enemigo en ${where} pierde una unidad por hambre.`);
             this.armyVersion++;
         }
     }
@@ -3711,11 +3716,11 @@ class GameEngine {
             this.fortVersion++;
             if (id === this.player) this.log(`Fortificación terminada en ${done} casilla${done > 1 ? 's' : ''}.`);
         }
-        let fixed = 0;
+        let fixed = 0, dropped = 0;
         for (const [key, w] of [...this.roadWork]) {
             if (w.owner !== id) continue;
             const u = Math.floor(key / 6), d = key % 6, v = G.nb[u * 6 + d];
-            if (this.owner[u] !== id || this.owner[v] !== id || !this.broken[u * 6 + d]) { this.roadWork.delete(key); continue; }
+            if (this.owner[u] !== id || this.owner[v] !== id || !this.broken[u * 6 + d]) { this.roadWork.delete(key); dropped++; continue; }
             if (this.repairBlocked(id, u, v)) continue;
             if (--w.left <= 0) {
                 this.road[u * 6 + d] = w.cls; this.road[v * 6 + (d + 3) % 6] = w.cls;
@@ -3723,10 +3728,8 @@ class GameEngine {
                 this.roadWork.delete(key); fixed++;
             }
         }
-        if (fixed) {
-            this.roadVersion++;
-            if (id === this.player) this.log(`Reparados ${plural(fixed, 'tramo', 'tramos')} de carretera.`);
-        }
+        if (fixed || dropped) this.roadVersion++;   // la obra que se cae también deja de pintarse
+        if (fixed && id === this.player) this.log(`Reparados ${plural(fixed, 'tramo', 'tramos')} de carretera.`);
         this.nations[id].recruited.clear();
         if (id === this.player) this.spyTurn();
         for (const [cell, s] of [...this.sieges]) {
@@ -4232,6 +4235,7 @@ class GameEngine {
         this.aiDiplomacy(id, powers);
         this.aiResearch(id);
         this.aiForts(id);   // antes de reclutar: en guerra el reclutamiento gasta todo el oro
+        this.aiRepairs(id);   // también antes de reclutar, por lo mismo
         this.aiPockets(id);   // antes de sus ataques: los que pasan hambre salen de la bolsa
         this.aiCommand(id, powers);
         this.aiRecruit(id);
@@ -4423,8 +4427,8 @@ class GameEngine {
     aiPockets(id) {
         for (const a of [...this.armies.values()]) {
             if (this.over) return;
-            if (a.owner !== id || !this.armies.has(a.id) || this.armyOn(a.cell) !== a || this.mp(a) <= 0) continue;
-            if ((a.order && a.order.kind !== 'hold') || a.direct === this.turn || !this.starving(id, a.cell)) continue;
+            if (a.owner !== id || !this.armies.has(a.id) || this.armyOn(a.cell) !== a || !this.starving(id, a.cell)) continue;
+            if ((a.order && a.order.kind !== 'hold') || a.direct === this.turn || this.mp(a) <= 0) continue;
             const home = this.nearestHome(id, a.cell);
             this.breakOut(id, a, home < 0 ? [] : [home]);
         }
@@ -4524,13 +4528,20 @@ class GameEngine {
         if (cells.length) this.buildFort(id, { cells, cost: cells.length * fortCost });
     }
 
+    // Repara sus carreteras rotas antes de reclutar (y aunque haya perdido la capital). En guerra, con una cuarta parte
+    // del oro, que el resto es para tropas; en paz, con lo que le sobra de la reserva, como las carreteras nuevas.
+    aiRepairs(id) {
+        const n = this.nations[id];
+        if (this.enemiesOf(id).length) { this.aiRepairRoads(id, n.gold * 0.25); return; }
+        const budget = n.gold - this.aiReserve(id) * 0.5;
+        if (budget >= CONFIG.ROAD_COST * 2) this.aiRepairRoads(id, budget * 0.7);
+    }
     // Une a la red de carreteras la ciudad o el yacimiento más valioso que aún no lo esté (una obra por turno;
-    // en guerra solo con el oro que sobre tras reclutar).
+    // en guerra solo con el oro que sobre tras reclutar). Las reparaciones ya se han pagado antes, en aiRepairs.
     aiRoads(id) {
         const atWar = this.enemiesOf(id).length > 0;
         const n = this.nations[id], budget = atWar ? n.gold * 0.5 : n.gold - this.aiReserve(id) * 0.5;
         if (budget < CONFIG.ROAD_COST * 2) return;
-        const spent = this.aiRepairRoads(id, budget * 0.7);   // antes de las ruinas de la capital: arreglar vale aunque se haya perdido
         const e = this.economy(id);
         const cap = n.capitalCell;
         if (this.owner[cap] !== id) return;
@@ -4541,7 +4552,7 @@ class GameEngine {
         const loose = targets[0];
         if (!loose) return;
         const plan = this.planRoad(id, loose.cell, c => e.seen[c] === 1, 1);
-        if (plan && plan.cost <= budget * 0.7 - spent) this.buildRoad(id, plan);
+        if (plan && plan.cost <= budget * 0.7) this.buildRoad(id, plan);
     }
 }
 
@@ -4843,7 +4854,7 @@ class MapView {
         }
         // Tramos rotos (línea y marca de corte en su centro) y reparaciones en obra
         const g = this.game, k = G.S * 0.2;
-        this.cut = { line: new Path2D(), mark: new Path2D(), work: new Path2D(), mine: new Path2D() };
+        this.cut = { line: new Path2D(), mark: new Path2D(), work: new Path2D(), edges: [] };
         for (const i of G.land) {
             for (let d = 0; d < 3; d++) {
                 if (!g.broken[i * 6 + d]) continue;
@@ -4852,10 +4863,28 @@ class MapView {
                 const into = g.roadWork.has(edgeKey(i, d)) ? this.cut.work : this.cut.line;
                 into.moveTo(x0, y0); into.lineTo(x1, y1);
                 this.cut.mark.moveTo(mx - nx, my - ny); this.cut.mark.lineTo(mx + nx, my + ny);
-                if (g.owner[i] === g.player && g.owner[j] === g.player) { this.cut.mine.moveTo(x0, y0); this.cut.mine.lineTo(x1, y1); }
+                this.cut.edges.push(i, j);
             }
         }
+        this.cutMineKey = null;
         this.builtRoads = this.game.roadVersion;
+    }
+    // Tus tramos rotos (los dos extremos tuyos), para la capa Logística. Aparte del resto porque también cambian cuando
+    // una casilla cambia de manos sin tocar las carreteras; se rehacen recorriendo solo la lista de tramos rotos.
+    cutMine() {
+        const g = this.game, key = `${g.version}:${g.player}`;
+        if (this.cutMineKey !== key) {
+            const path = new Path2D(), e = this.cut.edges;
+            let n = 0;
+            for (let k = 0; k < e.length; k += 2) {
+                const i = e[k], j = e[k + 1];
+                if (g.owner[i] !== g.player || g.owner[j] !== g.player) continue;
+                path.moveTo(G.cx[i], G.cy[i]); path.lineTo(G.cx[j], G.cy[j]); n++;
+            }
+            this.cutMineCache = { path, n };
+            this.cutMineKey = key;
+        }
+        return this.cutMineCache;
     }
 
     // Tramos rotos: línea discontinua apagada con una marca de corte; en obra, discontinua del color de las obras.
@@ -5063,7 +5092,7 @@ class MapView {
             const sup = g.supplyMap(g.player), out = new Path2D();
             for (const i of G.land) if (g.owner[i] === g.player && sup[i] < 0) this.hexPath(out, i);
             ctx.fillStyle = 'rgba(255,150,30,0.5)'; ctx.fill(out);
-            ctx.lineCap = 'round'; ctx.strokeStyle = 'rgba(255,150,30,0.9)'; ctx.lineWidth = 4 / s; ctx.stroke(this.cut.mine);   // tramos rotos propios
+            ctx.lineCap = 'round'; ctx.strokeStyle = 'rgba(255,150,30,0.9)'; ctx.lineWidth = 4 / s; ctx.stroke(this.cutMine().path);   // tramos rotos propios
         }
         if (this.highlight) {
             const mv = new Path2D(), at = new Path2D();
@@ -5637,6 +5666,8 @@ class GameUI {
             <li>${unitIcon('infantry', '#9aa57a')} Infantería &nbsp;${unitIcon('tank', '#9aa57a')} Blindados &nbsp;${unitIcon('artillery', '#9aa57a')} Artillería</li>
             <li><i class="line" style="border-top:3px solid ${SIGNAL}"></i>Autopista: <span data-legend="highway">⅓</span> de punto por tramo</li>
             <li><i class="line" style="border-top:2px solid #efe9d6"></i>Carretera: <span data-legend="road">½</span> punto por tramo</li>
+            <li><i class="line" style="border-top:2px dashed rgba(150,140,120,0.9)"></i>Tramo roto (a trazos, con una marca de corte en medio): no sirve para mover, ni para la renta, ni para el suministro</li>
+            <li><i class="line" style="border-top:2px dashed #e3d9c0"></i>Tramo roto en reparación (más claro)</li>
             <li><i class="line" style="border-top:3px solid #e3d9c0"></i>Fortificación: sacos terreros; con la rama Fortificación, hormigón (gris), búnkeres (con búnker) y casamatas (muro doble). Rayada: no sabes su nivel</li>
             <li>${galones(2)} Galones bajo la ficha: nivel investigado en la rama de su tipo de tropa. Ficha vacía con II, III, X o XX: ejército sin identificar y su tamaño (batallón 1–3, regimiento 4–9, brigada 10–24, división 25 o más)</li>
             <li>★ capital &nbsp; ● ciudad &nbsp; A rayas: territorio en disputa (ocupado en guerra)</li>
@@ -5750,11 +5781,24 @@ class GameUI {
         return `${t.name.toLowerCase()}${t.def > 1 ? `, defensa ×${num(t.def)}` : ''}, mover cuesta ${num(r.terrainCost[CELL_TERRAIN[cell]])}${river ? ` · junto a un río (${crossing}; defiende ×${num(CONFIG.RIVER_DEFENSE)})` : ''}`;
     }
 
+    // Con niebla, de un ejército que no es tuyo ni aliado solo se sabe si está aislado cuando ves sus seis vecinas: si no,
+    // la ficha diría que no hay nadie a su lado en casillas que no ves. El combate sigue usando lo que hay de verdad.
+    isolationHidden(a) {
+        const g = this.game;
+        if (!g.settings.fog || g.player === null || a.owner === g.player || g.allied(g.player, a.owner)) return false;
+        for (let d = 0; d < 6; d++) {
+            const j = G.nb[a.cell * 6 + d];
+            if (j >= 0 && isLand(j) && !g.sees(g.player, j)) return true;   // en el mar no hay ejércitos que ver
+        }
+        return false;
+    }
+
     // El desgaste de un ejército, una línea por cada parte: aislado, sin carretera al alcance y sin víveres (rodeado va
     // aparte). Con `explain`, cada línea dice además por qué y qué hacer.
     wearLines(a, explain = false) {
-        const g = this.game, out = [];
+        const g = this.game, out = [], hide = this.isolationHidden(a);
         for (const [k, x] of g.armyState(a.owner, a.cell, a.units, a.id).parts) {
+            if (k === 'aislado' && hide) continue;
             if (k === 'aislado') out.push(`Aislado ×${decimal(x)}${explain ? ': ningún ejército propio o aliado al lado y fuera de una ciudad; ataque y defensa bajan. Acércale otro ejército.' : ''}`);
             else if (k === 'sin carretera') out.push(`Sin carretera al alcance ×${decimal(x)}${explain ? ': en territorio enemigo y sin ninguna carretera a un turno de marcha.' : ''}`);
         }
@@ -5824,14 +5868,17 @@ class GameUI {
         } else if (this.reachInfo?.attacks.has(cell) && a) {
             const mine = this.selectedArmy();
             const fx = g.combatFactors(g.player, this.send, this.reachInfo.from.get(cell) ?? mine.cell, a, cell, sameUnits(this.send, mine.units) ? mine.id : 0);
-            const chance = g.winChance(fx.atk, fx.dfn), r = fx.atk / fx.dfn, n = countUnits(this.send);
+            // Lo que no puedes saber (aislado bajo la niebla) no entra ni en las partes ni en la cuenta de la previsión.
+            const defParts = this.isolationHidden(a) ? fx.defState.parts.filter(([k]) => k !== 'aislado') : fx.defState.parts;
+            const dfn = defParts === fx.defState.parts ? fx.dfn : Math.max(0.5, fx.baseDef * fx.bonus * defParts.reduce((m, [, x]) => m * x, 1));
+            const chance = g.winChance(fx.atk, dfn), r = fx.atk / dfn, n = countUnits(this.send);
             const winLeft = Math.round(n * (1 - Math.min(1, 0.3 / r))), loseLeft = Math.round(n * (1 - Math.min(1, 0.35 + 0.35 * (1 / r - 1))));
             const num = x => String(Math.round(x * 100) / 100).replace('.', ',');
-            const state = s => s.parts.map(([nm, x]) => `${nm} ×${num(x)}`);
-            const factors = fx.parts.map(([nm, x]) => `${nm} ×${num(x)}`).concat(fx.capped ? [`tope ×${num(fx.cap)}`] : [], state(fx.defState)).join(', ');
+            const state = parts => parts.map(([nm, x]) => `${nm} ×${num(x)}`);
+            const factors = fx.parts.map(([nm, x]) => `${nm} ×${num(x)}`).concat(fx.capped ? [`tope ×${num(fx.cap)}`] : [], state(defParts)).join(', ');
             const color = chance >= 0.7 ? '#a8e38a' : chance >= 0.35 ? '#ffd166' : '#ff8a78';
             lines.push(`<b style="color:${color}">Clic para atacar: ${Math.round(chance * 100)} % de victoria</b>`);
-            lines.push(`Tu ataque ${Math.round(fx.atk)}${fx.attState.parts.length ? ` (${state(fx.attState).join(', ')})` : ''} contra su defensa ${Math.round(fx.dfn)}${factors ? ` (${factors})` : ''}`);
+            lines.push(`Tu ataque ${Math.round(fx.atk)}${fx.attState.parts.length ? ` (${state(fx.attState.parts).join(', ')})` : ''} contra su defensa ${Math.round(dfn)}${factors ? ` (${factors})` : ''}`);
             lines.push(`Si ganas te quedan unas ${winLeft} de ${n}; si pierdes, unas ${loseLeft}`);
         } else if (this.reachInfo?.attacks.has(cell)) lines.push('<b style="color:#ff8a78">Clic para atacar</b>');
         else if (this.reachInfo?.moves.has(cell)) lines.push('<b style="color:#a8e38a">Clic para mover aquí</b>');
@@ -6073,7 +6120,7 @@ class GameUI {
 
     cancel() {
         if (this.mapMenu) { this.mapMenu = false; this.render(); return; }
-        if (this.stretch && !this.pending) { this.stretch = this.view.stretch = this.repair = null; this.render(); return; }
+        if ((this.stretch || this.repair) && !this.pending) { this.stretch = this.view.stretch = this.repair = null; this.render(); return; }
         if (this.ordering) { this.ordering = null; this.render(); return; }
         if (this.proposal) { this.endProposal(); return; }
         if (this.tool === 'op' && this.opDraft?.cells.length) { this.opDraft.cells.pop(); this.render(); return; }
@@ -7101,7 +7148,7 @@ class GameUI {
                 de ${plan.cls === 2 ? 'autopista' : 'carretera'}: <b style="color:${ok ? 'var(--signal)' : 'var(--war)'}">${plan.cost} de oro</b></span>
                 <button class="btn primary" data-action="confirm-build" ${ok ? '' : 'disabled'}>Confirmar</button>
                 <button class="btn" data-action="cancel-build">Cancelar</button>`;
-        } else body = `<span class="small">${this.anchor < 0 ? `${this.touch ? 'Toca' : 'Haz clic en'} una casilla tuya para empezar, o en una carretera para mejorar su tramo.`
+        } else body = `<span class="small">${this.anchor < 0 ? `${this.touch ? 'Toca' : 'Haz clic en'} una casilla tuya para empezar, en una carretera para mejorar su tramo o en el extremo de un tramo roto para repararlo.`
             : `${this.touch ? 'Toca' : 'Haz clic en'} donde termina el tramo: se construye el camino más barato.`}</span>`;
         const st = this.stretch, stOk = st && st.cost <= gold, rp = this.repair, rpOk = rp && rp.cost <= gold;
         el.hidden = false;
@@ -7365,7 +7412,7 @@ class GameUI {
                 <div class="budget-bar">${Object.keys(BUDGET_KEYS).map(k => `<i style="flex:${c.budget[k]}" class="b-${k}"></i>`).join('')}</div>
                 ${Object.entries(BUDGET_KEYS).map(([k, label]) => `<label class="small" for="cmd-${k}"><i class="dot b-${k}"></i>${label}: <output>${Math.round(100 * c.budget[k] / total)} % · ${Math.floor(spend * c.budget[k] / total)} de oro</output></label>
                     <input type="range" id="cmd-${k}" min="0" max="100" step="5" value="${c.budget[k]}" data-cmd="${k}">`).join('')}
-                <p class="note">Reclutar va a los refuerzos de tus operaciones (más a las de prioridad alta y a las que piden ayuda). Investigar elige lo que investigaría la IA en tu lugar; Fortificar, tus ciudades más amenazadas; Carreteras, la ciudad más valiosa sin unir a la capital. Guardado: ${c.pools.research} para investigar, ${c.pools.forts} para fortificar, ${c.pools.roads} para carreteras.</p>
+                <p class="note">Reclutar va a los refuerzos de tus operaciones (más a las de prioridad alta y a las que piden ayuda). Investigar elige lo que investigaría la IA en tu lugar; Fortificar, tus ciudades más amenazadas; Carreteras, primero los tramos rotos y luego la ciudad más valiosa sin unir a la capital. Guardado: ${c.pools.research} para investigar, ${c.pools.forts} para fortificar, ${c.pools.roads} para carreteras.</p>
             </div>` : '<p class="note" style="margin:4px 8px">Apagado: el oro lo gastas tú. Las operaciones usan solo el oro por turno que les des.</p>'}
             <label class="check small" style="margin:8px"><input type="checkbox" data-action="cmd" data-key="rear" ${c.rear ? 'checked' : ''}><span>Retaguardia: en guerra, lo que sobre en las ciudades sin peligro va a tu reserva (deja una infantería)</span></label>
         </details>`;

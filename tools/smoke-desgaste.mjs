@@ -236,7 +236,7 @@ const CHECKS = [
     g.start(es); g.declareWar(es, pt);
     const [, c] = T.plainPair(g, es);
     T.pocket(g, es, fr, c);
-    T.ok(!g.starving(es, c), 'dueño legal en paz: no no hay hambre');
+    T.ok(!g.starving(es, c), 'dueño legal en paz: no hay hambre');
     g.legal[c] = pt; g.version++;   // dueño legal en guerra: solo las vecinas (de Francia, en paz) lo salvan
     const a = T.army(g, es, c, 2);
     T.ok(!g.starving(es, c), 'vecinas en paz: no hay hambre');
@@ -464,6 +464,129 @@ const CHECKS = [
     T.eq(g.roadInReach(es, mine, units), true, 'en guerra, la carretera portuguesa está a su alcance');
     g.makePeace(es, pt, true);
     T.eq(g.roadInReach(es, mine, units), false, 'con la paz, otra vez no');
+    return true;
+}],
+['B6 · en guerra y con poco oro, la IA repara antes de que el reclutamiento se lo gaste', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es);
+    const [a, b] = T.plainPair(g, fr), d = G.dirTo(a, b);
+    g.broken[a * 6 + d] = 1; g.broken[b * 6 + (d + 3) % 6] = 1;
+    const cost = Math.round(g.roadEdgeCost(a, d, 1, g.rules(fr).roadCost) / 2);
+    g.nations[fr].gold = cost * 8;   // basta para reparar, pero reclutar en guerra lo gastaría casi todo
+    g.aiStep(fr);
+    T.ok(g.roadWork.has(edgeKey(a, d)), 'obra empezada en su turno');
+    return true;
+}],
+['B6 · reparar cobra solo los tramos que se ponen en obra y se salta los parados por el enemigo', () => {
+    const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+    g.start(es); g.declareWar(es, pt);
+    const [n1, c1] = T.plainPair(g, es);
+    let n2, c2;
+    for (let k = 1; ; k++) {
+        [n2, c2] = T.plainPair(g, es, k);
+        if (Math.hypot(G.cx[c2] - G.cx[c1], G.cy[c2] - G.cy[c1]) > G.W * 6) break;
+    }
+    const d1 = G.dirTo(c1, n1), d2 = G.dirTo(c2, n2), d3 = [0, 1, 2, 3, 4, 5].find(k => k !== d1);
+    const cut = (c, d) => { g.broken[c * 6 + d] = 1; g.broken[G.nb[c * 6 + d] * 6 + (d + 3) % 6] = 1; };
+    cut(c1, d1); cut(c2, d2); cut(c1, d3); g.roadVersion++;
+    const half = (c, d) => g.roadEdgeCost(c, d, 1, g.rules(es).roadCost) / 2;
+    const plan = { edges: [[c1, d1], [c1, d3], [c2, d2]], cost: Math.round(half(c1, d1) + half(c1, d3) + half(c2, d2)), cls: 'repair' };
+    g.nations[es].gold = 1e4;
+    g.buildRoad(es, { path: [c1, G.nb[c1 * 6 + d3]], cost: 0, cls: 1 });   // ya arreglado al construir encima
+    const foe = [0, 1, 2, 3, 4, 5].map(k => G.nb[c2 * 6 + k]).find(j => j !== n2);
+    T.army(g, pt, foe, 1);                                                  // enemigo al lado: parado
+    const gold = g.nations[es].gold;
+    T.eq(g.startRepair(es, plan), 1, 'solo un tramo en obra');
+    T.eq(g.nations[es].gold, gold - Math.round(half(c1, d1)), 'cobra solo ese tramo');
+    T.eq([g.roadWork.has(edgeKey(c1, d1)), g.roadWork.has(edgeKey(c1, d3)), g.roadWork.has(edgeKey(c2, d2))], [true, false, false], 'qué tramos');
+    return true;
+}],
+['A3 · el hambre de un ejército ajeno solo sale en tu registro si estás en guerra con él', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+    g.start(es); g.declareWar(fr, pt);
+    const [, c] = T.plainPair(g, fr);
+    T.pocket(g, fr, pt, c);
+    const a = T.army(g, fr, c, 3);
+    g.logs.length = 0;
+    for (let i = 0; i < 3; i++) g.feedArmies(fr);
+    T.eq(a.units.infantry, 2, 'pierde una unidad');
+    T.ok(!g.logs.some(l => /hambre/.test(l.msg)), 'en paz con Francia no se cuenta: ' + JSON.stringify(g.logs));
+    g.declareWar(es, fr);
+    g.logs.length = 0;
+    for (let i = 0; i < 3; i++) g.feedArmies(fr);
+    T.ok(g.logs.some(l => /El ejército enemigo en .* pierde una unidad por hambre/.test(l.msg)), 'en guerra sí');
+    return true;
+}],
+['B6 · al perder la casilla se cae la obra y se repinta', () => {
+    const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+    g.start(es);
+    const [a, b] = T.plainPair(g, es), d = G.dirTo(a, b);
+    g.broken[a * 6 + d] = 1; g.broken[b * 6 + (d + 3) % 6] = 1;
+    g.nations[es].gold = 1e4; g.startRepair(es, g.repairPlan(es, a));
+    g.owner[b] = pt; g.version++;
+    const v0 = g.roadVersion;
+    g.beginNationTurn(es);
+    T.eq([g.roadWork.size, g.roadVersion !== v0], [0, true], 'sin obra y con versión nueva');
+    return true;
+}],
+['B6 · el resaltado de tus tramos rotos sigue al dueño de las casillas', () => {
+    const g = T.uiStart('es'), es = g.player, pt = T.nation('pt');
+    const [a, b] = T.plainPair(g, es), d = G.dirTo(a, b);
+    g.broken[a * 6 + d] = 1; g.broken[b * 6 + (d + 3) % 6] = 1; g.roadVersion++;
+    ui.view.draw();
+    T.eq(ui.view.cutMine().n, 1, 'uno propio');
+    g.owner[b] = pt; g.version++;
+    ui.view.draw();
+    T.eq(ui.view.cutMine().n, 0, 'ya no es tuyo');
+    return true;
+}],
+['B6 · la leyenda explica los tramos rotos y la herramienta dice cómo repararlos', () => {
+    T.uiStart('es');
+    const legend = document.querySelector('#legend').textContent;
+    T.ok(/Tramo roto/.test(legend) && /en reparación/.test(legend), 'leyenda: ' + legend);
+    ui.setTool('road');
+    T.ok(/tramo roto para repararlo/.test(document.body.textContent), 'pista de la herramienta');
+    return true;
+}],
+['B6 · Esc quita el botón de reparar', () => {
+    const g = T.uiStart('es'), es = g.player;
+    const [a, b] = T.plainPair(g, es), d = G.dirTo(a, b);
+    for (let k = 0; k < 6; k++) { g.road[a * 6 + k] = 0; const j = G.nb[a * 6 + k]; if (j >= 0) g.road[j * 6 + (k + 3) % 6] = 0; }
+    g.broken[a * 6 + d] = 1; g.broken[b * 6 + (d + 3) % 6] = 1; g.roadVersion++;
+    g.nations[es].gold = 1e4;
+    ui.setTool('road'); ui.clickCell(a);
+    T.ok(document.querySelector('[data-action="repair-roads"]'), 'botón al pulsar');
+    T.ok(!ui.stretch, 'sin tramo para mejorar');
+    ui.cancel();
+    T.ok(!document.querySelector('[data-action="repair-roads"]'), 'sin botón tras Esc');
+    return true;
+}],
+['A1 · con niebla, «aislado» de un ejército ajeno solo se enseña si ves sus seis vecinas', () => {
+    const g = T.uiStart('es', true), es = g.player, de = T.nation('de');
+    // Un espía en una provincia alemana: la ves entera, pero no las provincias de al lado.
+    const c = G.land.find(x => g.owner[x] === de && CELL_TERRAIN[x] === 'plain' && T.free(g, x)
+        && [0, 1, 2, 3, 4, 5].every(k => { const j = G.nb[x * 6 + k]; return j >= 0 && isLand(j) && !g.armyAt[j]; })
+        && [0, 1, 2, 3, 4, 5].some(k => G.prov[G.nb[x * 6 + k]] !== G.prov[x]));
+    T.ok(c !== undefined, 'hay sitio');
+    const spy = pid => { g.spies.set(pid, { since: g.turn, revealedTurn: g.turn }); g.spyVersion++; };
+    spy(G.prov[c]);
+    const foe = T.army(g, de, c, 3), hidden = [0, 1, 2, 3, 4, 5].some(k => !g.sees(es, G.nb[c * 6 + k]));
+    T.ok(hidden && g.sees(es, c) && g.armyView(es, foe).n !== null, 'identificado y con vecinas en la niebla');
+    T.ok(g.armyState(de, c, foe.units, foe.id).parts.some(([k]) => k === 'aislado'), 'aislado de verdad');
+    const hover = () => { ui.cellFromEvent = () => c; ui.view.hoverCell = -1; try { ui.hover({ clientX: 0, clientY: 0 }); } finally { delete ui.cellFromEvent; } return document.querySelector('#tooltip').textContent; };
+    // Previsión de ataque desde un ejército propio cualquiera.
+    const mine = [...g.armies.values()].find(x => x.owner === es);
+    ui.select(mine.cell);
+    ui.reachInfo = { attacks: new Set([c]), moves: new Set(), from: new Map([[c, mine.cell]]) };
+    let txt = hover();
+    T.ok(!/aislado/i.test(txt), 'oculto en la ficha y en la previsión: ' + txt);
+    const fx = g.combatFactors(es, ui.send, mine.cell, foe, c, mine.id);
+    const shown = Math.round(Math.max(0.5, fx.baseDef * fx.bonus * fx.defState.mult / CONFIG.ISOLATED_FACTOR));
+    T.ok(txt.includes(`contra su defensa ${shown}`), `defensa sin aislado (${shown}): ` + txt);
+    for (let k = 0; k < 6; k++) spy(G.prov[G.nb[c * 6 + k]]);
+    txt = hover();
+    T.ok(/Aislado ×0,9/.test(txt) && /aislado ×0,9/.test(txt), 'con las vecinas a la vista, sí: ' + txt);
+    T.ok(txt.includes(`contra su defensa ${Math.round(fx.dfn)}`), 'defensa real');
     return true;
 }],
 ];
