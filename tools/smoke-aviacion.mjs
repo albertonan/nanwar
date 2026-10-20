@@ -1241,6 +1241,34 @@ const CHECKS = [
     T.ok(strike(es, fr, 1), 'el jugador decide');
     return true;
 }],
+// Con niebla la IA no sabe cuántos hay: un batallón (II, de 1 a 3) puede ser una guarnición suelta y no lo bombardea;
+// un regimiento (III) sí. Con Reconocimiento 2 vuelve a contar las unidades.
+['8 · con niebla, la aviación de la IA tampoco remata lo que puede ser una guarnición suelta', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(fr, es); T.luck(g, 0.99);
+    // El blanco, a la vista: una ciudad del otro o, para el jugador, que ve menos, una casilla francesa de la frontera.
+    const pick = (me, foe) => {
+        if (me !== es) return T.pair(g, me, foe, (a, b) => g.sees(me, b));
+        const [, j] = T.border(g, es, fr);
+        return [T.baseFor(g, es, j), j];
+    };
+    const strike = (me, foe, n) => {
+        g.turn++;   // cada tirada en un turno nuevo: el acierto de la anterior desvela el blanco
+        const [base, target] = pick(me, foe);
+        T.ok(g.sees(me, target), 'el blanco, a la vista');
+        T.airfield(g, me, base); const [s] = T.squad(g, me, base, 1);
+        if (g.armyOn(target)) g.removeArmy(g.armyOn(target));
+        T.army(g, foe, target, n);
+        const op = g.createOp(me, 'ofensiva', [base, target], { auto: 'auto', noCap: true }); op.aims = ['army']; g.assignSquadron(s, op.id);
+        g.opAir(op);
+        return s.flown === g.turn;
+    };
+    T.eq([strike(fr, es, 1), strike(fr, es, 3), strike(fr, es, 4)], [false, false, true], 'la IA, solo contra un regimiento o más');
+    T.ok(strike(es, fr, 1), 'el jugador decide');
+    T.learn(g, fr, 'reconocimiento1', 'reconocimiento2');
+    T.eq([strike(fr, es, 1), strike(fr, es, 3)], [false, true], 'con Reconocimiento 2, por sus unidades');
+    return true;
+}],
 ['8 · la IA no vuela contra un blanco con mucho antiaéreo', () => {
     const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
     g.start(es); T.bare(g); g.declareWar(fr, es);
@@ -1347,6 +1375,46 @@ const CHECKS = [
     g.airSeen.set(es * G.N + s, g.turn);   // una misión suya este turno: sabe qué hay
     const known = g.aaCover(es, [base], s);
     T.eq([known.seen.fire, known.unknown], [10, false], 'lo conoce');
+    return true;
+}],
+// El aviso no puede delatar lo que lleva un ejército que no se conoce: avisa igual lleve antiaéreas o no.
+['10 · con niebla, un barco que no se identifica avisa de antiaéreo que no conoces, lo lleve o no', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [land, s] = T.coast(g, fr, { near: g.nations[es].capitalCell }), base = T.baseFor(g, es, s);
+    g.settle(g.newArmy(es, land, { infantry: 1 }, 0));   // con la casilla de mar a la vista
+    const out = [];
+    for (const units of [{ infantry: 6 }, { infantry: 4, antiair: 2 }]) {
+        const a = g.settle(g.newArmy(fr, s, units, 0));
+        T.ok(g.sees(es, s) && g.armyView(es, a).n === null, 'a la vista, sin identificar');
+        out.push(g.aaCover(es, [base], s).unknown);
+        g.removeArmy(a);
+    }
+    T.eq(out, [true, true], 'sin antiaéreas y con ellas');
+    return true;
+}],
+['10 · con Reconocimiento 2, un ejército en la niebla junto al blanco avisa de antiaéreo que no conoces, lo lleve o no', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    T.learn(g, es, 'reconocimiento1', 'reconocimiento2');
+    // Un blanco francés a la vista, con el camino a la vista, y una vecina suya en la niebla.
+    let pick = null;
+    for (const t of G.land) {
+        if (pick || g.owner[t] !== fr || !g.sees(es, t) || g.armyAt[t]) continue;
+        const x = [0, 1, 2, 3, 4, 5].map(d => G.nb[t * 6 + d]).find(j => j >= 0 && isLand(j) && !g.sees(es, j) && !g.armyAt[j]);
+        if (x === undefined) continue;
+        const base = PROVINCES.filter(p => g.owner[p.city] === es && hexDist(p.city, t) <= g.airRange(es)).map(p => p.city).sort((a, b) => hexDist(a, t) - hexDist(b, t))[0];
+        if (base !== undefined && flightPath(base, t).every(c => !isLand(c) || g.owner[c] !== fr || g.sees(es, c))) pick = { t, x, base };
+    }
+    T.ok(pick, 'hay un blanco así');
+    const { t, x, base } = pick, out = [];
+    for (const units of [{ infantry: 6 }, { infantry: 4, antiair: 2 }]) {
+        const a = g.settle(g.newArmy(fr, x, units, 0));
+        T.ok(g.sees(es, t) && !g.sees(es, x), 'el blanco a la vista y el ejército en la niebla');
+        out.push(g.aaCover(es, [base], t).unknown);
+        g.removeArmy(a);
+    }
+    T.eq(out, [true, true], 'sin antiaéreas y con ellas');
     return true;
 }],
 ['10 · destruir antiaéreo contra un ejército le quita sus antiaéreas', () => {

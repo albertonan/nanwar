@@ -2128,8 +2128,9 @@ class GameEngine {
     // Cada fuente cuenta una vez, y las sumas tienen el tope del defensor (el ejército de la casilla o, si no, su dueño).
     // Los pesos de las pérdidas salen de lo que conoce el atacante (`owner`), que es con lo que vuela la misión; `seen`
     // es lo mismo con solo las fuentes que conoce `viewer`. `unknown`: hay antiaéreo que dispara y `viewer` no conoce
-    // (también el integrado de una ciudad cuya fortificación no conoce), o tierra enemiga en el blanco o en el camino
-    // donde podría haberlo sin que lo sepa. Un blanco en el mar solo cuenta con el antiaéreo móvil: el fijo y el
+    // (también el integrado de una ciudad cuya fortificación no conoce), tierra enemiga en el blanco o en el camino
+    // donde podría haberlo sin que lo sepa, o, a una casilla o menos de ellos, una casilla que no ve o un ejército enemigo
+    // que no identifica (lleve antiaéreas o no). Un blanco en el mar solo cuenta con el antiaéreo móvil: el fijo y el
     // integrado de la costa no protegen a un barco.
     aaCover(owner, bases, cell, { viewer = owner, range = this.airRange(owner) } = {}) {
         const A = CONFIG.AIR, sea = afloat(cell), def = this.armyOn(cell)?.owner ?? this.owner[cell];
@@ -2159,7 +2160,23 @@ class GameEngine {
             if (!sources.includes(src.cell)) sources.push(src.cell);
         }
         const hidden = c => isLand(c) && this.atWar(owner, this.owner[c]) && !this.aaVisible(viewer, c);
-        const unknown = unseen || (!sea && (hidden(cell) || paths.some(p => p.cells.some(hidden))));
+        // A una casilla o menos del blanco o del camino, un ejército enemigo que `viewer` no identifica, o una casilla que
+        // no ve, puede llevar antiaéreas: se avisa lo lleve o no, para no delatar lo que hay.
+        const blind = () => {
+            if (!this.settings.fog || viewer === null) return false;
+            const near = new Set();
+            for (const c of [cell, ...paths.flatMap(p => p.cells)]) {
+                near.add(c);
+                for (let d = 0; d < 6; d++) { const j = G.nb[c * 6 + d]; if (j >= 0) near.add(j); }
+            }
+            for (const c of near) {
+                if (!this.sees(viewer, c)) return true;
+                const a = this.armyOn(c);
+                if (a && this.atWar(owner, a.owner) && !this.knownCell(viewer, c)) return true;
+            }
+            return false;
+        };
+        const unknown = unseen || (!sea && (hidden(cell) || paths.some(p => p.cells.some(hidden)))) || blind();
         const top = x => Math.min(cap, x);
         return { fire: top(fire), loss: top(loss), cap, unknown, sources, seen: { fire: top(seenFire), loss: top(seenLoss) } };
     }
@@ -2512,8 +2529,8 @@ class GameEngine {
     // Blancos para los fines `aims` en las casillas `cells`, con lo que `owner` ve, los mejores primero (como mucho
     // AIR_TARGETS). Cada uno pasa por missionCheck con los escuadrones `pool` (por defecto, todos los suyos que pueden
     // volar), así que solo quedan los que están a su alcance, en guerra y sin acierto este turno.
-    // - army: la fuerza de ataque del ejército enemigo que ve, el doble en el mar (allí pierde el doble); si conoce su
-    //   número, solo con `minArmy` unidades o más.
+    // - army: la fuerza de ataque del ejército enemigo que ve, el doble en el mar (allí pierde el doble); solo si
+    //   sabe que tiene `minArmy` unidades o más (sin conocer su número, por lo menos de su escalón: leastUnits).
     // - fort: el nivel que conoce (si no, 1) × 10, y 20 más en el objetivo `obj`.
     // - roads: los tramos intactos × 3, y 10 más a 4 casillas del objetivo o menos.
     // - aa: la fuerza del antiaéreo que conoce × 2.
@@ -2526,7 +2543,7 @@ class GameEngine {
         for (const c of cells) {
             if (want.has('army')) {
                 const a = this.armyOn(c);
-                if (a && this.atWar(owner, a.owner) && this.sees(owner, c) && (countUnits(a.units) >= minArmy || !this.intel(owner, a.owner, c).exact))
+                if (a && this.atWar(owner, a.owner) && this.sees(owner, c) && this.leastUnits(owner, a) >= minArmy)
                     add('army', c, this.seenPower(owner, a, 'atk') * (afloat(c) ? 2 : 1));
             }
             if (!isLand(c) || !this.atWar(owner, this.owner[c])) continue;
@@ -3247,6 +3264,14 @@ class GameEngine {
         if (this.intel(viewer, a.owner, a.cell).exact) return unitPower(a.units, kind, r);
         const n = countUnits(a.units);
         return unitPower({ infantry: n <= 3 ? 3 : n <= 9 ? 9 : n <= 24 ? 24 : 40, tank: 0, artillery: 0 }, kind, r);
+    }
+    // Unidades que `viewer` sabe seguro que tiene el ejército `a`: todas si lo conoce; si no, las menos de su escalón
+    // (un batallón, II, puede ser una sola).
+    leastUnits(viewer, a) {
+        const n = countUnits(a.units);
+        if (this.intel(viewer, a.owner, a.cell).exact) return n;
+        const e = ECHELONS.indexOf(echelonOf(n));
+        return e ? ECHELONS[e - 1].max + 1 : 1;
     }
     // Hacia dónde queda el enemigo de una línea: del centro de sus casillas al de la tierra enemiga a 6 casillas o menos.
     // null si no hay enemigo cerca. Se guarda por trazado y turno.
