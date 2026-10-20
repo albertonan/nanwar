@@ -873,6 +873,8 @@ const G = (() => {
         width: W * (cols + 0.5), height: STEP * (rows - 1) + 2 * S, x0, y0 };
 })();
 const isLand = i => G.prov[i] >= 0;
+// Clave canónica de un tramo (los dos sentidos comparten): casilla de índice menor * 6 + su dirección.
+const edgeKey = (u, d) => { const v = G.nb[u * 6 + d]; return v >= 0 && v < u ? v * 6 + (d + 3) % 6 : u * 6 + d; };
 
 const PROVINCES = E.provinces.map((p, id) => ({ ...p, id, cells: [] }));
 for (const i of G.land) PROVINCES[G.prov[i]].cells.push(i);
@@ -959,6 +961,7 @@ class GameEngine {
 
         // Carreteras: clase por arista dirigida (0 nada, 1 carretera, 2 autopista). Se empieza sin ninguna: las construyen los jugadores.
         this.road = new Int8Array(G.N * 6);
+        this.broken = new Int8Array(G.N * 6);   // tramos rotos: la clase que tenían, en los dos sentidos
         this.fort = new Uint8Array(G.N);   // 1 = fortificación terminada
         this.fortWork = new Map();          // celda → { owner, left }: obras en curso
         this.fortVersion = 0;
@@ -1030,7 +1033,7 @@ class GameEngine {
             format: 'eurowar-1', mapId: MAP_ID, map: `${G.land.length}:${PROVINCES.length}`, move: MOVE,
             seed: this.seed, rng: this.rng.state, turn: this.turn, player: this.player, over: this.over, won: this.won,
             settings: this.settings, logs: this.logs.slice(-150), proposals: this.proposals, proposed: [...this.proposedThisTurn],
-            owner: runs, legal: compress(this.legal), dev: Array.from(this.dev), roads: this.roadEdges(),
+            owner: runs, legal: compress(this.legal), dev: Array.from(this.dev), roads: this.roadEdges(), broken: this.brokenEdges(),
             forts: G.land.filter(i => this.fort[i]), fortWork: [...this.fortWork].map(([c, w]) => [c, w.owner, w.left]),
             spies: [...this.spies].map(([pid, s]) => [pid, s.since, s.revealedTurn]),
             sieges: [...this.sieges].map(([c, s]) => [c, s.by, s.prev, s.held]),
@@ -1108,6 +1111,13 @@ class GameEngine {
             if (b < 0) continue;
             g.road[a * 6 + d] = cls;
             g.road[b * 6 + (d + 3) % 6] = cls;
+        }
+        const broken = list(data.broken);
+        for (let i = 0; i + 2 < broken.length; i += 3) {
+            const a = cellIdx(broken[i]), d = int(broken[i + 1], 0, 5, 0), cls = int(broken[i + 2], 0, 2, 0), b = G.nb[a * 6 + d];
+            if (b < 0 || !cls) continue;
+            g.broken[a * 6 + d] = cls;
+            g.broken[b * 6 + (d + 3) % 6] = cls;
         }
         for (const c of list(data.forts)) g.fort[cellIdx(c)] = 1;
         g.fortWork = new Map(list(data.fortWork).map(w => [cellIdx(w?.[0]), { owner: nat(w?.[1]), left: int(w?.[2], 0, 100, 0) }]));
@@ -1552,6 +1562,25 @@ class GameEngine {
         for (const i of G.land) for (let d = 0; d < 3; d++) if (this.road[i * 6 + d]) out.push(i, d, this.road[i * 6 + d]);
         return out;
     }
+    brokenEdges() {
+        const out = [];
+        for (const i of G.land) for (let d = 0; d < 3; d++) if (this.broken[i * 6 + d]) out.push(i, d, this.broken[i * 6 + d]);
+        return out;
+    }
+    // Rompe los tramos intactos de la casilla (quedan con su clase en `broken`); devuelve cuántos.
+    breakRoads(cell) {
+        let n = 0;
+        for (let d = 0; d < 6; d++) {
+            const cls = this.road[cell * 6 + d];
+            if (!cls) continue;
+            const j = G.nb[cell * 6 + d], r = (d + 3) % 6;
+            this.road[cell * 6 + d] = 0; this.road[j * 6 + r] = 0;
+            this.broken[cell * 6 + d] = cls; this.broken[j * 6 + r] = cls;
+            n++;
+        }
+        if (n) this.roadVersion++;
+        return n;
+    }
     // Camino más corto (en casillas) por territorio propio: la línea que se fortifica.
     planFort(id, from, to) {
         if (this.owner[from] !== id || this.owner[to] !== id) return null;
@@ -1580,21 +1609,13 @@ class GameEngine {
         this.fortVersion++;
         return plan.cells.length;
     }
-    // Al tomar una casilla por la fuerza se cortan sus carreteras y se arrasa su fortificación.
+    // Al tomar una casilla por la fuerza se rompen sus carreteras y se arrasa su fortificación.
     wreck(cell, prev, a) {
-        let cut = false;
-        for (let d = 0; d < 6; d++) {
-            if (!this.road[cell * 6 + d]) continue;
-            const j = G.nb[cell * 6 + d];
-            this.road[cell * 6 + d] = 0;
-            this.road[j * 6 + (d + 3) % 6] = 0;
-            cut = true;
-        }
+        const cut = this.breakRoads(cell) > 0;
         const pname = PROVINCES[G.prov[cell]].name;
         if (cut) {
-            this.roadVersion++;
             const key = `${this.turn}:${prev}:${G.prov[cell]}`;
-            if (prev === this.player && !this.cutLogged.has(key)) { this.cutLogged.add(key); this.log(`${this.nm(a)} corta tu carretera en ${pname}.`); }
+            if (prev === this.player && !this.cutLogged.has(key)) { this.cutLogged.add(key); this.log(`${this.nm(a)} rompe tu carretera en ${pname}.`); }
         }
         if (this.fort[cell] || this.fortWork.has(cell)) {
             this.fort[cell] = 0;
@@ -1613,6 +1634,8 @@ class GameEngine {
             if (d < 0 || this.road[a * 6 + d] >= plan.cls) continue;
             this.road[a * 6 + d] = plan.cls;
             this.road[b * 6 + (d + 3) % 6] = plan.cls;
+            this.broken[a * 6 + d] = 0; this.broken[b * 6 + (d + 3) % 6] = 0;
+            this.roadWork?.delete(edgeKey(a, d));   // la obra de reparación (si la hay) sobra
             built++;
         }
         if (!built) return 0;

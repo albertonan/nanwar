@@ -107,7 +107,36 @@ const setup = () => {
 };
 
 const CHECKS = [
-
+['B6 · tomar una casilla a la fuerza deja sus tramos rotos, no borrados', () => {
+    const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+    g.start(es); g.declareWar(es, pt);
+    const [mine, theirs] = T.border(g, es, pt);
+    const d = G.dirTo(mine, theirs);
+    g.road[mine * 6 + d] = 2; g.road[theirs * 6 + (d + 3) % 6] = 2;
+    g.capture(theirs, es, true);
+    T.eq([g.road[mine * 6 + d], g.broken[mine * 6 + d], g.broken[theirs * 6 + (d + 3) % 6]], [0, 2, 2], 'roto y con su clase');
+    return true;
+}],
+['B6 · construir encima de un tramo roto lo arregla', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    const [a, b] = T.plainPair(g, es), d = G.dirTo(a, b);
+    g.broken[a * 6 + d] = 1; g.broken[b * 6 + (d + 3) % 6] = 1;
+    g.nations[es].gold = 1e4;
+    g.buildRoad(es, { path: [a, b], cost: 10, cls: 1 });
+    T.eq([g.road[a * 6 + d], g.broken[a * 6 + d]], [1, 0], 'carretera nueva y sin rotura');
+    return true;
+}],
+['B6 · los tramos rotos se guardan y se cargan', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    const [a, b] = T.plainPair(g, es), d = G.dirTo(a, b);
+    g.road[a * 6 + d] = 1; g.road[b * 6 + (d + 3) % 6] = 1;
+    T.eq(g.breakRoads(a), 1, 'rompe un tramo');
+    const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+    T.eq([h.road[a * 6 + d], h.broken[a * 6 + d], h.broken[b * 6 + (d + 3) % 6]], [0, 1, 1], 'igual tras cargar');
+    return true;
+}]
 ];
 
 const exe = process.env.CHROME ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome'].find(existsSync);
