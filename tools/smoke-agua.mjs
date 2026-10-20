@@ -224,6 +224,47 @@ const CHECKS = [
     const r = g.reach(es, c, g.mp(a), true);
     for (const [v, e] of r.exp) if (!isLand(v)) T.ok(isLand(e.prev), `la casilla de mar ${v} viene de tierra`);
     return true;
+}],
+['3 · asalto anfibio ×0,5 y defensa embarcada ×0,25', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(es, fr);
+    const [c, s] = T.coast(g, es);
+    const def = T.army(g, es, c, 5), boat = T.embark(g, fr, s, 5);
+    const fx = g.combatFactors(fr, boat.units, s, def, c, boat.id);
+    T.eq(fx.attParts, [['asalto anfibio', 0.5]], 'asalto');
+    const fy = g.combatFactors(es, def.units, c, boat, s, def.id);
+    T.eq([fy.parts, fy.dfn], [[['embarcado', 0.25]], Math.max(0.5, unitPower(boat.units, 'def', g.rules(fr)) * 0.25)], 'barco');
+    return true;
+}],
+['3 · el de tierra que gana a un barco se queda en la orilla y el barco sin costa propia se hunde', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(es, fr);
+    const [c, s] = T.coast(g, es);
+    const att = T.army(g, es, c, 30), boat = T.embark(g, fr, s, 2);
+    g.battle(att, boat, s);
+    T.eq([att.cell, g.armies.has(boat.id), g.armyAt[s]], [c, false, 0], 'orilla y hundido');
+    T.ok(g.logs.some(l => /hund/i.test(l.msg)), 'el parte dice hundido');
+    return true;
+}],
+['3 · el barco que pierde con costa propia al lado se retira a ella', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(es, fr);
+    const [c, s] = T.coast(g, es);
+    const boat = T.embark(g, es, s, 12);
+    const enemySea = G.nb[s * 6 + [0, 1, 2, 3, 4, 5].find(d => { const j = G.nb[s * 6 + d]; return j >= 0 && !isLand(j); })];
+    const att = T.embark(g, fr, enemySea, 12);
+    g.battle(att, boat, s);
+    T.eq([att.cell, isLand(g.armies.get(boat.id)?.cell ?? -1)], [enemySea, true], 'el atacante no se mueve; el barco toca tierra');
+    return true;
+}],
+['3 · un asalto que gana entra en la casilla de tierra', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(es, fr);
+    const [c, s] = T.coast(g, es);
+    const def = T.army(g, es, c, 1), boat = T.embark(g, fr, s, 40);
+    g.battle(boat, def, c);
+    T.eq(boat.cell, c, 'desembarca');
+    return true;
 }]
 ];
 
