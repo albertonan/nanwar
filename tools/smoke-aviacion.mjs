@@ -1447,6 +1447,126 @@ const CHECKS = [
     T.ok(drawn.every(([, dome]) => dome), 'todas con la cúpula');
     return true;
 }],
+['11 · lanzar un satélite: unos 20 turnos de renta, solo con Espacio 1 y uno a la vez', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.nations[es].gold = 1e6;
+    const c = g.nations[fr].capitalCell;
+    T.ok(!g.launchSat(es, c), 'sin investigar, no');
+    T.learn(g, es, 'espacio1');
+    const cost = g.satCost(es), gold = g.nations[es].gold;
+    T.ok(g.launchSat(es, c), 'lanzado');
+    T.eq([cost, gold - g.nations[es].gold, g.launchSat(es, c)], [Math.max(1000, 20 * g.income(es)), cost, false], 'cobra y solo uno');
+    return true;
+}],
+['11 · dentro de su radio se sabe tipo y número, el antiaéreo fijo y los aeródromos; con Espacio 2, galones y fortificaciones', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.nations[es].gold = 1e6; T.learn(g, es, 'espacio1');
+    const c = g.nations[fr].capitalCell, a = g.armyOn(c), site = g.aaList().find(s => s.cell === c);
+    T.eq([g.armyView(es, a).n, g.aaKnown(es, site)], [null, false], 'antes');
+    g.launchSat(es, c);
+    T.eq([g.armyView(es, a).n, g.aaKnown(es, site), g.sees(es, c), g.fortLevel(es, c)], [countUnits(a.units), true, true, null], 'tipo, número y antiaéreo');
+    T.learn(g, es, 'espacio2'); T.ok(g.fortLevel(es, c) !== null, 'con Espacio 2, fortificaciones');
+    return true;
+}],
+['11 · dura 8 turnos de su dueño, 12 con Constelación, que además deja dos a la vez', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.nations[es].gold = 1e7; T.learn(g, es, 'espacio1');
+    g.launchSat(es, g.nations[fr].capitalCell);
+    for (let i = 0; i < 7; i++) g.beginNationTurn(es);
+    T.eq(g.sats.length, 1, 'aún'); g.beginNationTurn(es); T.eq(g.sats.length, 0, 'acaba');
+    T.learn(g, es, 'espacio2', 'espacio3');
+    T.ok(g.launchSat(es, g.nations[fr].capitalCell) && g.launchSat(es, g.nations[T.nation('de')].capitalCell), 'dos');
+    T.eq(g.sats[0].left, 12, 'doce turnos');
+    return true;
+}],
+['M · en el mundo cubre 5 casillas, y 7 con Espacio 2', () => {
+    const g = T.game(), es = T.nation('es');
+    T.learn(g, es, 'espacio1'); T.eq(g.satRadius(es), 5, '400 km'); T.learn(g, es, 'espacio2'); T.eq(g.satRadius(es), 7, '600 km');
+    return true;
+}],
+['11 · se guarda y se carga', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es); g.nations[es].gold = 1e6; T.learn(g, es, 'espacio1'); g.launchSat(es, g.nations[T.nation('fr')].capitalCell);
+    T.eq(GameEngine.load(JSON.parse(JSON.stringify(g.serialize()))).sats, g.sats, 'igual');
+    return true;
+}],
+['11 · desde la herramienta Aviación se lanza con un clic en el centro', () => {
+    const g = T.uiStart('es', true), es = g.player; g.nations[es].gold = 1e6; T.learn(g, es, 'espacio1');
+    ui.setTool('air'); ui.clickCell(g.nations[es].capitalCell);
+    document.querySelector('[data-action="air-sat"]').click();
+    T.eq(ui.air.mode, 'sat', 'espera el centro');
+    ui.clickCell(g.nations[T.nation('fr')].capitalCell);
+    T.eq(g.sats.length, 1, 'lanzado');
+    return true;
+}],
+['11 · la IA lanza uno sobre su ofensiva cuando puede pagarlo', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es); T.learn(g, fr, 'espacio1'); g.nations[fr].gold = 1e6;
+    g.aiCommand(fr); g.aiAir(fr);
+    T.ok(g.sats.some(s => s.owner === fr), 'lanzado');
+    g.aiAir(fr); T.eq(g.satsOf(fr).length, 1, 'uno solo');
+    // Sin ofensiva, sobre la ciudad enemiga más cercana a su capital; sin oro de sobra, ninguno.
+    const h = T.game(), it = T.nation('it');
+    h.start(es); h.declareWar(it, es); T.learn(h, it, 'espacio1');
+    h.nations[it].gold = h.satCost(it) + 3 * h.income(it) - 1; h.aiAir(it); T.eq(h.sats.length, 0, 'no le sobra');
+    h.nations[it].gold = 1e6; h.aiAir(it);
+    const near = PROVINCES.filter(p => h.owner[p.city] === es).map(p => p.city).sort((a, b) => hexDist(h.nations[it].capitalCell, a) - hexDist(h.nations[it].capitalCell, b))[0];
+    T.eq(h.sats.map(s => s.cell), [near], 'la ciudad enemiga más cercana');
+    // Con una ofensiva, sobre su objetivo.
+    const k = T.game(); k.start(es); k.declareWar(fr, es); T.learn(k, fr, 'espacio1'); k.nations[fr].gold = 1e6;
+    const [from, to] = T.pair(k, fr, es); k.createOp(fr, 'ofensiva', [from, to]); k.aiAir(fr);
+    T.eq(k.sats.map(s => s.cell), [to], 'el objetivo de la ofensiva');
+    return true;
+}],
+['11 · no lo ven los aliados, su radio queda a la vista y al acabarse avisa', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+    g.start(es); g.nations[es].gold = 1e6; T.learn(g, es, 'espacio1');
+    const bloc = g.createBloc(es, 'Ibérica', false); bloc.members.add(pt); g.blocsChanged();
+    const c = g.nations[fr].capitalCell, a = g.armyOn(c), R = g.satRadius(es);
+    const edge = G.land.find(x => hexDist(x, c) === R && g.owner[x] === fr && !g.sees(es, x)), out = G.land.find(x => hexDist(x, c) === R + 3 && !g.sees(es, x));
+    T.eq(R, 20, '400 km en Europa');
+    g.launchSat(es, c);
+    T.ok(edge !== undefined && out !== undefined && g.sees(es, edge) && !g.sees(es, out), 'se ve hasta el borde del radio, no más');
+    T.eq([g.intel(pt, fr, c).exact, g.sees(pt, c), g.armyView(pt, a).n], [false, false, null], 'el aliado no');
+    const vis = g.visibleCells(es);
+    T.ok(g.visibleCells(es) === vis, 'la vista se guarda');
+    for (let i = 0; i < 8; i++) g.beginNationTurn(es);
+    T.ok(!g.sees(es, c) && g.armyView(es, a).n === null, 'acabado, vuelve la niebla');
+    T.ok(g.logs.some(l => l.msg === `Tu satélite sobre ${g.placeName(c)} deja de transmitir.`), 'parte');
+    return true;
+}],
+['11 · las partidas de antes no traen satélites; uno manipulado no cuela', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es); g.nations[es].gold = 1e6; T.learn(g, es, 'espacio1'); g.launchSat(es, g.nations[T.nation('fr')].capitalCell);
+    const data = JSON.parse(JSON.stringify(g.serialize()));
+    delete data.air.sats;
+    T.eq(GameEngine.load(data).sats, [], 'sin satélites');
+    data.air.sats = [[es, -5, 3], [999, 10, 99], 'x', [es, G.N + 5, 0]];
+    T.eq(GameEngine.load(data).sats.map(s => [s.cell >= 0 && s.cell < G.N, s.left >= 1 && s.left <= 12]), [[true, true], [true, true]], 'acotados');
+    return true;
+}],
+['11 · el mapa dibuja su radio a trazos, el satélite y los turnos que le quedan', () => {
+    const g = T.uiStart('es', true), es = g.player, c = g.nations[T.nation('fr')].capitalCell;
+    g.nations[es].gold = 1e6; T.learn(g, es, 'espacio1'); g.launchSat(es, c);
+    const v = ui.view, ctx = v.ctx, fillText = ctx.fillText, texts = [];
+    ctx.fillText = function (t, ...rest) { texts.push(String(t)); return fillText.call(this, t, ...rest); };
+    try { for (const m of ['sencilla', 'realista']) { v.setMode(m); v.centerOn(c, 10); v.draw(); } } finally { delete ctx.fillText; }
+    T.ok(v.satCache?.key.includes(`${c}:${g.satRadius(es)}`), 'contorno del radio');
+    T.ok(texts.filter(t => t === '8').length >= 2, `turnos: ${texts.join(' ')}`);
+    T.ok(/sat[eé]lite/i.test(document.querySelector('#legend').textContent), 'leyenda');
+    return true;
+}],
+['11 · móvil: elegir el centro del satélite cabe en la hoja inferior', () => {
+    const g = T.uiStart('es'), es = g.player; g.nations[es].gold = 1e6; T.learn(g, es, 'espacio1');
+    ui.setSheet('media'); ui.setTool('air'); ui.clickCell(g.nations[es].capitalCell);
+    document.querySelector('[data-action="air-sat"]').click();
+    const m = T.mobileCard(), first = document.querySelector('#card .sec');
+    T.ok(!m.hidden && m.card <= m.stage * 0.42, `ficha: ${JSON.stringify(m)}`);
+    T.ok(/Satélites/.test(first.textContent), 'va primero');
+    ui.cancel(); T.eq(ui.air.mode, null, 'Esc lo cancela');
+    ui.setTool('command');
+    return true;
+}],
 ['M · con seis guerras, la fase de la IA con aviación tarda como mucho 1,25 veces lo mismo sin ella', () => {
     const run = bare => {
         const g = T.game(11); g.start(T.nation('us'));
@@ -1622,6 +1742,51 @@ try {
         const state = await page.evaluate(() => ui.view.realistic.state);
         if (state !== 'ready' || page.errors.length) { failed++; console.log(`FALLA ${AA_SHOTS}\n      vista realista: ${state}; ${page.errors.join('; ')}`); }
         else console.log(`ok    ${AA_SHOTS} (${join(out, 'antiaerea-sencilla.png')}, antiaerea-realista.png, antiaerea-ficha.png, antiaerea-ficha-movil.png)`);
+        await page.close();
+    }
+    // Capturas de un satélite español sobre París en las dos vistas, con la niebla, y de su sección en la ficha de Aviación
+    // en el escritorio y en el móvil.
+    const SAT_SHOTS = '11 · capturas del satélite en las dos vistas';
+    if (!filter || SAT_SHOTS.includes(filter)) {
+        ran++;
+        const out = join(root, 'tools/cache/smoke');
+        mkdirSync(out, { recursive: true });
+        const page = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+        page.errors = [];
+        page.on('pageerror', e => page.errors.push(e.message));
+        await page.goto(`http://localhost:${port}/?seed=7&mapa=europa`);
+        await page.waitForFunction(() => typeof GameEngine === 'function' && typeof ui === 'object');
+        await page.evaluate(setup);
+        await page.evaluate(() => {
+            const g = T.uiStart('es', true), es = g.player, c = g.nations[T.nation('fr')].capitalCell;
+            g.nations[es].gold = 1e6; T.learn(g, es, 'espacio1'); g.launchSat(es, c);
+            window.SHOT = { at: c };
+        });
+        await page.waitForFunction(() => ui.view.realistic.state === 'ready' || ui.view.realistic.state === 'failed', null, { timeout: 60000 });
+        const shot = async (name, mode, zoom) => {
+            await page.evaluate(([m, z]) => new Promise(r => {
+                ui.setTool('command'); ui.select(-1); ui.view.setMode(m); ui.view.scale = 1; ui.view.centerOn(SHOT.at, z); ui.view.ox += 170;
+                ui.render(); ui.view.draw(); requestAnimationFrame(() => requestAnimationFrame(r));
+            }), [mode, zoom]);
+            await page.waitForTimeout(800);
+            await page.screenshot({ path: join(out, `${name}.png`) });
+        };
+        await shot('satelite-sencilla', 'sencilla', 7);
+        await shot('satelite-realista', 'realista', 12);
+        await page.evaluate(() => { ui.setTool('air'); ui.clickCell(ui.game.nations[ui.game.player].capitalCell); document.querySelector('[data-action="air-sat"]').scrollIntoView({ block: 'center' }); });
+        await page.screenshot({ path: join(out, 'satelite-ficha.png') });
+        await page.setViewportSize({ width: 390, height: 844 });
+        // En el móvil, eligiendo el centro de otro (el primero ya ha dejado de transmitir).
+        await page.evaluate(() => {
+            const g = ui.game; g.sats.length = 0; g.airVersion++;
+            ui.drawerOpen = false; ui.setSheet('media'); ui.render(); document.querySelector('[data-action="air-sat"]').click();
+        });
+        await page.waitForTimeout(300);
+        await page.screenshot({ path: join(out, 'satelite-ficha-movil.png') });
+        const state = await page.evaluate(() => ui.view.realistic.state);
+        if (state !== 'ready' || page.errors.length) { failed++; console.log(`FALLA ${SAT_SHOTS}
+      vista realista: ${state}; ${page.errors.join('; ')}`); }
+        else console.log(`ok    ${SAT_SHOTS} (${join(out, 'satelite-sencilla.png')}, satelite-realista.png, satelite-ficha.png, satelite-ficha-movil.png)`);
         await page.close();
     }
     for (const page of pages.values()) if (page.errors.length) { failed++; console.log(`FALLA errores en la página:\n      ${page.errors.join('\n      ')}`); }
