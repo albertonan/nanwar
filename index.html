@@ -591,6 +591,9 @@ const CONFIG = {
     SPY_CATCH_BASE: 0.08,           // probabilidad de que lo capturen el primer turno
     SPY_CATCH_PER_TURN: 0.04,       // ... que crece cada turno que sigue allí
     SPY_CATCH_MAX: 0.6,
+    // Aviación: aviones de combate por escuadrón (al empezar), escuadrones por aeródromo, precios en oro y
+    // turnos que un aeródromo bombardeado queda inservible.
+    AIR: { PER_SQUADRON: 24, PER_AIRFIELD: 4, SQUADRON_COST: 300, AIRFIELD_COST: 150, DOWN_TURNS: 2 },
     // Terreno de cada casilla, sacado de datos reales (relieve, bosques, humedales y lagos): coste de entrar y defensa.
     TERRAIN: {
         plain:    { name: "Llanura", cost: 1, def: 1 },
@@ -638,6 +641,22 @@ const TEMPLATES = {
     artilleria: { name: 'Grupo de artillería', units: { infantry: 2, tank: 0, artillery: 6 }, why: 'El mejor ataque por oro para romper defensas, pero frágil y lento (velocidad 3).' },
     division: { name: 'División', units: { infantry: 20, tank: 8, artillery: 4 }, why: 'Tres brigadas juntas: el escalón XX.' }
 };
+// Aviación inicial de cada país, por su clave: aviones de combate en servicio en 2024 (cazas, cazabombarderos y
+// aviones de ataque; sin entrenadores, transportes ni helicópteros). Los que no tienen ninguno no salen.
+const AIR_FORCES = {
+    us: 2750, cn: 1570, ru: 1530, in: 600, eg: 550, kp: 440, kr: 410, pk: 410, il: 300, jp: 290, tw: 290, tr: 290, sa: 280,
+    gr: 230, de: 225, fr: 225, it: 200, ir: 190, dz: 190, es: 165, sy: 150, gb: 140, ae: 140, au: 105, kz: 100, sg: 100, br: 100,
+    qa: 95, se: 95, th: 90, mm: 90, ua: 90, pl: 85, ca: 85, vn: 75, ma: 70, fi: 62, by: 60, iq: 60, id: 60, ch: 55, no: 52,
+    uz: 50, cl: 46, be: 45, nl: 45, bd: 45, jo: 45, sd: 45, kw: 40, om: 40, ao: 40, ve: 40, co: 40, pe: 35, cz: 30, dk: 30,
+    ro: 30, az: 30, tm: 30, bh: 30, ng: 30, pt: 28, my: 26, za: 26, rs: 25, et: 25, bg: 20, ar: 20, ly: 20, ph: 18, at: 15,
+    am: 15, ke: 15, cu: 15, hu: 14, tz: 14, hr: 12, sk: 12, tn: 12, ec: 10, er: 10, zw: 10, zm: 10, bw: 10, na: 10, lk: 10,
+    do: 8, bo: 6, ug: 6, td: 6, ml: 6, lb: 6, ga: 6, hn: 6, cd: 5, uy: 5, sv: 5, mx: 4, cm: 4, gq: 4, gt: 4, mr: 4, ge: 3,
+    bf: 3, tg: 3, ne: 2
+};   // aviones de combate en servicio, 2024 (FlightGlobal World Air Forces 2024, IISS Military Balance 2024); el resto, 0
+const AIR_EUROPE = { ru: 900 };   // en el mapa de Europa, la Rusia europea
+const airFleet = key => (MAP_ID === 'europa' && Object.hasOwn(AIR_EUROPE, key) ? AIR_EUROPE[key] : AIR_FORCES[key] ?? 0);
+// Escuadrones con los que empieza un país de `n` aviones: uno por cada 24, y al menos uno si tiene alguno.
+const squadronsFor = n => (n > 0 ? Math.max(1, Math.round(n / CONFIG.AIR.PER_SQUADRON)) : 0);
 const OP_GOLD = [0, 50, 100, 200, 400];   // oro por turno que se puede dar a una operación para refuerzos
 const OP_GATHER_TURNS = 3;   // una ofensiva reúne los ejércitos libres a este número de turnos de marcha o menos
 const LINE_BAND = 6;         // franja de una línea de defensa: casillas a esta distancia o menos de su trazado
@@ -687,7 +706,8 @@ const baseRules = () => ({
     spyWide: false,                      // el espía informa también de las provincias vecinas y de galones, muros e investigación
     commandOps: 3,                       // operaciones a la vez (más una por cada 20 provincias)
     seaSpeed: 6,                         // casillas por turno de un ejército embarcado
-    amphibious: 0.5                      // ataque al desembarcar en una costa enemiga
+    amphibious: 0.5,                     // ataque al desembarcar en una costa enemiga
+    airRangeKm: 500                      // radio de acción de un escuadrón desde su aeródromo
 });
 
 const BASE_RULES = baseRules();
@@ -1026,7 +1046,8 @@ class GameEngine {
             id, key: c.key, name: c.name, color: c.color,
             capitalCell: PROVINCES[c.capital].city, capitalName: PROVINCES[c.capital].cityName,
             gold: 0, alive: true, recruited: new Map(), overlord: -1, templates: [], command: newCommand(),
-            tech: { done: new Set(), progress: new Map(), current: [] }   // investigación: hechas, turnos invertidos, en curso
+            tech: { done: new Set(), progress: new Map(), current: [] },  // investigación: hechas, turnos invertidos, en curso
+            lastTurn: 0   // último turno en que empezó a jugar (ver nextOwnTurn)
         }));
         const n = this.nations.length;
         this.relations = Array.from({ length: n }, () => []);
@@ -1043,6 +1064,12 @@ class GameEngine {
             if (p.forces) for (const k of UNIT_KEYS) units[k] += p.forces[k] ?? 0;
             this.settle(this.newArmy(p.country, p.city, units, 0));
         }
+        // Aviación: escuadrones con base en un aeródromo (4 como mucho en cada uno) y la que tenía cada país en 2024.
+        this.squadrons = new Map();   // id → { id, owner, base, ready, flown, patrol, op, task }
+        this.nextSquadronId = 1;
+        this.airfields = new Map();   // casilla → { owner, left, downUntil }: left, turnos de obra; downUntil, inservible hasta
+        this.airVersion = 0;          // cambia con escuadrones y aeródromos
+        this.seedAir();
         this.configure({ aggression: 'normal', alliances: 'reales', victory: 0.5, fog: true });
         for (const nat of this.nations) nat.gold = this.income(nat.id) * CONFIG.START_GOLD_TURNS;
         this.log("SISTEMA DE COMANDO ONLINE. Configura la partida y elige tu nación.");
@@ -1104,7 +1131,9 @@ class GameEngine {
             armyFrom: [...this.armies.values()].filter(a => a.from).map(a => [a.id, a.from]),
             orders: [...this.armies.values()].filter(a => a.order).map(a => [a.id, a.order.kind, a.order.dest, a.order.target, a.order.ratio, a.order.flee ? 1 : 0, a.order.since, a.order.stuck]),
             blocs: this.blocs.map(b => ({ id: b.id, name: b.name, founder: b.founder, secret: b.secret, since: b.since, members: [...b.members] })),
-            nextBlocId: this.nextBlocId
+            nextBlocId: this.nextBlocId,
+            air: { sq: [...this.squadrons.values()].map(q => [q.id, q.owner, q.base, q.ready, q.flown, q.patrol, q.op]), nextSq: this.nextSquadronId,
+                fields: [...this.airfields].map(([c, f]) => [c, f.owner, f.left, f.downUntil]) }
         };
     }
 
@@ -1295,6 +1324,29 @@ class GameEngine {
             if (g.setOrder(a, { kind, dest: int(x?.[2], -1, G.N - 1, -1), target: int(x?.[3], 0, 1e9, 0), ratio: [0, 1, 1.3, 1.8].includes(Number(x?.[4])) ? Number(x[4]) : 1.3, flee: !!x?.[5] }))
                 Object.assign(a.order, { since: int(x?.[6], 0, 1e6, g.turn), stuck: int(x?.[7], 0, 3, 0) });
         }
+        // Aviación: lo que sembró el constructor se tira. Aeródromos en tierra; escuadrones con id único, en un aeródromo
+        // de su mismo dueño y con sitio, y en una operación solo si es suya. Las partidas de antes de la aviación la
+        // reciben ahora, según quién tiene qué ciudades.
+        g.squadrons = new Map(); g.airfields = new Map(); g.nextSquadronId = 1;
+        if (data.air) {
+            for (const x of list(data.air.fields)) {
+                const c = int(x?.[0], -1, G.N - 1, -1);
+                if (c < 0 || !isLand(c) || g.airfields.has(c)) continue;
+                g.airfields.set(c, { owner: nat(x?.[1]), left: int(x?.[2], 0, 100, 0), downUntil: int(x?.[3], 0, 1e6, 0) });
+            }
+            const based = new Map();   // escuadrones por aeródromo
+            for (const x of list(data.air.sq)) {
+                const id = int(x?.[0], 1, 1e9, 0), owner = nat(x?.[1]), base = int(x?.[2], -1, G.N - 1, -1), op = g.ops.get(int(x?.[6], 0, 1e6, 0));
+                if (!id || g.squadrons.has(id) || g.airfields.get(base)?.owner !== owner || (based.get(base) ?? 0) >= CONFIG.AIR.PER_AIRFIELD) continue;
+                based.set(base, (based.get(base) ?? 0) + 1);
+                g.squadrons.set(id, { id, owner, base, ready: int(x?.[3], 0, 1e6, 0), flown: int(x?.[4], 0, 1e6, 0), patrol: int(x?.[5], -1, G.N - 1, -1),
+                    op: op && op.owner === owner ? op.id : 0, task: null });
+            }
+            g.nextSquadronId = Math.max(int(data.air.nextSq, 1, 1e9, 1), ...[...g.squadrons.keys()].map(x => x + 1), 1);
+        } else g.seedAir();
+        g.airVersion++;
+        // Quién ya ha empezado este turno: el jugador, que es quien guarda; los demás juegan después.
+        for (const n of g.nations) n.lastTurn = n.id === g.player ? g.turn : g.turn - 1;
         return g;
     }
 
@@ -1717,6 +1769,152 @@ class GameEngine {
             if (this.startFortRepair(id, p)) spent += p.cost;
         }
         return spent;
+    }
+
+    // --- Aviación: aeródromos y escuadrones ---
+    // Turno en que `id` jugará la próxima vez: este si aún no ha empezado a jugarlo, el siguiente si ya.
+    nextOwnTurn(id) { return this.nations[id].lastTurn === this.turn ? this.turn + 1 : this.turn; }
+    // Radio de acción de los escuadrones de `id`, en casillas.
+    airRange(id) { return kmCells(this.rules(id).airRangeKm); }
+    newSquadron(owner, base, ready = 0) {
+        const sq = { id: this.nextSquadronId++, owner, base, ready, flown: 0, patrol: -1, op: 0, task: null };
+        this.squadrons.set(sq.id, sq);
+        this.airVersion++;
+        return sq;
+    }
+    squadronsAt(cell) { const out = []; for (const q of this.squadrons.values()) if (q.base === cell) out.push(q); return out; }
+    // Un aeródromo funciona si está terminado, no lo han dejado inservible y su casilla sigue siendo de su dueño.
+    airfieldUp(cell) {
+        const f = this.airfields.get(cell);
+        return !!f && f.left === 0 && this.turn > f.downUntil && this.owner[cell] === f.owner;
+    }
+    // Un escuadrón vuela una vez por turno, si ya está listo y su aeródromo funciona.
+    canFly(sq) { return this.turn >= sq.ready && sq.flown !== this.turn && this.airfieldUp(sq.base); }
+    // Aeródromo terminado de `id` en una casilla suya, con sitio para otro escuadrón.
+    hangar(id, cell) {
+        const f = this.airfields.get(cell);
+        return !!f && f.owner === id && f.left === 0 && this.owner[cell] === id && this.squadronsAt(cell).length < CONFIG.AIR.PER_AIRFIELD;
+    }
+    // Comprar un escuadrón en un aeródromo propio: vuela a partir del turno siguiente.
+    buySquadron(id, cell) {
+        const n = this.nations[id];
+        if (!this.hangar(id, cell) || n.gold < CONFIG.AIR.SQUADRON_COST) return null;
+        n.gold -= CONFIG.AIR.SQUADRON_COST;
+        return this.newSquadron(id, cell, this.turn + 1);
+    }
+    // Un aeródromo nuevo: solo en una ciudad propia y legal que no tenga ya uno; tarda lo que una fortificación.
+    planAirfield(id, cell) {
+        if (cell < 0 || CITY_OF[cell] < 0 || this.owner[cell] !== id || this.legal[cell] !== id || this.airfields.has(cell)) return null;
+        return { cell, cost: CONFIG.AIR.AIRFIELD_COST };
+    }
+    buildAirfield(id, plan) {
+        const n = this.nations[id], p = plan ? this.planAirfield(id, plan.cell) : null;
+        if (!p || p.cost > n.gold) return false;
+        this.airfields.set(p.cell, { owner: id, left: this.rules(id).fortTurns, downUntil: 0 });
+        n.gold -= p.cost;
+        this.airVersion++;
+        return true;
+    }
+    // Trasladar un escuadrón a otro aeródromo propio que funcione, a su alcance y con sitio: gasta su misión del turno.
+    rebase(sq, cell) {
+        if (cell === sq.base || !this.canFly(sq) || !this.airfieldUp(cell) || !this.hangar(sq.owner, cell)
+            || hexDist(sq.base, cell) > this.airRange(sq.owner)) return false;
+        sq.base = cell; sq.flown = this.turn;
+        this.airVersion++;
+        return true;
+    }
+    // Aviación de partida: un escuadrón por cada 24 aviones de 2024, de 4 en 4 en aeródromos que ya funcionan, en la
+    // capital y luego en las ciudades mayores; si no hay bastantes, en casillas propias cerca de la capital. Sin azar.
+    seedAir() {
+        const per = CONFIG.AIR.PER_AIRFIELD, byCountry = this.nations.map(() => []);
+        for (const p of PROVINCES) byCountry[this.owner[p.city]]?.push(p);
+        for (const nat of this.nations) {
+            const k = squadronsFor(airFleet(nat.key));
+            if (!nat.alive || !k) continue;
+            const id = nat.id, need = Math.ceil(k / per), cap = nat.capitalCell, S = [];
+            if (this.owner[cap] === id) S.push(cap);
+            const cities = byCountry[id].filter(p => p.city !== cap && this.legal[p.city] === id).sort((a, b) => b.population - a.population || a.id - b.id);
+            for (const p of cities) { if (S.length >= need) break; S.push(p.city); }
+            if (S.length < need) {
+                const rest = G.land.filter(c => this.owner[c] === id && CITY_OF[c] < 0 && CELL_TERRAIN[c] !== 'lake')
+                    .sort((a, b) => hexDist(a, cap) - hexDist(b, cap) || a - b);
+                S.push(...rest.slice(0, need - S.length));
+            }
+            S.forEach((c, i) => {
+                this.airfields.set(c, { owner: id, left: 0, downUntil: 0 });
+                for (let j = i * per; j < Math.min(k, (i + 1) * per); j++) this.newSquadron(id, c, 0);
+            });
+        }
+        this.airVersion++;
+    }
+    // La casilla `cell` ha cambiado de manos en combate: si tenía un aeródromo de otro, se pierde con sus escuadrones.
+    loseAirfield(cell) {
+        const f = this.airfields.get(cell);
+        if (!f || f.owner === this.owner[cell]) return;
+        const lost = this.squadronsAt(cell);
+        for (const q of lost) this.squadrons.delete(q.id);
+        this.airfields.delete(cell);
+        this.airVersion++;
+        if (f.owner === this.player) this.log(`Pierdes el aeródromo de ${this.placeName(cell)}${lost.length ? ` y sus ${plural(lost.length, 'escuadrón', 'escuadrones')}` : ''}.`);
+    }
+    // Aeródromos en casillas que ya no son de su dueño (sin combate: un tratado, una provincia que cae entera...): se
+    // cierran y sus escuadrones vuelan al aeródromo propio más cercano que funcione y tenga sitio. Si no hay, se pierden.
+    airSweep() {
+        for (const [c, f] of [...this.airfields]) {
+            if (this.owner[c] === f.owner) continue;
+            this.airfields.delete(c);
+            this.airVersion++;
+            let moved = 0, lost = 0;
+            for (const q of this.squadronsAt(c)) {
+                let best = -1, bd = Infinity;
+                for (const d of this.airfields.keys()) {
+                    const dist = hexDist(c, d);
+                    if (dist < bd && this.airfieldUp(d) && this.hangar(f.owner, d)) { best = d; bd = dist; }
+                }
+                if (best >= 0) { q.base = best; moved++; } else { this.squadrons.delete(q.id); lost++; }
+            }
+            if (f.owner !== this.player) continue;
+            const parts = [moved ? `${moved === 1 ? 'un escuadrón vuela' : `${moved} escuadrones vuelan`} a otro aeródromo` : '',
+                lost ? `${lost === 1 ? 'uno se pierde' : `${lost} se pierden`} por no tener dónde ir` : ''].filter(Boolean);
+            this.log(`Pierdes el aeródromo de ${this.placeName(c)}${parts.length ? `: ${parts.join(' y ')}` : ''}.`);
+        }
+    }
+    // Al empezar el turno de `id`: avanzan sus obras de aeródromo y sus escuadrones dejan de patrullar.
+    airTurn(id) {
+        for (const [c, f] of this.airfields) {
+            if (f.owner !== id || f.left <= 0) continue;
+            if (--f.left === 0 && id === this.player) this.log(`Aeródromo terminado en ${this.placeName(c)}.`);
+            this.airVersion++;
+        }
+        for (const q of this.squadrons.values()) if (q.owner === id && q.patrol >= 0) { q.patrol = -1; this.airVersion++; }
+    }
+    playerBuySquadron(cell) {
+        if (this.over) return null;
+        const p = this.player, f = this.airfields.get(cell), cost = CONFIG.AIR.SQUADRON_COST;
+        if (!f || f.owner !== p || f.left > 0 || this.owner[cell] !== p) { this.log('Solo se compran escuadrones en un aeródromo tuyo terminado.'); return null; }
+        if (this.squadronsAt(cell).length >= CONFIG.AIR.PER_AIRFIELD) { this.log(`El aeródromo de ${this.placeName(cell)} ya tiene ${CONFIG.AIR.PER_AIRFIELD} escuadrones.`); return null; }
+        if (this.nations[p].gold < cost) { this.log(`Fondos insuficientes: el escuadrón cuesta ${cost}g.`); return null; }
+        const sq = this.buySquadron(p, cell);
+        if (sq) this.log(`Compras un escuadrón en ${this.placeName(cell)} por ${cost} de oro: listo para volar el turno que viene.`);
+        return sq;
+    }
+    playerBuildAirfield(cell) {
+        if (this.over) return false;
+        const p = this.player, plan = this.planAirfield(p, cell);
+        if (!plan) { this.log(this.airfields.has(cell) ? 'Ahí ya hay un aeródromo.' : 'Solo se construye un aeródromo en una ciudad tuya.'); return false; }
+        if (plan.cost > this.nations[p].gold) { this.log(`Fondos insuficientes: el aeródromo cuesta ${plan.cost}g.`); return false; }
+        if (!this.buildAirfield(p, plan)) return false;
+        this.log(`Empiezas un aeródromo en ${this.placeName(cell)} por ${plan.cost} de oro: listo en ${plural(this.rules(p).fortTurns, 'turno', 'turnos')}.`);
+        return true;
+    }
+    // Traslada los escuadrones elegidos del jugador a `cell` (los que puedan); devuelve cuántos.
+    playerRebase(ids, cell) {
+        if (this.over) return 0;
+        let n = 0;
+        for (const id of ids) { const q = this.squadrons.get(id); if (q && q.owner === this.player && this.rebase(q, cell)) n++; }
+        if (n) this.log(`${n === 1 ? 'Un escuadrón se traslada' : `${n} escuadrones se trasladan`} a ${this.placeName(cell)}: no ${n === 1 ? 'vuelve' : 'vuelven'} a volar hasta el turno que viene.`);
+        else this.log(`Ningún escuadrón puede trasladarse a ${this.placeName(cell)}: hace falta un aeródromo tuyo en servicio, con sitio y a su alcance (${plural(this.airRange(this.player), 'casilla', 'casillas')}), y que no hayan volado este turno.`);
+        return n;
     }
     // Hay un ejército enemigo (en guerra) en `u`, en `v` o en sus vecinas: no se trabaja en el tramo.
     repairBlocked(id, u, v) {
@@ -3533,6 +3731,7 @@ class GameEngine {
         const holder = c => (this.legal[c] !== a && !this.atWar(a, this.legal[c]) ? this.legal[c] : a);
         this.owner[cell] = holder(cell);
         this.version++;
+        this.loseAirfield(cell);   // antes de que la ciudad quede asediada: el aeródromo cae al entrar
         this.sieges.delete(cell);
         if (byForce) this.wreck(cell, prev, a);
         const res = RESOURCE_AT.get(cell);
@@ -3903,6 +4102,9 @@ class GameEngine {
     }
 
     beginNationTurn(id) {
+        this.airSweep();
+        this.nations[id].lastTurn = this.turn;
+        this.airTurn(id);
         for (const a of this.armies.values()) if (a.owner === id) a.used = 0;
         this.feedArmies(id);
         this.advanceResearch(id);

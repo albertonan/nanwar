@@ -101,6 +101,7 @@ La IA manda con el mismo sistema: en cada frente, una ofensiva si es lo bastante
 - Fronteras de las regiones: © EuroGeographics para las fronteras administrativas, vía Eurostat GISCO (NUTS 2021/2024); Natural Earth 5.1.1 (dominio público) para Rusia, Ucrania, Bielorrusia, Moldavia, Bosnia y Herzegovina y Kosovo.
 - Ciudades: GeoNames (CC BY 4.0) y Natural Earth.
 - Fuerzas armadas iniciales: aproximación a partir de IISS Military Balance 2024 y SIPRI (en el mapa del mundo, por países; los que no están en la tabla, el 0,15 % de su población en infantería).
+- Aviación inicial: aviones de combate en servicio por país en 2024, aproximación a partir de FlightGlobal World Air Forces 2024 e IISS Military Balance 2024 (tabla `AIR_FORCES` de `index.html`; en el mapa de Europa, la Rusia europea cuenta 900); un escuadrón por cada 24 aviones, y al menos uno si el país tiene alguno.
 - Yacimientos: ubicación aproximada de cuencas y minas conocidas.
 - Relieve: teselas Terrarium de Mapzen en AWS (elevation-tiles-prod), a partir de SRTM, GMTED2010, ETOPO1 y otras fuentes públicas.
 - Bosques, humedales, lagos y zonas urbanas: © ESA WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium (CC BY 4.0).

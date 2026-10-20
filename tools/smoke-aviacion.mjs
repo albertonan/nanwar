@@ -94,6 +94,18 @@ const setup = () => {
             for (let d = 0; d < k; d++) { const j = G.nb[c * 6 + d]; g.settle(g.newArmy(enemy, j, { infantry: 1, tank: 0, artillery: 0 }, 0)); }
             return c;
         },
+        // Partida sin aviación: ni escuadrones, ni aeródromos, ni antiaéreo, ni satélites.
+        bare(g) {
+            for (const k of ['squadrons', 'airfields', 'aaSites', 'sats']) {
+                const x = g[k];
+                if (x instanceof Map || x instanceof Set) x.clear(); else if (Array.isArray(x)) x.length = 0;
+            }
+            g.airVersion++;
+        },
+        // Aeródromo terminado y en servicio de `owner` en `cell`.
+        airfield(g, owner, cell) { g.airfields.set(cell, { owner, left: 0, downUntil: 0 }); g.airVersion++; },
+        // `n` escuadrones de `owner` en el aeródromo `base`, listos para volar.
+        squad(g, owner, base, n = 1) { return Array.from({ length: n }, () => g.newSquadron(owner, base, 0)); },
         // Texto de la tarjeta al pasar el ratón por `cell` ('' si no sale).
         hover(cell) {
             ui.cellFromEvent = () => cell; ui.view.hoverCell = -1;
@@ -205,6 +217,110 @@ const CHECKS = [
     g.fort[c] = 1; T.learn(g, fr, 'fortificacion1'); g.nations[fr].gold = 5000;
     g.aiRepairs(fr);
     T.ok(g.roadWork.has(edgeKey(a, d)) && g.fortWork.get(c)?.up, 'repara las dos');
+    return true;
+}],
+['2 · aviación inicial de España: 165 aviones, 7 escuadrones en 2 aeródromos (la capital y la ciudad mayor)', () => {
+    const g = T.game(), es = T.nation('es'), cap = g.nations[es].capitalCell;
+    const big = PROVINCES.filter(p => p.country === es && p.city !== cap).sort((a, b) => b.population - a.population)[0].city;
+    const fields = [...g.airfields].filter(([, f]) => f.owner === es).map(([c]) => c).sort((a, b) => a - b);
+    T.eq([airFleet('es'), [...g.squadrons.values()].filter(s => s.owner === es).length, fields, g.squadronsAt(cap).length],
+        [165, 7, [cap, big].sort((a, b) => a - b), 4], 'España');
+    return true;
+}],
+['2 · sin aviones de combate no hay escuadrones; con pocos, uno', () => {
+    const g = T.game(), n = k => [...g.squadrons.values()].filter(s => s.owner === T.nation(k)).length;
+    T.eq([n('ie'), n('at'), n('ru')], [0, 1, 38], 'Irlanda, Austria y la Rusia europea');
+    return true;
+}],
+// Del plan, con Taiwán en vez de Israel: en el mundo Israel solo tiene 2 casillas, y en ellas caben 8 de sus 13 escuadrones.
+['M · Estados Unidos empieza con 115 escuadrones en 29 aeródromos; Taiwán, con 12 aunque tenga una sola ciudad; Israel, los que caben', () => {
+    const g = T.game(), us = T.nation('us'), tw = T.nation('tw'), il = T.nation('il');
+    const count = id => [[...g.squadrons.values()].filter(s => s.owner === id).length, [...g.airfields.values()].filter(f => f.owner === id).length];
+    T.eq([count(us), count(tw), count(il)], [[115, 29], [12, 3], [8, 2]], 'escuadrones y aeródromos');
+    T.eq(PROVINCES.filter(p => p.country === tw).length, 1, 'una sola ciudad');
+    T.ok([...g.airfields].filter(([, f]) => f.owner === tw || f.owner === il).every(([c, f]) => g.owner[c] === f.owner && g.squadronsAt(c).length <= 4), 'en su tierra y 4 como mucho');
+    return true;
+}],
+['2 · comprar: 300 de oro en una ciudad con aeródromo, listo al turno siguiente y 4 como mucho', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es); T.bare(g); g.nations[es].gold = 2000;
+    const cap = g.nations[es].capitalCell;
+    T.eq(g.buySquadron(es, cap), null, 'sin aeródromo, no');
+    T.airfield(g, es, cap);
+    const s = g.buySquadron(es, cap);
+    T.eq([g.nations[es].gold, s.ready, g.canFly(s)], [1700, g.turn + 1, false], 'listo el turno que viene');
+    g.buySquadron(es, cap); g.buySquadron(es, cap); g.buySquadron(es, cap);
+    T.eq(g.buySquadron(es, cap), null, 'no cabe un quinto');
+    return true;
+}],
+['2 · construir un aeródromo: 150 de oro y las obras de una fortificación, solo en una ciudad tuya', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es); T.bare(g); g.nations[es].gold = 1000;
+    const city = PROVINCES.find(p => p.country === es && p.city !== g.nations[es].capitalCell).city, [, plain] = T.plainPair(g, es);
+    T.eq(g.planAirfield(es, plain), null, 'fuera de una ciudad, no');
+    T.ok(g.buildAirfield(es, g.planAirfield(es, city)), 'en obra');
+    T.eq([g.nations[es].gold, g.airfields.get(city).left, g.airfieldUp(city)], [850, g.rules(es).fortTurns, false], 'obra');
+    for (let i = 0; i < g.rules(es).fortTurns; i++) g.beginNationTurn(es);
+    T.ok(g.airfieldUp(city), 'listo');
+    return true;
+}],
+// Del plan, con el alcance del mundo (6 casillas): Canarias solo existe en ese mapa.
+['M · trasladar gasta la misión del turno y solo dentro del alcance', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es); T.bare(g);
+    const cap = g.nations[es].capitalCell;
+    const near = PROVINCES.find(p => p.country === es && p.city !== cap && hexDist(cap, p.city) <= 6).city, far = PROVINCES.find(p => p.name === 'Canarias').city;
+    T.eq([g.airRange(es), hexDist(cap, far) > 6], [6, true], 'alcance de 500 km');
+    T.airfield(g, es, cap); T.airfield(g, es, near); T.airfield(g, es, far);
+    const [s] = T.squad(g, es, cap);
+    T.ok(!g.rebase(s, far), 'Canarias queda fuera de alcance');
+    T.ok(g.rebase(s, near), 'traslado');
+    T.eq([s.base, s.flown, g.canFly(s)], [near, g.turn, false], 'gasta la misión');
+    return true;
+}],
+['2 · tomar a la fuerza la ciudad de un aeródromo lo pierde con sus escuadrones', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const city = PROVINCES.find(p => p.country === fr && CAPITAL_OF[p.city] < 0).city;
+    T.airfield(g, fr, city); T.squad(g, fr, city, 2);
+    if (g.armyOn(city)) g.removeArmy(g.armyOn(city));
+    g.capture(city, es, true);
+    T.eq([g.airfields.has(city), [...g.squadrons.values()].filter(s => s.owner === fr).length], [false, 0], 'perdidos');
+    return true;
+}],
+['2 · una ciudad que cambia de manos sin combate traslada sus escuadrones a otro aeródromo propio', () => {
+    const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+    g.start(es); T.bare(g);
+    const cap = g.nations[es].capitalCell, city = PROVINCES.find(p => p.country === es && p.city !== cap).city;
+    T.airfield(g, es, cap); T.airfield(g, es, city);
+    const [s] = T.squad(g, es, city);
+    g.owner[city] = pt; g.version++; g.airSweep();
+    T.eq([g.airfields.has(city), g.squadrons.get(s.id)?.base], [false, cap], 'a la capital');
+    return true;
+}],
+['2 · guardar y cargar conserva escuadrones y aeródromos', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    const s = [...g.squadrons.values()].find(x => x.owner === es); s.ready = g.turn + 1; s.flown = g.turn;
+    const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+    T.eq([h.squadrons.size, h.airfields.size, h.squadrons.get(s.id), h.nextSquadronId], [g.squadrons.size, g.airfields.size, s, g.nextSquadronId], 'igual');
+    return true;
+}],
+['2 · una partida de antes de la aviación la recibe al cargar, según quién tiene qué ciudades', () => {
+    const g = T.game(), es = T.nation('es'), pt = T.nation('pt'), lis = g.nations[pt].capitalCell;
+    g.start(es); g.declareWar(es, pt); g.owner[lis] = es; g.version++;
+    const data = JSON.parse(JSON.stringify(g.serialize()));
+    delete data.air;
+    const h = GameEngine.load(data), n = id => [...h.squadrons.values()].filter(s => s.owner === id).length;
+    T.eq([n(es), n(pt), h.airfields.has(lis), [...h.airfields.values()].filter(f => f.owner === pt).length], [7, 1, false, 1], 'sembrada');
+    return true;
+}],
+['2 · el turno siguiente del dueño: este si aún no ha jugado, el que viene si ya', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es);
+    T.eq([g.nextOwnTurn(es), g.nextOwnTurn(fr)], [g.turn + 1, g.turn], 'empezada');
+    const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+    T.eq([h.nextOwnTurn(es), h.nextOwnTurn(fr)], [h.turn + 1, h.turn], 'cargada');
     return true;
 }]
 ];
