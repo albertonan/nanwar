@@ -14,8 +14,8 @@ Cómo se ve el éxito: el jugador embarca un ejército en Cádiz, lo ve navegar 
 
 ## Dos piezas, en este orden
 
-1. **Agua** (este documento, partes 1 a 6): embarcar, navegar, desembarcar, asalto anfibio y debilidad en el mar. Se publica sola, antes que la aviación.
-2. **Aviación** (diseño de aviación, parte B), que se construye después. La parte 7 de este documento dice qué añade al agua.
+1. **Agua** (este documento, partes 1 a 7): embarcar, navegar, desembarcar, asalto anfibio y debilidad en el mar. Se publica sola, antes que la aviación.
+2. **Aviación** (diseño de aviación, parte B), que se construye después. La parte 8 de este documento dice qué añade al agua.
 
 Las marcas significan:
 - **(Usuario)**: lo decidió el jugador en la conversación.
@@ -37,7 +37,7 @@ Los números son de partida y se ajustan probando.
 
 ## 2 · Navegar
 
-- **(Propuesta)** En el mar, todos los ejércitos van a la misma velocidad, sea cual sea su tropa: **6 casillas por turno** en los dos mapas, igual que las velocidades de tierra se cuentan en casillas y no en kilómetros. España–Canarias en el mundo son unos 3 turnos en el mar; Baleares en Europa, uno. **(Decisión mía)** No se mide en kilómetros: 500 km serían 25 casillas en Europa, seis veces la infantería, y la costa se volvería una autopista.
+- **(Propuesta)** En el mar, todos los ejércitos van a la misma velocidad, sea cual sea su tropa: **6 casillas por turno** en los dos mapas (más con la investigación, parte 5), igual que las velocidades de tierra se cuentan en casillas y no en kilómetros. España–Canarias en el mundo son unos 3 turnos en el mar; Baleares en Europa, uno. **(Decisión mía)** No se mide en kilómetros: 500 km serían 25 casillas en Europa, seis veces la infantería, y la costa se volvería una autopista.
 - **(Decisión mía)** Las casillas de mar con un ejército ajeno cortan el paso; no hay zona de control en el mar.
 - **(Decisión mía)** Un ejército embarcado no presiona la tierra: no hace zona de control sobre las casillas de costa (`zoc`), no cuenta como lado enemigo para rodeado o cercado ni para frenar la marcha (`hostileSides`, `moveBudget`) y no sirve de apoyo contra «aislado» (`isolated`). Si no, un barco barato aparcado frente a la costa bloquearía y rodearía a quien está en tierra. Un ejército embarcado no conquista nada ni tiene suministro, y las reglas de desgaste de tierra (aislado, sin carretera, sin víveres) no se le aplican: ya tiene su propio castigo (parte 4).
 - **(Decisión mía)** Se puede quedar en el mar los turnos que quiera.
@@ -60,7 +60,22 @@ Los números son de partida y se ajustan probando.
 - **(Decisión mía)** Si un ejército embarcado pierde un combate, se retira a una casilla de costa vecina propia o aliada, si la hay. Si no la hay, **se hunde con todos sus supervivientes**. Esto es lo que lo hace un blanco tentador. Hoy `retreatCell` ya solo busca tierra y, sin sitio, los supervivientes se rinden; aquí el parte dice «hundido».
 - **(Decisión mía)** El ejército embarcado que ataca (asalto o contra otro barco) también tiene su ×0,5 al atacar, no el ×0,25, que es solo para defender.
 
-## 5 · Mando, órdenes e IA
+## 5 · Investigación
+
+- **(Usuario)** La velocidad de los barcos se puede mejorar investigando.
+- **(Decisión mía)** Una rama nueva, **Transporte naval**, en el área Terreno, junto a Movilidad. Sigue las reglas de siempre: 6·10·15 turnos, 4·8·12 turnos de renta (con su mínimo) y +10 % por cada investigación terminada. No se abarata.
+
+| Nivel | Nombre | Efecto |
+| --- | --- | --- |
+| 1 | Buques de desembarco anfibio | Velocidad en el mar: 6 → 8 casillas |
+| 2 | Lanchas de desembarco sobre colchón de aire | Asalto anfibio: ×0,5 → ×0,65 |
+| 3 | Transportes rápidos de alta velocidad | Velocidad en el mar: 8 → 10 casillas |
+
+- **(Decisión mía)** El nivel 2 mejora el asalto y no la velocidad, para que la rama no sea tres veces lo mismo.
+- **(Decisión mía)** La velocidad la marca el dueño del ejército. La IA pesa esta rama más si tiene islas o costas separadas de su capital, o si está en guerra con alguien al otro lado del mar.
+- **(Decisión mía)** Los galones de un ejército embarcado siguen siendo los de su tropa; la rama no tiene galones propios. El icono de la rama es un símbolo real (ancla o buque), como las demás.
+
+## 6 · Mando, órdenes e IA
 
 - **(Propuesta)** Las órdenes de marcha y las operaciones pueden tener un destino al otro lado del mar. El camino embarca, navega y desembarca solo, a lo largo de varios turnos. Hoy `orderField` ya cuenta el mar al triple para preferir la tierra; se mantiene, con la nueva velocidad en el mar.
 - **(Propuesta)** Una operación que lleva varios ejércitos por mar los hace desembarcar a la vez siempre que pueda, para no dejar uno solo en la playa.
@@ -71,7 +86,7 @@ Los números son de partida y se ajustan probando.
   - defiende sus costas e islas amenazadas por un ejército en el mar.
 - **(Decisión mía)** La IA no se queda parada si no sabe ir por mar: un objetivo sin camino sigue descartándose como hoy.
 
-## 6 · Interfaz y vista
+## 7 · Interfaz y vista
 
 - **Símbolos (regla del proyecto):** nada inventado.
   - **(Decisión mía)** En la vista sencilla, la ficha OTAN del ejército embarcado pasa al marco de unidad de superficie marítima de APP-6 (un círculo en el caso propio), con su mismo símbolo dentro.
@@ -86,7 +101,7 @@ Los números son de partida y se ajustan probando.
 
 ---
 
-## 7 · Lo que añade la aviación cuando llegue
+## 8 · Lo que añade la aviación cuando llegue
 
 Se construye con la aviación, no en la pieza del agua. Se anota también en el diseño de aviación.
 
