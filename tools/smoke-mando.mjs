@@ -786,6 +786,7 @@ const CHECKS = [
         const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
         ui.prefs.watch = 'directo';
         g.declareWar(es, fr);
+        g.squadrons.clear(); g.airVersion++;   // sin aviación: aquí se prueba el parte, no si la francesa deshace el ejército
         const [a0] = T.border(g, es, fr), [a1] = T.border(g, es, fr, 6);
         const op = g.createOp(es, 'defensa', g.planFort(es, a0, a1).path, { name: 'Línea de prueba' });
         g.assignArmy(T.army(g, es, op.cells[0], 2), op.id);

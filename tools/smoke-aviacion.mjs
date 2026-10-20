@@ -1120,6 +1120,151 @@ const CHECKS = [
     const t = document.querySelector('#legend').textContent;
     T.ok(/fines/.test(t) && /Orden de zona/.test(t) && /reserva/.test(t), 'leyenda');
     return true;
+}],
+// Del plan, con Francia reducida a un escuadrón y sin antiaéreo: con los 9 de partida ya tiene más que los 7 de España
+// (y su capital, cubierta); un ejército español embarcado a 2 casillas de una de sus ciudades le da la amenaza (en
+// Europa ninguna ciudad francesa está a 2 casillas de tierra española).
+['8 · la IA en guerra compra escuadrones y antiaéreo según la amenaza', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es);
+    for (const q of [...g.squadrons.values()].filter(q => q.owner === fr).slice(1)) g.squadrons.delete(q.id);
+    for (const [c, s] of [...g.aaSites]) if (s.owner === fr) g.aaSites.delete(c);
+    g.airVersion++;
+    const spot = c => [...g.nearCells(c, 2).keys()].find(j => T.seaFree(g, j));
+    const city = PROVINCES.map(p => p.city).find(c => g.owner[c] === fr && spot(c) !== undefined);
+    T.embark(g, es, spot(city), 6);
+    T.ok(g.threat(fr, city) > 0, 'amenaza');
+    const before = [...g.squadrons.values()].filter(s => s.owner === fr).length, sites = [...g.aaSites.values()].filter(s => s.owner === fr).length;
+    g.nations[fr].gold = 1e5;
+    for (let i = 0; i < 6; i++) { g.turn++; g.aiAir(fr); }
+    T.ok([...g.squadrons.values()].filter(s => s.owner === fr).length > before, 'compra escuadrones');
+    T.ok([...g.aaSites.values()].filter(s => s.owner === fr).length > sites, 'y antiaéreo');
+    T.ok([...g.aaSites].every(([c, s]) => s.owner !== fr || (CITY_OF[c] >= 0 && g.threat(fr, c) > 0)), 'en una ciudad amenazada');
+    return true;
+}],
+['8 · en paz la IA no compra aviación; sin aeródromo con sitio, construye uno en la ciudad más cercana al frente', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.nations[fr].gold = 1e5;
+    const n = g.squadrons.size, fields = g.airfields.size, sites = g.aaSites.size;
+    g.aiAir(fr);
+    T.eq([g.squadrons.size, g.airfields.size, g.aaSites.size], [n, fields, sites], 'en paz, nada');
+    g.declareWar(fr, es);
+    for (const [c, f] of [...g.airfields]) if (f.owner === fr) { for (const q of g.squadronsAt(c)) g.squadrons.delete(q.id); g.airfields.delete(c); }
+    g.airVersion++;
+    g.aiAir(fr);
+    const mine = [...g.airfields].filter(([, f]) => f.owner === fr);
+    T.eq(mine.length, 1, 'un aeródromo en obra');
+    const [cell, f] = mine[0], dist = g.field(fr, PROVINCES.filter(p => g.owner[p.city] === es).map(p => p.city));
+    T.ok(f.left > 0 && CITY_OF[cell] >= 0, 'en una ciudad, en obra');
+    T.eq(dist[cell], Math.min(...g.citiesOf(fr).map(p => dist[p.city])), 'la más cercana al frente');
+    g.turn++; g.aiAir(fr);
+    T.eq([...g.airfields.values()].filter(x => x.owner === fr).length, 1, 'no empieza otro mientras dura la obra');
+    return true;
+}],
+['8 · la IA en guerra aparta para la aviación una parte de su renta, hasta lo que cuesta un escuadrón, y sigue reclutando', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es);
+    for (const q of [...g.squadrons.values()].filter(q => q.owner === fr)) g.squadrons.delete(q.id);
+    g.airVersion++;
+    const n = g.nations[fr], units = () => [...g.armies.values()].filter(a => a.owner === fr).reduce((s, a) => s + countUnits(a.units), 0), troops = units();
+    n.gold = 0;
+    let most = 0;
+    for (let i = 0; i < 12; i++) { g.turn++; n.recruited.clear(); n.gold += g.income(fr); g.aiAir(fr); g.aiRecruit(fr); most = Math.max(most, n.airFund); }
+    T.ok([...g.squadrons.values()].some(q => q.owner === fr), 'compra con lo apartado');
+    T.ok(most > 0 && most <= CONFIG.AIR.SQUADRON_COST, `aparta como mucho un escuadrón (${most})`);
+    T.ok(units() > troops, 'y recluta');
+    n.airFund = 120;
+    T.eq(GameEngine.load(JSON.parse(JSON.stringify(g.serialize()))).nations[fr].airFund, 120, 'se guarda lo apartado');
+    return true;
+}],
+['8 · la IA asigna sus escuadrones a sus operaciones y vuela con ellas', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es);
+    g.aiCommand(fr);
+    const mine = [...g.squadrons.values()].filter(s => s.owner === fr);
+    T.ok(mine.some(s => s.op && g.ops.get(s.op)?.owner === fr), 'asignados');
+    T.ok(mine.some(s => s.flown === g.turn || s.patrol >= 0), 'vuelan');
+    T.ok(g.opsOf(fr).every(op => mine.filter(s => s.op === op.id).length <= 6), 'como mucho 6 por operación');
+    T.ok(mine.filter(s => s.op).every(s => hexDist(s.base, g.opKey(g.ops.get(s.op))) <= g.airRange(fr)), 'con el punto clave a su alcance');
+    return true;
+}],
+// Francia contra Bélgica, que tiene aeródromos y es más débil: Francia lanza una ofensiva.
+['8 · la IA escolta con su aviación a los ejércitos de su ofensiva que van por mar', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), be = T.nation('be');
+    g.start(es); g.declareWar(fr, be);
+    T.ok([...g.airfields.values()].some(f => f.owner === be), 'Bélgica tiene aeródromos');
+    g.aiCommand(fr);
+    const op = g.opsOf(fr).find(o => o.kind === 'ofensiva');
+    T.ok(op?.aims.includes('patrol'), 'la ofensiva también protege y escolta');
+    const wing = [...g.squadrons.values()].find(q => q.op === op.id);
+    g.turn++;
+    const [, s] = T.coast(g, fr, { near: wing.base });
+    T.embark(g, fr, s, 6).op = op.id;
+    g.opAir(op);
+    T.ok([...g.squadrons.values()].some(q => q.op === op.id && q.patrol === s), 'un escuadrón sobre el barco');
+    return true;
+}],
+// Ciudades francesas a y b, y una española t: de a se llega a b pero no a t; de b, a t.
+['8 · la IA acerca su aviación a sus operaciones: traslada los escuadrones que no llegan y adelanta un aeródromo', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(fr, es);
+    const R = g.airRange(fr), of = id => PROVINCES.filter(p => g.owner[p.city] === id).map(p => p.city);
+    let pick = null;
+    for (const t of of(es)) for (const b of of(fr)) for (const a of of(fr)) if (!pick && hexDist(b, t) <= R && hexDist(a, t) > R && hexDist(a, b) <= R) pick = [a, b, t];
+    const [a, b, t] = pick;
+    T.airfield(g, fr, a); T.airfield(g, fr, b); const [q] = T.squad(g, fr, a, 1);
+    const op = g.createOp(fr, 'ofensiva', [b, t], { auto: 'auto' });
+    g.aiWings(fr, g.opsOf(fr));
+    T.eq([q.base, q.op, q.flown], [b, 0, g.turn], 'se traslada (y gasta su vuelo)');
+    g.turn++; g.aiWings(fr, g.opsOf(fr));
+    T.eq(q.op, op.id, 'y al turno siguiente entra en la operación');
+    // Sin ningún aeródromo que llegue, empieza uno en una ciudad desde la que sí.
+    g.airfields.delete(b); q.base = a; T.squad(g, fr, a, 1); g.airVersion++;
+    g.nations[fr].gold = 1e5; g.aiAir(fr);
+    const fresh = [...g.airfields].filter(([c, f]) => f.owner === fr && f.left > 0).map(([c]) => c);
+    T.ok(fresh.length === 1 && hexDist(fresh[0], t) <= R, 'adelanta un aeródromo');
+    return true;
+}],
+['8 · la aviación de la IA no remata un ejército de una sola unidad; la del jugador, sí', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(fr, es); T.luck(g, 0.99);
+    const strike = (me, foe, n) => {
+        const [base, target] = T.pair(g, me, foe);
+        T.airfield(g, me, base); const [s] = T.squad(g, me, base, 1);
+        if (g.armyOn(target)) g.removeArmy(g.armyOn(target));
+        T.army(g, foe, target, n);
+        const op = g.createOp(me, 'ofensiva', [base, target], { auto: 'auto' }); op.aims = ['army']; g.assignSquadron(s, op.id);
+        g.opAir(op);
+        return s.flown === g.turn;
+    };
+    T.eq([strike(fr, es, 1), strike(fr, es, 3)], [false, true], 'la IA, solo con 2 unidades o más');
+    T.ok(strike(es, fr, 1), 'el jugador decide');
+    return true;
+}],
+['8 · la IA no vuela contra un blanco con mucho antiaéreo', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(fr, es);
+    const [base, target] = T.pair(g, fr, es);
+    T.airfield(g, fr, base); const [s] = T.squad(g, fr, base, 1);
+    for (const c of [target, ...[0, 1, 2, 3, 4, 5].map(d => G.nb[target * 6 + d]).filter(j => j >= 0 && g.owner[j] === es)]) T.site(g, es, c);
+    const op = g.createOp(fr, 'ofensiva', [base, target], { auto: 'auto' }); op.aims = ['fort']; g.fort[target] = 2; g.assignSquadron(s, op.id);
+    g.opAir(op);
+    T.eq(s.flown, 0, 'no se arriesga');
+    return true;
+}],
+['M · con seis guerras, la fase de la IA con aviación tarda como mucho 1,25 veces lo mismo sin ella', () => {
+    const run = bare => {
+        const g = T.game(11); g.start(T.nation('us'));
+        if (bare) T.bare(g);
+        for (const [x, y] of [['cn', 'in'], ['ru', 'ua'], ['ir', 'iq'], ['eg', 'ly'], ['br', 've'], ['pk', 'af']]) g.declareWar(T.nation(x), T.nation(y));
+        const t = performance.now();
+        for (let k = 0; k < 2; k++) { for (const id of g.aiOrder()) g.aiStep(id); g.turn++; }
+        return performance.now() - t;
+    };
+    run(true);   // calentar
+    const without = run(true), withAir = run(false);
+    T.ok(withAir <= without * 1.25, `con aviación ${Math.round(withAir)} ms, sin ella ${Math.round(without)} ms`);
+    return true;
 }]
 ];
 

@@ -652,6 +652,15 @@ const AIR_BLOCKED = 'Ese blanco ya ha recibido un acierto este turno.';
 // Aviación en el mando: blancos por operación y turno, casillas que protege como mucho, previsión mínima para
 // arriesgarse (acierto y derribo de cada escuadrón) y radio de una orden de zona.
 const AIR_TARGETS = 8, AIR_PATROLS = 2, AIR_MIN_HIT = 0.5, AIR_MAX_DOWN = 0.2, AIR_ZONE_KM = 170;
+// La aviación de la IA: escuadrones por operación, los que quiere por cada uno enemigo (y cuántos más), parte de la
+// renta que aparta para comprarlos y probabilidad de poner un antiaéreo cada turno.
+const AI_WINGS = 6, AI_AIR_RATIO = 0.8, AI_AIR_EXTRA = 2, AI_AIR_SHARE = 0.25, AI_AA_CHANCE = 0.35;
+// Solo aparta oro para la aviación el país al que un escuadrón le cuesta como mucho estos turnos de renta: al pobre le
+// hacen más falta las tropas.
+const AI_AIR_TURNS = 3;
+// Las operaciones de la IA no bombardean un ejército de menos unidades que estas: acabar con una guarnición suelta es
+// cosa de la tierra (la aviación prepara y apoya, no conquista).
+const AI_MIN_ARMY = 2;
 // Orden de los blancos: más puntos primero; a igualdad, por casilla y misión (sin azar).
 const airTargetOrder = (x, y) => y.score - x.score || x.cell - y.cell || AIR_KIND_INDEX[x.kind] - AIR_KIND_INDEX[y.kind];
 
@@ -1091,7 +1100,8 @@ class GameEngine {
             capitalCell: PROVINCES[c.capital].city, capitalName: PROVINCES[c.capital].cityName,
             gold: 0, alive: true, recruited: new Map(), overlord: -1, templates: [], command: newCommand(),
             tech: { done: new Set(), progress: new Map(), current: [] },  // investigación: hechas, turnos invertidos, en curso
-            lastTurn: 0   // último turno en que empezó a jugar (ver nextOwnTurn)
+            lastTurn: 0,   // último turno en que empezó a jugar (ver nextOwnTurn)
+            airFund: 0   // oro que la IA aparta para su próximo escuadrón (ver aiRecruit)
         }));
         const n = this.nations.length;
         this.relations = Array.from({ length: n }, () => []);
@@ -1165,7 +1175,7 @@ class GameEngine {
             roadWork: [...this.roadWork].map(([k, w]) => [k, w.owner, w.left, w.cls]),
             spies: [...this.spies].map(([pid, s]) => [pid, s.since, s.revealedTurn]),
             sieges: [...this.sieges].map(([c, s]) => [c, s.by, s.prev, s.held]),
-            nations: this.nations.map(n => ({ gold: n.gold, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord, templates: n.templates, command: n.command,
+            nations: this.nations.map(n => ({ gold: n.gold, airFund: n.airFund, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord, templates: n.templates, command: n.command,
                 tech: { done: [...n.tech.done], progress: [...n.tech.progress], current: [...n.tech.current] } })),
             relations,
             armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used, a.hunger || 0, a.disorgUntil || 0]),
@@ -1284,6 +1294,7 @@ class GameEngine {
         };
         list(data.nations).slice(0, NN).forEach((n, i) => Object.assign(g.nations[i], {
             gold: int(n?.gold, -1e9, 1e12, 0),
+            airFund: int(n?.airFund, 0, CONFIG.AIR.SQUADRON_COST, 0),
             alive: !!n?.alive,
             recruited: new Map(list(n?.recruited).map(x => [provIdx(x?.[0]), int(x?.[1], 0, 1e6, 0)])),
             overlord: natOrNone(n?.overlord ?? -1),
@@ -2392,20 +2403,22 @@ class GameEngine {
     // Blancos para los fines `aims` en las casillas `cells`, con lo que `owner` ve, los mejores primero (como mucho
     // AIR_TARGETS). Cada uno pasa por missionCheck con los escuadrones `pool` (por defecto, todos los suyos que pueden
     // volar), así que solo quedan los que están a su alcance, en guerra y sin acierto este turno.
-    // - army: la fuerza de ataque del ejército enemigo que ve, el doble en el mar (allí pierde el doble).
+    // - army: la fuerza de ataque del ejército enemigo que ve, el doble en el mar (allí pierde el doble); si conoce su
+    //   número, solo con `minArmy` unidades o más.
     // - fort: el nivel que conoce (si no, 1) × 10, y 20 más en el objetivo `obj`.
     // - roads: los tramos intactos × 3, y 10 más a 4 casillas del objetivo o menos.
     // - aa: la fuerza del antiaéreo que conoce × 2.
     // - patrol: primero las casillas de mar de sus ejércitos `members` (escolta); luego sus casillas de `cells` según
     //   la amenaza.
-    airTargets(owner, cells, aims, { obj = -1, members = [], pool = null } = {}) {
+    airTargets(owner, cells, aims, { obj = -1, members = [], pool = null, minArmy = 1 } = {}) {
         const sqs = pool ?? [...this.squadrons.values()].filter(q => q.owner === owner && this.canFly(q)), out = [];
         if (!sqs.length) return out;
         const want = new Set(aims), add = (kind, cell, score) => { if (score > 0 && !this.missionCheck(owner, sqs, kind, cell)) out.push({ kind, cell, score }); };
         for (const c of cells) {
             if (want.has('army')) {
                 const a = this.armyOn(c);
-                if (a && this.atWar(owner, a.owner) && this.sees(owner, c)) add('army', c, this.seenPower(owner, a, 'atk') * (afloat(c) ? 2 : 1));
+                if (a && this.atWar(owner, a.owner) && this.sees(owner, c) && (countUnits(a.units) >= minArmy || !this.intel(owner, a.owner, c).exact))
+                    add('army', c, this.seenPower(owner, a, 'atk') * (afloat(c) ? 2 : 1));
             }
             if (!isLand(c) || !this.atWar(owner, this.owner[c])) continue;
             if (want.has('fort') && this.fort[c]) add('fort', c, ((this.fortLevel(owner, c) ?? 0) + 1) * 10 + (c === obj ? 20 : 0));
@@ -2463,7 +2476,7 @@ class GameEngine {
     // La aviación de una operación este turno: sus escuadrones que pueden volar, contra los blancos de sus fines en su
     // zona. Ofensiva: a 3 casillas de su objetivo y a 2 de sus ejércitos (lo que defiende el objetivo y el camino), y
     // protege a sus ejércitos. Línea: a 3 casillas de la línea, y protege sus casillas más amenazadas. En manual, en pausa
-    // o en la reserva no vuela.
+    // o en la reserva no vuela. Las de la IA no atacan ejércitos de menos de AI_MIN_ARMY unidades.
     opAir(op) {
         const id = op.owner, aims = op.aims ?? [];
         if (op.kind === 'reserva' || op.auto === 'manual' || op.paused || !aims.length || this.over) return { flown: 0, hits: 0, strikes: 0, notes: [] };
@@ -2473,7 +2486,7 @@ class GameEngine {
         const members = this.opMembers(op), zone = new Set(), obj = op.kind === 'ofensiva' ? op.cells[op.cells.length - 1] : -1;
         const around = (c, k) => { for (const x of this.nearCells(c, k).keys()) zone.add(x); };
         if (obj >= 0) { around(obj, 3); for (const a of members) around(a.cell, 2); } else for (const c of op.cells) around(c, 3);
-        const strike = aims.filter(k => k !== 'patrol'), opts = { obj, members, pool };
+        const strike = aims.filter(k => k !== 'patrol'), opts = { obj, members, pool, minArmy: id === this.player ? 1 : AI_MIN_ARMY };
         let targets = strike.length ? this.airTargets(id, [...zone], strike, opts) : [];
         if (aims.includes('patrol')) targets = [...targets, ...this.airTargets(id, obj >= 0 ? members.map(a => a.cell) : op.cells, ['patrol'], opts)].sort(airTargetOrder).slice(0, AIR_TARGETS);
         return this.flyTargets(id, pool, targets);
@@ -5276,6 +5289,7 @@ class GameEngine {
         this.aiResearch(id);
         this.aiForts(id);   // antes de reclutar: en guerra el reclutamiento gasta todo el oro
         this.aiRepairs(id);   // también antes de reclutar, por lo mismo
+        this.aiAir(id);   // y su aviación, para la que aparta oro al reclutar
         this.aiPockets(id);   // antes de sus ataques: los que pasan hambre salen de la bolsa
         this.aiCommand(id, powers);
         this.aiRecruit(id);
@@ -5393,11 +5407,15 @@ class GameEngine {
     aiRecruit(id) {
         const n = this.nations[id];
         const enemies = this.enemiesOf(id);
-        const reserve = this.aiReserve(id);
+        // En guerra, mientras le falte aviación (lo dice aiAir), aparta para ella una parte de su renta cada turno, hasta
+        // el precio de un escuadrón; con eso aiAir lo compra. Si ya no le hace falta, lo apartado vuelve a las tropas.
+        n.airFund = enemies.length && this.airSave?.get(id) === this.turn
+            ? Math.min(CONFIG.AIR.SQUADRON_COST, n.airFund + Math.round(AI_AIR_SHARE * Math.max(0, this.income(id)))) : 0;
+        const reserve = this.aiReserve(id) + n.airFund;
         let cities = this.citiesOf(id);
         if (!cities.length) return;
         if (enemies.length) {
-            const dist = this.field(id, PROVINCES.filter(p => enemies.includes(this.owner[p.city])).map(p => p.city));
+            const dist = this.frontField(id);
             cities = cities.sort((x, y) => dist[x.city] - dist[y.city]);
         } else {
             // Barajado Fisher-Yates: consume siempre los mismos números aleatorios (sort con comparador aleatorio no).
@@ -5554,6 +5572,115 @@ class GameEngine {
         return dist;
     }
 
+    // Pasos hasta la ciudad enemiga más cercana por donde puede ir `id` (field): uno por país y turno, que comparten
+    // aiAir y aiRecruit. Cambia con las conquistas, las guerras y las alianzas.
+    frontField(id) {
+        const foes = this.enemiesOf(id), key = `${this.turn}:${this.version}:${this.blocVersion}:${foes.join()}`;
+        const c = (this.frontDist ??= new Map()).get(id);
+        if (c?.key === key) return c.dist;
+        const set = new Set(foes), dist = this.field(id, PROVINCES.filter(p => set.has(this.owner[p.city])).map(p => p.city));
+        this.frontDist.set(id, { key, dist });
+        return dist;
+    }
+    // La aviación de la IA, solo en guerra. No recorre el mapa: sus ciudades y las listas de escuadrones, aeródromos y
+    // antiaéreos; la distancia al frente sale de frontField.
+    // - Quiere AI_AIR_RATIO escuadrones por cada uno de sus enemigos y AI_AIR_EXTRA más. Si le faltan y le quedan el precio
+    //   de uno y su renta tras la reserva (o lo tiene apartado, airFund), compra uno en el aeródromo con sitio más cercano
+    //   al frente.
+    // - Empieza un aeródromo (uno a la vez) en su ciudad más cercana al frente que no lo tenga si le faltan escuadrones y
+    //   no tiene sitio; o, si ninguno de sus aeródromos llega a sus operaciones, en la ciudad más cercana a ellas desde la
+    //   que llegue.
+    // - Si el enemigo tiene aviación, a veces (AI_AA_CHANCE) pone un antiaéreo en su ciudad más amenazada que no cubra
+    //   ya uno suyo.
+    aiAir(id) {
+        const foes = new Set(this.enemiesOf(id)), n = this.nations[id], A = CONFIG.AIR;
+        if (!foes.size) return;
+        let mine = 0, theirs = 0;
+        const based = new Map();   // escuadrones en cada aeródromo propio
+        for (const q of this.squadrons.values()) {
+            if (q.owner === id) { mine++; based.set(q.base, (based.get(q.base) ?? 0) + 1); } else if (foes.has(q.owner)) theirs++;
+        }
+        const cities = this.citiesOf(id), R = this.airRange(id), short = () => mine < AI_AIR_RATIO * theirs + AI_AIR_EXTRA;
+        const dist = this.frontField(id), closer = (a, b) => b < 0 || dist[a] < dist[b] || (dist[a] === dist[b] && a < b);
+        // Hasta dónde llega un aeródromo: al punto clave de alguna de sus operaciones o, si no tiene, a la ciudad enemiga
+        // más cercana (por pasos, que en línea recta es igual o menos).
+        const keys = this.opsOf(id).filter(op => op.kind !== 'reserva').map(op => this.opKey(op));
+        const gap = c => (keys.length ? Math.min(...keys.map(k => hexDist(c, k))) : dist[c]);
+        let room = -1, building = false, reach = false, spot = -1;
+        for (const [c, f] of this.airfields) {
+            if (f.owner !== id || this.owner[c] !== id) continue;
+            if (gap(c) <= R) reach = true;
+            if (f.left > 0) building = true;
+            else if ((based.get(c) ?? 0) < A.PER_AIRFIELD && closer(c, room)) room = c;
+        }
+        if (!building && short() && room < 0) { for (const p of cities) if (this.planAirfield(id, p.city) && closer(p.city, spot)) spot = p.city; }
+        else if (!building && !reach) {   // adelantarse, solo a una ciudad desde la que llegue
+            let bg = R + 1;
+            for (const p of cities) { const d = gap(p.city); if (d < bg && this.planAirfield(id, p.city)) { bg = d; spot = p.city; } }
+        }
+        const spare = n.gold - this.aiReserve(id) >= A.SQUADRON_COST + Math.max(0, this.income(id));
+        if (short() && room >= 0 && (spare || n.airFund >= A.SQUADRON_COST) && this.buySquadron(id, room)) { mine++; n.airFund = Math.max(0, n.airFund - A.SQUADRON_COST); }
+        else if (spot >= 0 && (spare || n.airFund >= A.AIRFIELD_COST) && this.buildAirfield(id, { cell: spot })) { building = true; spot = -1; n.airFund = Math.max(0, n.airFund - A.AIRFIELD_COST); }
+        // ¿Le sigue faltando aviación y tiene (o tendrá) dónde ponerla, o un aeródromo que adelantar? Entonces, si no es
+        // pobre, aiRecruit le aparta oro este turno.
+        const save = ((short() && (room >= 0 || building)) || spot >= 0) && this.income(id) * AI_AIR_TURNS >= A.SQUADRON_COST;
+        (this.airSave ??= new Map()).set(id, save ? this.turn : -1);
+        if (!theirs || this.rng() >= AI_AA_CHANCE) return;
+        const cover = this.aaRadius(id), own = [];
+        for (const [c, s] of this.aaSites) if (s.owner === id) own.push(c);   // también los que están en obra
+        let best = -1, top = 0;
+        for (const p of cities) {
+            if (own.some(c => hexDist(c, p.city) <= cover) || !this.planAA(id, p.city)) continue;
+            const t = this.threat(id, p.city);
+            if (t > top) { top = t; best = p.city; }
+        }
+        if (best >= 0) this.buildAA(id, this.planAA(id, best));
+    }
+    // Escuadrones de la IA en sus operaciones `ops`, por ese orden: cada una recibe escuadrones sin encargo hasta tener
+    // AI_WINGS, con su punto clave a su alcance (los demás se acercan). Si el enemigo tiene aeródromos (eso lo ve
+    // cualquiera), sus ofensivas también protegen y escoltan a sus ejércitos, sobre todo a los que van por mar; si no, no
+    // hace falta.
+    aiWings(id, ops) {
+        const foes = new Set(this.enemiesOf(id));
+        let threat = false;
+        for (const f of this.airfields.values()) if (foes.has(f.owner)) { threat = true; break; }
+        for (const op of ops) {
+            if (op.kind !== 'ofensiva' || op.aims.includes('patrol') === threat) continue;
+            op.aims = threat ? [...op.aims, 'patrol'] : op.aims.filter(k => k !== 'patrol');
+        }
+        const free = [], held = new Map(), based = new Map();
+        for (const q of this.squadrons.values()) {
+            if (q.owner !== id) continue;
+            based.set(q.base, (based.get(q.base) ?? 0) + 1);
+            if (q.op) held.set(q.op, (held.get(q.op) ?? 0) + 1); else if (!q.task) free.push(q);
+        }
+        const R = this.airRange(id), keys = [];
+        for (const op of ops) {
+            if (op.kind === 'reserva' || !op.aims.length) continue;
+            const key = this.opKey(op);
+            keys.push(key);
+            for (let i = 0, want = AI_WINGS - (held.get(op.id) ?? 0); i < free.length && want > 0;) {
+                if (hexDist(free[i].base, key) > R) { i++; continue; }
+                this.assignSquadron(free.splice(i, 1)[0], op.id);
+                want--;
+            }
+        }
+        // Los que se quedan sin operación se acercan a ellas: cada uno se traslada (gasta su vuelo del turno) al aeródromo
+        // propio en servicio, con sitio y a su alcance que más cerca quede de algún punto clave, si mejora el suyo. Es lo
+        // que les hace falta en el mapa del mundo, donde el alcance es corto.
+        if (!free.length || !keys.length) return;
+        const fields = [];
+        for (const c of this.airfields.keys()) if (this.airfields.get(c).owner === id && this.airfieldUp(c)) fields.push(c);
+        const gap = c => { let d = Infinity; for (const k of keys) d = Math.min(d, hexDist(c, k)); return d; };
+        for (const q of free) {
+            if (!this.canFly(q)) continue;
+            let best = -1, bd = gap(q.base);
+            for (const c of fields) if ((based.get(c) ?? 0) < CONFIG.AIR.PER_AIRFIELD && hexDist(q.base, c) <= R && gap(c) < bd) { best = c; bd = gap(c); }
+            const from = q.base;
+            if (best >= 0 && this.rebase(q, best)) { based.set(from, based.get(from) - 1); based.set(best, (based.get(best) ?? 0) + 1); }
+        }
+    }
+
     // La IA manda con el mismo sistema que el jugador: en cada frente, una ofensiva sobre la ciudad enemiga más cercana
     // si es lo bastante fuerte y una línea en la frontera si no lo es; les asigna los ejércitos cercanos y oro para
     // refuerzos, y las cumple solas. Al firmar la paz con un frente, sus operaciones terminan.
@@ -5581,19 +5708,22 @@ class GameEngine {
             if (op) op.front = e;
         }
         // Ejércitos libres cerca de cada operación (primero las ofensivas); las ciudades se quedan con una infantería.
-        for (const op of this.opsOf(id).sort((x, y) => (x.kind === 'ofensiva' ? 0 : 1) - (y.kind === 'ofensiva' ? 0 : 1))) {
+        const ops = this.opsOf(id).sort((x, y) => (x.kind === 'ofensiva' ? 0 : 1) - (y.kind === 'ofensiva' ? 0 : 1));
+        for (const op of ops) {
             const want = op.kind === 'defensa' ? op.cells.length - this.opMembers(op).length : 6 - this.opMembers(op).length;
             if (want <= 0) continue;
             for (const a of this.nearbyFree(op, op.kind === 'defensa' ? 4 : 6).slice(0, want)) this.assignArmy(a, op.id);
         }
+        this.aiWings(id, ops);   // y escuadrones, en el mismo orden
         this.executeOrders(id);
     }
 
-    // En guerra fortifica la ciudad propia más valiosa que tenga territorio enemigo a 3 casillas o menos.
+    // En guerra fortifica la ciudad propia más valiosa que tenga territorio enemigo a 3 casillas o menos (sin tocar el oro
+    // apartado para la aviación).
     aiForts(id) {
         const enemies = this.enemiesOf(id), n = this.nations[id];
-        const fortCost = this.rules(id).fortCost;
-        if (!enemies.length || n.gold < fortCost * 4 || this.rng() > 0.35) return;
+        const fortCost = this.rules(id).fortCost, gold = n.gold - n.airFund;   // lo apartado para la aviación no se toca
+        if (!enemies.length || gold < fortCost * 4 || this.rng() > 0.35) return;
         const nearEnemy = cell => {
             const seen = new Set([cell]);
             let front = [cell];
@@ -5614,7 +5744,7 @@ class GameEngine {
         const city = this.citiesOf(id).filter(p => free(p.city) && nearEnemy(p.city)).sort((x, y) => y.value - x.value)[0];
         if (!city) return;
         const ring = [city.city, ...[0, 1, 2, 3, 4, 5].map(d => G.nb[city.city * 6 + d])].filter(free);
-        const cells = ring.slice(0, Math.floor(n.gold * 0.4 / fortCost));
+        const cells = ring.slice(0, Math.floor(gold * 0.4 / fortCost));
         if (cells.length) this.buildFort(id, { cells, cost: cells.length * fortCost });
     }
 
