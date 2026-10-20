@@ -760,7 +760,10 @@ const baseRules = () => ({
     aaPower: 10, aaRangeKm: 60,          // fuerza y alcance de un antiaéreo fijo
     airEvade: 1,                         // multiplicador de la probabilidad de derribo de los escuadrones propios
     airDamage: 1,                        // multiplicador de las bajas de un ataque aéreo a un ejército
-    blindHit: 0.5                        // lo que rinde una misión contra un blanco que no se conoce
+    blindHit: 0.5,                       // lo que rinde una misión contra un blanco que no se conoce
+    mobileAA: false,                     // si puede reclutar la tropa Antiaérea
+    satMax: 0, satRangeKm: 400, satTurns: 8,   // satélites a la vez, radio de lo que ven y turnos que duran
+    satLevels: false                     // ver también galones y fortificaciones bajo el satélite
 });
 
 const BASE_RULES = baseRules();
@@ -770,6 +773,8 @@ const RESEARCH_BRANCHES = [
     { id: 'blindados', area: 'Militar', name: 'Blindados', sub: 'Atributos del tanque', icon: 'tank' },
     { id: 'artilleria', area: 'Militar', name: 'Artillería', sub: 'Atributos de la artillería', icon: 'art' },
     { id: 'doctrina', area: 'Militar', name: 'Doctrina', sub: 'Mando, asedio y bajas', icon: 'doc' },
+    { id: 'aviacion', area: 'Militar', name: 'Aviación', sub: 'Alcance, precisión y supervivencia', icon: 'plane' },
+    { id: 'antiaerea', area: 'Militar', name: 'Defensa aérea', sub: 'Antiaéreo más eficaz y móvil', icon: 'aa' },
     { id: 'movilizacion', area: 'Estado', name: 'Movilización', sub: 'Capacidad de reclutar', icon: 'mob' },
     { id: 'ciencia', area: 'Estado', name: 'Ciencia', sub: 'Tiempo y coste de investigar', icon: 'sci' },
     { id: 'industria', area: 'Estado', name: 'Industria', sub: 'Recursos más eficientes', icon: 'ind' },
@@ -778,7 +783,8 @@ const RESEARCH_BRANCHES = [
     { id: 'naval', area: 'Terreno', name: 'Transporte naval', sub: 'Barcos más rápidos y desembarcos', icon: 'ship' },
     { id: 'fortificacion', area: 'Terreno', name: 'Fortificación', sub: 'Fortalezas aún más duras', icon: 'fort' },
     { id: 'reconocimiento', area: 'Inteligencia', name: 'Reconocimiento', sub: 'Ver más sin espías', icon: 'eye' },
-    { id: 'espionaje', area: 'Inteligencia', name: 'Espionaje', sub: 'Espías más baratos y duraderos', icon: 'spy' }
+    { id: 'espionaje', area: 'Inteligencia', name: 'Espionaje', sub: 'Espías más baratos y duraderos', icon: 'spy' },
+    { id: 'espacio', area: 'Inteligencia', name: 'Espacio', sub: 'Satélites de observación', icon: 'sat' }
 ];
 // Por rama, sus tres niveles: [nombre, efectos, cambios «qué · antes · después» para la interfaz, nota].
 const TECH_TREE = {
@@ -801,6 +807,16 @@ const TECH_TREE = {
         ['Mando y control', { flanked: 0.85, surrounded: 0.65, commandOps: 4 }, [['Rodeado (3 o más lados)', '×0,75', '×0,85'], ['Cercado (5 o más lados)', '×0,5', '×0,65'], ['Operaciones a la vez', '3', '4']], 'Suaviza la penalización de los ejércitos rodeados sin anularla.'],
         ['Guerra de asedio', { siegeTurns: 2, commandOps: 5 }, [['Turnos para tomar una ciudad', '3', '2'], ['Operaciones a la vez', '4', '5']], 'Las ciudades caen antes de que llegue la ayuda.'],
         ['Sanidad militar', { winnerLoss: 0.7, hungerTurns: 4, commandOps: 6 }, [['Pérdidas al ganar un combate', '100 %', '70 %'], ['Sin víveres: pierde una unidad cada', '3 turnos', '4 turnos'], ['Operaciones a la vez', '5', '6']], 'Ganar sale más barato: los ejércitos veteranos duran más campañas.']
+    ],
+    aviacion: [
+        ['Reabastecimiento en vuelo', { airRangeKm: 750 }, [['Alcance de los escuadrones', '500 km', '750 km']], 'Llega a la retaguardia desde tus bases de siempre.'],
+        ['Munición guiada', { airDamage: 1.5, blindHit: 0.75 }, [['Bajas al atacar un ejército', '10–15 %', '15–22 %'], ['Bombardeo a ciegas', '50 %', '75 %']], 'A ciegas ya no es tirar bombas al azar.'],
+        ['Guerra electrónica', { airEvade: 0.6 }, [['Probabilidad de derribo', '×1', '×0,6']], 'Un antiaéreo fuerte sigue costando aviones, pero menos.']
+    ],
+    antiaerea: [
+        ['Radar de alerta temprana', { aaPower: 13 }, [['Fuerza de cada antiaéreo', '10', '13']], 'Una línea con antiaéreo preparado aguanta mejor el primer golpe.'],
+        ['Misiles tierra-aire de largo alcance', { aaPower: 16, aaRangeKm: 150 }, [['Fuerza de cada antiaéreo', '13', '16'], ['Radio del antiaéreo fijo', '60 km', '150 km']], 'Cubre un frente entero desde la retaguardia.'],
+        ['Antiaéreo autopropulsado', { mobileAA: true }, [['Tropa «Antiaérea»', 'no', 'sí']], 'Cara y menos eficaz que un sitio fijo, pero va con el ejército, también por mar.']
     ],
     movilizacion: [
         ['Servicio militar', { recruitAll: 1 }, [['Reclutas por turno en cada provincia', 'base', 'base +1']], 'Aparece como «investigación +1» en el desglose de reclutas.'],
@@ -846,6 +862,11 @@ const TECH_TREE = {
         ['Red de informantes', { spyCost: 40, spySuccess: 0.8, spySuccessHard: 0.65 }, [['Coste de un espía', '60', '40'], ['Probabilidad de informar', '70 %', '80 %']], 'Da para tener uno en cada provincia fronteriza en guerra.'],
         ['Tapaderas', { spyCatchBase: 0.04, spyCatchPerTurn: 0.02, spyCatchMax: 0.35 }, [['Riesgo de captura el primer turno', '8 %', '4 %'], ['Aumento por turno', '+4 %', '+2 %'], ['Riesgo máximo', '60 %', '35 %']], 'Un espía dura de media unos 7 turnos en vez de 4.'],
         ['Agentes dobles', { spyWide: true }, [['Lo que cubre el informe', 'su provincia', 'y las vecinas del mismo país'], ['De qué informa', 'tropas', 'también galones, muros e investigación']], 'Desde cualquier provincia se sabe qué investiga el enemigo.']
+    ],
+    espacio: [
+        ['Lanzadores', { satMax: 1 }, [['Satélites a la vez', '0', '1']], 'Muy caro: unos 20 turnos de renta por satélite.'],
+        ['Óptica de alta resolución', { satLevels: true, satRangeKm: 600 }, [['Lo que ve', 'tipo y número', 'también galones y fortificaciones'], ['Radio', '400 km', '600 km']], 'Sabes si es sacos terreros o casamatas antes de mandar a nadie.'],
+        ['Constelación', { satMax: 2, satTurns: 12 }, [['Satélites a la vez', '1', '2'], ['Duración', '8 turnos', '12 turnos']], 'Dos regiones a la vista a la vez, y más tiempo.']
     ]
 };
 const TECHS = RESEARCH_BRANCHES.flatMap(b => TECH_TREE[b.id].map(([name, fx, changes, note], i) => ({ id: `${b.id}${i + 1}`, branch: b.id, tier: i + 1, name, fx, changes, note })));
@@ -5373,11 +5394,18 @@ class GameEngine {
             for (const a of this.armies.values()) if (a.owner === id) for (const k of UNIT_KEYS) troops[k] += a.units[k] * CONFIG.TYPES[k].cost;
             let land = 0, rough = 0;
             for (const i of G.land) if (this.owner[i] === id) { land++; if (['mountain', 'hills', 'forest', 'marsh'].includes(CELL_TERRAIN[i])) rough++; }
+            // Aviación: la suya (escuadrones), la de sus enemigos y la de sus vecinos mueven Aviación, Defensa aérea y Espacio.
+            const wings = new Array(this.nations.length).fill(0);
+            for (const q of this.squadrons.values()) wings[q.owner]++;
+            const air = wings[id], foeAir = this.enemiesOf(id).some(o => wings[o]), nearAir = [...this.borderSets()[id]].some(o => wings[o]);
             const main = UNIT_BRANCH[UNIT_KEYS.reduce((b, k) => (troops[k] > troops[b] ? k : b), 'infantry')];
             const weight = {
                 infanteria: 1, blindados: 1, artilleria: 1, doctrina: war ? 2 : 0.6,
                 movilizacion: war ? 1 : 2, ciencia: war ? 0.5 : 3, industria: war ? 0.5 : 2.5, infraestructura: war ? 0.5 : 2,
-                movilidad: rough > land * 0.3 ? 2 : 0.5, naval: this.needsSea(id) ? 2 : 0.3, fortificacion: war ? 2 : 0.5, reconocimiento: 0, espionaje: 0
+                movilidad: rough > land * 0.3 ? 2 : 0.5, naval: this.needsSea(id) ? 2 : 0.3, fortificacion: war ? 2 : 0.5, reconocimiento: 0, espionaje: 0,
+                aviacion: air >= 2 ? (war ? 1.5 : 0.5) : 0.1,
+                antiaerea: war && foeAir ? 1.5 : nearAir ? 0.5 : 0.2,
+                espacio: war && air >= 6 ? 0.4 : 0
             };
             weight[main] += war ? 2 : 0.5;
             if (fierce) for (const b of ['infanteria', 'blindados', 'artilleria', 'doctrina']) weight[b] *= 1.5;
@@ -5847,6 +5875,9 @@ const RS_ICON = {
     mnt: '<path d="M2 27L11.5 10l5 8.5 3.5-5L30 27z" fill="currentColor"/><path d="M9.2 14.2l2.3-4.2 2.4 4.2-1.2-.6-1.2.9-1.1-.9z" fill="#fff" fill-opacity=".5"/>',
     fort: '<path fill="currentColor" fill-rule="evenodd" d="M4 24A12 11 0 0 1 28 24zM10 17.5h12v2.6H10z"/><rect x="2" y="24" width="28" height="3.4" rx="1.4" fill="currentColor"/>',
     eye: '<rect x="5" y="7" width="8" height="11" rx="2.5" fill="currentColor"/><rect x="19" y="7" width="8" height="11" rx="2.5" fill="currentColor"/><rect x="12" y="10" width="8" height="5" fill="currentColor"/><circle cx="9" cy="21" r="6.5" fill="currentColor"/><circle cx="23" cy="21" r="6.5" fill="currentColor"/><circle cx="9" cy="21" r="3.4" fill="#000" fill-opacity=".3"/><circle cx="23" cy="21" r="3.4" fill="#000" fill-opacity=".3"/>',
+    plane: RS_FRAME + '<path d="M8.5 12.5L16 16l-7.5 3.5zM23.5 12.5L16 16l7.5 3.5z" fill="currentColor"/>',
+    aa: RS_FRAME + '<path d="M8.5 24a7.5 7.5 0 0 1 15 0" fill="none" stroke="currentColor" stroke-width="2.2"/>',
+    sat: '<g transform="rotate(-35 16 16)" fill="currentColor"><rect x="11.5" y="11" width="9" height="10" rx="1.5"/><rect x="2" y="12" width="8" height="8" rx=".8"/><rect x="22" y="12" width="8" height="8" rx=".8"/><path d="M16 11V6.5M13 6.5h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></g>',
     spy: '<path d="M2.5 20.5c3 3.2 24 3.2 27 0-1.4 4.4-25.6 4.4-27 0z" fill="currentColor"/><path d="M7.5 20.6c.2-6.4 2.3-11.6 5-11.6 1.4 0 2.2 1.3 3.5 1.3S18.1 9 19.5 9c2.7 0 4.8 5.2 5 11.6-5.6 1.3-11.4 1.3-17 0z" fill="currentColor"/><path d="M7.7 17.6c5.5 1.3 11.1 1.3 16.6 0" stroke="#000" stroke-opacity=".32" stroke-width="2.2" fill="none"/>'
 };
 const rsIcon = k => `<svg viewBox="0 0 32 32" aria-hidden="true">${RS_ICON[k]}</svg>`;

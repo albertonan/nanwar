@@ -1252,6 +1252,63 @@ const CHECKS = [
     T.eq(s.flown, 0, 'no se arriesga');
     return true;
 }],
+['9 · el árbol tiene 16 ramas y 48 investigaciones', () => {
+    T.eq([RESEARCH_BRANCHES.length, TECHS.length, TECH_BY_ID.get('espacio3').name], [16, 48, 'Constelación'], 'árbol');
+    return true;
+}],
+['9 · Aviación: alcance, munición guiada y guerra electrónica', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    T.eq(g.airRange(es), 25, 'de partida'); T.learn(g, es, 'aviacion1'); T.eq(g.airRange(es), 38, '750 km');
+    T.learn(g, es, 'aviacion2', 'aviacion3');
+    T.eq([g.rules(es).airDamage, g.rules(es).blindHit, g.rules(es).airEvade, g.airPower(es)], [1.5, 0.75, 0.6, 13], 'reglas');
+    return true;
+}],
+['9 · Defensa aérea: más fuerza, más radio y el antiaéreo móvil', () => {
+    const g = T.game(), es = T.nation('es');
+    T.eq([g.rules(es).mobileAA, g.rules(es).satMax, g.rules(es).satRangeKm, g.rules(es).satTurns, g.rules(es).satLevels], [false, 0, 400, 8, false], 'de partida');
+    T.learn(g, es, 'antiaerea1'); T.eq(g.rules(es).aaPower, 13, 'radar');
+    T.learn(g, es, 'antiaerea2'); T.eq([g.rules(es).aaPower, g.aaRadius(es)], [16, 8], 'misiles');
+    T.learn(g, es, 'antiaerea3'); T.ok(g.rules(es).mobileAA, 'móvil');
+    return true;
+}],
+['9 · Espacio: lanzadores, óptica y constelación', () => {
+    const g = T.game(), es = T.nation('es');
+    T.learn(g, es, 'espacio1'); T.eq(g.rules(es).satMax, 1, 'lanzadores');
+    T.learn(g, es, 'espacio2'); T.eq([g.rules(es).satLevels, g.rules(es).satRangeKm], [true, 600], 'óptica');
+    T.learn(g, es, 'espacio3'); T.eq([g.rules(es).satMax, g.rules(es).satTurns], [2, 12], 'constelación');
+    return true;
+}],
+['9 · una ciudad con casamatas y buen antiaéreo cuesta cara; con un nivel menos pierde el integrado', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    T.learn(g, es, 'aviacion1', 'aviacion2', 'aviacion3'); T.learn(g, fr, 'antiaerea1', 'antiaerea2');
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const sq = T.squad(g, es, base, 4);
+    g.fort[target] = 4; T.site(g, fr, target);
+    T.site(g, fr, [0, 1, 2, 3, 4, 5].map(d => G.nb[target * 6 + d]).find(j => j >= 0 && g.owner[j] === fr));
+    const o = g.missionOdds(es, sq, 'fort', target);
+    T.near([o.fire, o.hit, o.down + o.damaged], [64, 0.529, 0.150], 0.005, 'cara');
+    g.fort[target] = 3; g.fortVersion++;
+    T.eq(g.missionOdds(es, sq, 'fort', target).fire, 32, 'sin el integrado');
+    return true;
+}],
+['9 · los escuadrones llevan los galones de Aviación', () => {
+    const g = T.uiStart('es'), es = g.player;
+    T.learn(g, es, 'aviacion1', 'aviacion2'); ui.view.draw();
+    const own = ui.view.airMarks.filter(m => m.owner === es && m.kind === 'field');
+    T.ok(own.length > 0, 'hay aeródromos propios');
+    T.ok(own.every(m => m.level === 2), 'dos galones');
+    return true;
+}],
+['9 · la IA pesa las ramas nuevas según su guerra y su aviación', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es);
+    for (const t of TECHS) if (!['aviacion', 'antiaerea'].includes(t.branch)) g.nations[fr].tech.done.add(t.id);
+    g.techVersion++;
+    T.ok(['aviacion1', 'antiaerea1'].includes(g.aiTechChoice(fr)), 'en guerra con aviación');
+    return true;
+}],
 ['M · con seis guerras, la fase de la IA con aviación tarda como mucho 1,25 veces lo mismo sin ella', () => {
     const run = bare => {
         const g = T.game(11); g.start(T.nation('us'));
