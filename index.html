@@ -3134,13 +3134,16 @@ class GameEngine {
     // (desembarco o contacto con el enemigo); attacks: casilla con ejército enemigo → casilla desde la que se ataca.
     // `fresh`: el ejército aún no se ha movido este turno, así que siempre puede avanzar al menos una casilla de tierra
     // aunque cueste más de lo que le queda (ese paso gasta todo el movimiento).
+    // Mar: desde tierra, una casilla de mar vecina es un embarque (term con `embark`, gasta el turno) y, si sobra
+    // movimiento, un salto (`hop` en exp) desde el que solo se desembarca o se ataca: nunca dos casillas de mar seguidas.
+    // Embarcado (inicio en el mar), navega por exp a MOVE la casilla y desembarca en la costa con lo que le quede.
     reach(a, start, mp, fresh = false) {
         const exp = new Map([[start, { cost: 0, prev: -1 }]]);
         const term = new Map(), attacks = new Map();
         const buckets = Array.from({ length: mp + 1 }, () => []);
         buckets[0].push(start);
         const tryAttack = (from, cost) => {
-            if (cost >= mp || !isLand(from)) return;
+            if (cost >= mp) return;
             for (let d = 0; d < 6; d++) {
                 const v = G.nb[from * 6 + d];
                 if (v < 0 || !this.armyAt[v]) continue;
@@ -3155,21 +3158,32 @@ class GameEngine {
             for (const u of buckets[c]) {
                 if (exp.get(u).cost !== c) continue;
                 tryAttack(u, c);
-                const uSea = !isLand(u);
+                const uSea = !isLand(u), hop = exp.get(u).hop;
                 for (let d = 0; d < 6; d++) {
                     const v = G.nb[u * 6 + d];
                     if (v < 0) continue;
-                    if (!isLand(v)) {
-                        const nc = c + MOVE;
-                        if (nc >= mp) continue;   // hay que poder desembarcar
-                        if ((exp.get(v)?.cost ?? Infinity) > nc) { exp.set(v, { cost: nc, prev: u }); buckets[nc].push(v); }
-                        continue;
-                    }
                     const av = this.armyAt[v];
                     if (av && this.armies.get(av).owner !== a) continue;
+                    if (!isLand(v)) {
+                        if (hop) continue;   // desde un salto no se sigue por el mar
+                        const nc = c + MOVE;
+                        if (uSea) {   // embarcado: navega
+                            if (nc <= mp && (exp.get(v)?.cost ?? Infinity) > nc) { exp.set(v, { cost: nc, prev: u }); buckets[nc].push(v); }
+                            continue;
+                        }
+                        if (c >= mp) continue;
+                        if (!term.has(v)) term.set(v, { cost: mp, prev: u, landing: false, embark: true });
+                        // Con movimiento de sobra, cruza: el salto solo sirve para desembarcar o atacar desde él.
+                        if (nc < mp && (exp.get(v)?.cost ?? Infinity) > nc) { exp.set(v, { cost: nc, prev: u, hop: true }); buckets[nc].push(v); }
+                        continue;
+                    }
                     const o = this.owner[v];
                     const hostile = this.atWar(a, o);
                     if (!(o === a || hostile || this.allied(a, o))) continue;
+                    if (uSea && !hop) {   // embarcado: desembarca con lo que le quede
+                        if (c < mp && !term.has(v)) term.set(v, { cost: mp, prev: u, landing: true });
+                        continue;
+                    }
                     const walled = hostile && this.fort[v] === 1;   // muro enemigo: cuesta más y detiene la marcha
                     const nc = c + this.stepCost(a, u, d, hostile);
                     if (nc > mp) {
@@ -3191,13 +3205,15 @@ class GameEngine {
 
     destinations(r) {
         const out = new Set();
-        for (const v of r.exp.keys()) if (v !== r.start && isLand(v)) out.add(v);
+        // En el mar, las casillas de exp son destino solo si se navega desde el mar; los saltos desde tierra no.
+        const afloatStart = afloat(r.start);
+        for (const v of r.exp.keys()) if (v !== r.start && (isLand(v) || afloatStart)) out.add(v);
         for (const v of r.term.keys()) out.add(v);
         return out;
     }
 
     entry(r, v) {
-        const e = isLand(v) ? r.exp.get(v) : null, t = r.term.get(v);
+        const e = isLand(v) || afloat(r.start) ? r.exp.get(v) : null, t = r.term.get(v);
         if (e && (!t || e.cost <= t.cost)) return { ...e, terminal: false };
         return t ? { ...t, terminal: true } : null;
     }

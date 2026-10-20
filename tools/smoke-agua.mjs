@@ -96,6 +96,82 @@ const CHECKS = [
     const [c, s] = T.coast(g, es);
     T.ok(SEA_PROV[s] >= 0 && SEA_PROV[c] === G.prov[c], 'costa');
     return true;
+}],
+['2 · desde la costa se embarca y el turno acaba', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    const [c, s] = T.coast(g, es);
+    const a = T.army(g, es, c, 3);
+    const r = g.reach(es, c, g.mp(a), true);
+    T.ok(g.destinations(r).has(s), 'el mar es destino');
+    const b = g.moveArmy(a, s, r);
+    T.eq([b.cell, b.used], [s, 999], 'embarcado y sin movimiento');
+    g.beginNationTurn(es);
+    T.eq(g.mp(g.armies.get(b.id)), 6 * MOVE, 'al turno siguiente navega entero');
+    return true;
+}],
+['2 · embarcado navega 6 casillas por el mar y no atraviesa barcos ajenos', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es);
+    const [, s] = T.coast(g, es);
+    const a = T.embark(g, es, s, 3);
+    const r = g.reach(es, s, g.mp(a));
+    const far = Math.max(...[...r.exp].filter(([v]) => !isLand(v)).map(([, e]) => e.cost));
+    T.eq(far, 6 * MOVE, 'seis casillas como mucho');
+    const blocker = G.nb[s * 6 + [0, 1, 2, 3, 4, 5].find(d => { const j = G.nb[s * 6 + d]; return j >= 0 && !isLand(j); })];
+    T.embark(g, fr, blocker, 1);
+    T.ok(!g.reach(es, s, g.mp(a)).exp.has(blocker), 'la casilla ocupada corta el paso');
+    return true;
+}],
+['2 · embarcado desembarca en una costa vecina y gasta el turno', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    const [c, s] = T.coast(g, es);
+    const a = T.embark(g, es, s, 3);
+    const r = g.reach(es, s, g.mp(a));
+    T.ok(r.term.get(c)?.landing, 'desembarco');
+    T.eq(g.moveArmy(a, c, r).used, 999, 'turno gastado');
+    return true;
+}],
+['M · cruce corto: de España a Marruecos en un turno, desembarcando', () => {
+    const g = T.game(), es = T.nation('es'), ma = T.nation('ma');
+    g.start(es); g.declareWar(es, ma);
+    const [a0, , b] = T.strait(g, es, ma);
+    const a = T.army(g, es, a0, 3);
+    const r = g.reach(es, a0, g.mp(a), true);
+    T.ok(r.term.get(b)?.landing, 'llega a la otra orilla');
+    return true;
+}],
+['2 · embarcado navega a otra casilla de mar y le queda movimiento', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    const [, s] = T.coast(g, es);
+    const a = T.embark(g, es, s, 3);
+    const r = g.reach(es, s, g.mp(a));
+    const v = [...r.exp].find(([j, e]) => !isLand(j) && e.cost === 2 * MOVE)[0];
+    T.ok(g.destinations(r).has(v), 'el mar es destino');
+    const b = g.moveArmy(a, v, r);
+    T.eq([b.cell, b.used, g.mp(b)], [v, 2 * MOVE, 4 * MOVE], 'navega dos casillas y le quedan cuatro');
+    return true;
+}],
+['M · el cruce corto lleva el ejército a la otra orilla pasando por el mar', () => {
+    const g = T.game(), es = T.nation('es'), ma = T.nation('ma');
+    g.start(es); g.declareWar(es, ma);
+    const [a0, , b] = T.strait(g, es, ma);
+    const a = T.army(g, es, a0, 3);
+    const moved = g.moveArmy(a, b, g.reach(es, a0, g.mp(a), true));
+    const cells = g.motion[g.motion.length - 1].cells;
+    T.eq([moved.cell, moved.used, g.owner[b], cells.length, afloat(cells[1])], [b, 999, es, 3, true], 'tierra, mar y tierra');
+    return true;
+}],
+['M · desde tierra no se encadenan dos casillas de mar', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    const [c] = T.coast(g, es);
+    const a = T.army(g, es, c, 3);
+    const r = g.reach(es, c, g.mp(a), true);
+    for (const [v, e] of r.exp) if (!isLand(v)) T.ok(isLand(e.prev), `la casilla de mar ${v} viene de tierra`);
+    return true;
 }]
 ];
 
