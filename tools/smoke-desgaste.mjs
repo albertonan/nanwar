@@ -148,6 +148,17 @@ const CHECKS = [
     T.eq([g.starving(es, coast), a.hunger], [false, 0], 'se rompe el cerco');
     return true;
 }],
+['A3 · un cerco de vecinas en paz no pasa hambre', () => {
+    const g = T.game(), es = T.nation('es'), pt = T.nation('pt'), fr = T.nation('fr');
+    g.start(es); g.declareWar(es, pt);
+    const [, c] = T.plainPair(g, es);
+    T.pocket(g, es, fr, c);
+    const a = T.army(g, es, c, 2);
+    T.ok(!g.starving(es, c), 'en paz no hay hambre');
+    for (let i = 0; i < 4; i++) g.beginNationTurn(es);
+    T.eq([a.hunger, a.units.infantry], [0, 2], 'sin contar ni perder');
+    return true;
+}],
 ['A3 · el hambre se guarda', () => {
     const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
     g.start(es); g.declareWar(es, pt);

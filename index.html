@@ -1655,13 +1655,13 @@ class GameEngine {
         return Math.max(0, Math.floor(full) - used);
     }
     mp(a) { return this.moveBudget(a.owner, a.cell, a.units, a.used); }
-    // Sin víveres: en tierra ocupada (no legalmente suya) y sin ninguna casilla de tierra propia o aliada al lado
-    // (el mar no alimenta a nadie). Una casilla legal propia o una vecina propia bastan para comer.
+    // Sin víveres: la casilla es del ejército pero su dueño legal es un enemigo en guerra, y las seis vecinas son mar, borde
+    // del mapa o tierra controlada por enemigos en guerra. Una vecina propia, aliada, neutral o en paz basta para comer.
     starving(owner, cell) {
-        if (this.owner[cell] === owner && this.legal[cell] === owner) return false;
+        if (this.owner[cell] !== owner || !this.atWar(owner, this.legal[cell])) return false;
         for (let d = 0; d < 6; d++) {
             const j = G.nb[cell * 6 + d];
-            if (j >= 0 && isLand(j) && (this.owner[j] === owner || this.allied(owner, this.owner[j]))) return false;
+            if (j >= 0 && isLand(j) && !this.atWar(owner, this.owner[j])) return false;
         }
         return true;
     }
@@ -1697,6 +1697,7 @@ class GameEngine {
         const o = this.armies.get(other);
         for (const k of UNIT_KEYS) o.units[k] += a.units[k];
         o.used = Math.max(o.used, a.used);
+        o.hunger = Math.max(o.hunger || 0, a.hunger || 0);
         if (!o.op && a.op) o.op = a.op;   // quien se une a un ejército sin operación se la lleva
         this.armies.delete(a.id);
         return o;
