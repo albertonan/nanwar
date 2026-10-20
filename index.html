@@ -1664,6 +1664,7 @@ class GameEngine {
             started++;
         }
         if (!started) return 0;
+        this.roadVersion++;
         n.gold -= plan.cost;
         return started;
     }
@@ -4771,7 +4772,32 @@ class MapView {
                 this.roads[cls].lineTo(G.cx[j], G.cy[j]);
             }
         }
+        // Tramos rotos (línea y marca de corte en su centro) y reparaciones en obra
+        const g = this.game, k = G.S * 0.2;
+        this.cut = { line: new Path2D(), mark: new Path2D(), work: new Path2D(), mine: new Path2D() };
+        for (const i of G.land) {
+            for (let d = 0; d < 3; d++) {
+                if (!g.broken[i * 6 + d]) continue;
+                const j = G.nb[i * 6 + d], x0 = G.cx[i], y0 = G.cy[i], x1 = G.cx[j], y1 = G.cy[j];
+                const len = Math.hypot(x1 - x0, y1 - y0) || 1, nx = -(y1 - y0) / len * k, ny = (x1 - x0) / len * k, mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+                const into = g.roadWork.has(edgeKey(i, d)) ? this.cut.work : this.cut.line;
+                into.moveTo(x0, y0); into.lineTo(x1, y1);
+                this.cut.mark.moveTo(mx - nx, my - ny); this.cut.mark.lineTo(mx + nx, my + ny);
+                if (g.owner[i] === g.player && g.owner[j] === g.player) { this.cut.mine.moveTo(x0, y0); this.cut.mine.lineTo(x1, y1); }
+            }
+        }
         this.builtRoads = this.game.roadVersion;
+    }
+
+    // Tramos rotos: línea discontinua apagada con una marca de corte; en obra, discontinua del color de las obras.
+    strokeCuts(ctx, s, hexPx) {
+        const w = Math.min(2.4, 0.8 + hexPx * 0.08) / s;
+        ctx.lineCap = 'butt'; ctx.lineWidth = w;
+        ctx.setLineDash([2.5 / s, 2.5 / s]);
+        ctx.strokeStyle = 'rgba(150,140,120,0.8)'; ctx.stroke(this.cut.line);
+        ctx.strokeStyle = '#e3d9c0'; ctx.stroke(this.cut.work);
+        ctx.setLineDash([]);
+        ctx.strokeStyle = 'rgba(21,26,18,0.85)'; ctx.lineWidth = w * 1.3; ctx.stroke(this.cut.mark);
     }
 
     // Fortificaciones: relleno y muro en el contorno de cada bloque, con el material del nivel de Fortificación de su
@@ -4968,6 +4994,7 @@ class MapView {
             const sup = g.supplyMap(g.player), out = new Path2D();
             for (const i of G.land) if (g.owner[i] === g.player && sup[i] < 0) this.hexPath(out, i);
             ctx.fillStyle = 'rgba(255,150,30,0.5)'; ctx.fill(out);
+            ctx.lineCap = 'round'; ctx.strokeStyle = 'rgba(255,150,30,0.9)'; ctx.lineWidth = 4 / s; ctx.stroke(this.cut.mine);   // tramos rotos propios
         }
         if (this.highlight) {
             const mv = new Path2D(), at = new Path2D();
@@ -5002,6 +5029,7 @@ class MapView {
         ctx.stroke(this.roads[2]);
         ctx.strokeStyle = SIGNAL; ctx.lineWidth = Math.min(2.8, 1 + hexPx * 0.1) / s;
         ctx.stroke(this.roads[2]);
+        this.strokeCuts(ctx, s, hexPx);
         }
 
         // Fortificaciones, con el material de su nivel
@@ -5561,6 +5589,7 @@ class GameUI {
         this.legendKey = null;
         Object.assign(this.view, { game: g, builtVersion: -1, builtRoads: -1, builtForts: -1, preview: null, stretch: null, hoverNation: -1 });
         this.stretch = null;
+        this.repair = null;
         this.tool = 'command';
         this.anchor = -1;
         this.choice = g.player;
@@ -5824,6 +5853,7 @@ class GameUI {
         const fort = this.tool === 'fort';
         this.pending = null;
         this.stretch = fort ? null : g.roadStretch(g.player, cell);
+        this.repair = fort ? null : g.repairPlan(g.player, cell);
         this.view.stretch = this.stretch;
         if (this.anchor < 0 || (cell === this.anchor && !fort)) {
             this.anchor = cell;
@@ -5937,7 +5967,7 @@ class GameUI {
     setTool(id, draft = null) {
         if (this.game.player === null || this.game.over) return;
         this.tool = id;
-        this.stretch = this.view.stretch = null;
+        this.stretch = this.view.stretch = this.repair = null;
         this.opDraft = id === 'op' ? draft ?? { kind: this.opDraft?.kind ?? 'ofensiva', cells: [], redraw: null } : null;
         this.anchor = -1;
         this.pending = null;
@@ -5959,7 +5989,7 @@ class GameUI {
 
     cancel() {
         if (this.mapMenu) { this.mapMenu = false; this.render(); return; }
-        if (this.stretch && !this.pending) { this.stretch = this.view.stretch = null; this.render(); return; }
+        if (this.stretch && !this.pending) { this.stretch = this.view.stretch = this.repair = null; this.render(); return; }
         if (this.ordering) { this.ordering = null; this.render(); return; }
         if (this.proposal) { this.endProposal(); return; }
         if (this.tool === 'op' && this.opDraft?.cells.length) { this.opDraft.cells.pop(); this.render(); return; }
@@ -6145,7 +6175,10 @@ class GameUI {
                 return;
             case 'confirm-build': this.confirmBuild(); return;
             case 'upgrade-stretch':
-                if (this.stretch && g.playerUpgradeRoad(this.stretch)) { this.stretch = this.view.stretch = null; }
+                if (this.stretch && g.playerUpgradeRoad(this.stretch)) { this.stretch = this.view.stretch = this.repair = null; }
+                break;
+            case 'repair-roads':
+                if (this.repair && g.playerRepair(this.repair)) this.repair = null;
                 break;
             case 'cancel-build': this.cancel(); return;
             case 'stop-build': this.setTool('command'); return;
@@ -6984,13 +7017,14 @@ class GameUI {
                 <button class="btn" data-action="cancel-build">Cancelar</button>`;
         } else body = `<span class="small">${this.anchor < 0 ? `${this.touch ? 'Toca' : 'Haz clic en'} una casilla tuya para empezar, o en una carretera para mejorar su tramo.`
             : `${this.touch ? 'Toca' : 'Haz clic en'} donde termina el tramo: se construye el camino más barato.`}</span>`;
-        const st = this.stretch, stOk = st && st.cost <= gold;
+        const st = this.stretch, stOk = st && st.cost <= gold, rp = this.repair, rpOk = rp && rp.cost <= gold;
         el.hidden = false;
         el.innerHTML = `<button class="tool tick road-tick ${this.highway ? 'on' : ''}" data-action="highway" aria-pressed="${this.highway}" title="Construir como autopista, o mejorar a autopista la carretera que ya haya (tecla A)">
                 <span class="box" aria-hidden="true">${this.highway ? '✓' : ''}</span>Autopista<kbd>A</kbd></button>
             <span class="small muted road-price">${this.highway ? `⅓ de punto por tramo, ${per(2)} de oro (${decimal(CONFIG.HIGHWAY_COST * r.roadCost)} si ya hay carretera)` : `½ punto por tramo, ${per(1)} de oro`} × terreno</span>
             ${body}
             ${st && !plan ? `<button class="btn" data-action="upgrade-stretch" ${stOk ? '' : 'disabled'} title="De ciudad o cruce a ciudad o cruce">Pasar a autopista este tramo (${plural(st.edges.length, 'tramo', 'tramos')}, ${st.cost} de oro)</button>` : ''}
+            ${rp && !plan ? `<button class="btn" data-action="repair-roads" ${rpOk ? '' : 'disabled'} title="Cuesta la mitad que construirlos">Reparar ${plural(rp.edges.length, 'tramo', 'tramos')} (${rp.cost} de oro, ${plural(r.fortTurns, 'turno', 'turnos')})</button>` : ''}
             ${plan ? '' : '<button class="btn ghost" data-action="stop-build">Terminar obras</button>'}`;
     }
 
