@@ -2247,7 +2247,7 @@ class GameEngine {
     // antiaéreo (una tirada por escuadrón), el fracaso, la precisión (a ciegas rinde la mitad) y el efecto. Sale en el
     // parte si toca al jugador y desvela la casilla a quien la manda ese turno.
     airMission(owner, ids, kind, cell) {
-        const r = this.rules(owner), sqs = ids.map(id => this.squadrons.get(id));
+        const r = this.rules(owner), sqs = [...new Set(ids)].map(id => this.squadrons.get(id));   // cada escuadrón, una vez
         const why = this.missionCheck(owner, sqs, kind, cell);
         if (why) return { result: why === AIR_BLOCKED ? 'blocked' : 'invalid', down: 0, damaged: 0, text: why };
         const fly = this.fliers(owner, sqs, cell), bases = [...new Set(fly.map(q => q.base))];
@@ -2257,7 +2257,7 @@ class GameEngine {
         const ev = { kind: 'air', owner, from: bases, cell, result: null };
         this.note(ev);
         this.airVersion++;
-        let result = 'hit', effect = '', guards = [];
+        let result = 'hit', effect = '', told = '', guards = [];   // told: el efecto contado al que ataca
         if (kind === 'patrol') for (const q of fly) q.patrol = cell;
         else {
             guards = this.interceptors(owner, kind, cell);
@@ -2273,7 +2273,9 @@ class GameEngine {
                 const known = kind === 'aa' || this.knownCell(owner, cell);
                 if (this.rng() < o.fail || (!known && this.rng() < 1 - r.blindHit)) result = 'miss';
                 else {
-                    effect = this.airEffect(owner, kind, cell, src);
+                    effect = told = this.airEffect(owner, kind, cell, src);
+                    // El nivel al que baja una fortificación, solo si quien ataca conoce los niveles; que existe es público.
+                    if (kind === 'fort' && this.fortLevel(owner, cell) === null) told = this.fort[cell] ? 'baja un nivel' : 'desaparece';
                     this.airHits.set(this.hitKey(src?.kind === 'integrated' ? 'fort' : kind, cell), this.turn);
                 }
                 this.airSeen.set(owner * G.N + cell, this.turn);
@@ -2282,7 +2284,7 @@ class GameEngine {
         ev.result = result;
         this.airVersion++;
         const down = fly.filter(q => !this.squadrons.has(q.id)).length, damaged = fly.filter(q => this.squadrons.has(q.id) && q.ready > this.turn).length;
-        const text = this.airReport(owner, victim, kind, cell, fly.length, result, effect, down, damaged, guards);
+        const text = this.airReport(owner, victim, kind, cell, fly.length, result, told, down, damaged, guards);
         if (owner === this.player) this.log(text);
         else this.airDefenseReport(owner, victim, kind, cell, result, effect, down, guards);
         return { result, down, damaged, text };

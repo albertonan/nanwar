@@ -683,6 +683,47 @@ const CHECKS = [
     s.ready = g.turn + 1; T.eq(why('patrol', base), 'Ningún escuadrón listo.', 'dañado');
     T.eq([g.airMission(es, [s.id], 'patrol', base).result, s.flown], ['invalid', 0], 'no despega');
     return true;
+}],
+['4 · niebla: el parte del que bombardea una fortificación solo nombra el nivel si conoce los niveles', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const [s] = T.squad(g, es, base, 1);
+    g.fort[target] = 3; T.luck(g, 0.99);
+    T.eq(g.fortLevel(es, target), null, 'no conoce los niveles');
+    g.airMission(es, [s.id], 'fort', target);
+    const named = msg => FORT_LEVELS.some(n => msg.includes(n));
+    T.ok(g.fort[target] === 2 && /baja un nivel/.test(g.logs.at(-1).msg) && !named(g.logs.at(-1).msg), `sin nivel: ${g.logs.at(-1).msg}`);
+    T.learn(g, es, 'reconocimiento1', 'reconocimiento2', 'reconocimiento3');
+    g.turn++; g.airMission(es, [s.id], 'fort', target);
+    T.ok(g.logs.at(-1).msg.includes(`baja a ${FORT_LEVELS[0]}`), `con nivel: ${g.logs.at(-1).msg}`);
+    g.turn++; g.airMission(es, [s.id], 'fort', target);
+    T.ok(/desaparece/.test(g.logs.at(-1).msg), 'desaparece');
+    return true;
+}],
+['4 · un mismo escuadrón dos veces en la lista vuela una sola vez', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const [s] = T.squad(g, es, base, 1); T.site(g, fr, target); g.fort[target] = 2;
+    let rolls = 0;
+    g.rng = () => { rolls++; return 0.99; };
+    g.airMission(es, [s.id, s.id], 'fort', target);
+    T.eq(rolls, 2, 'una tirada de antiaéreo y la de fracaso (sin niebla no hay la de precisión)');
+    T.ok(/^Tu escuadrón /.test(g.logs.at(-1).msg), 'un escuadrón en el parte');
+    return true;
+}],
+['4 · un ejército que se queda sin unidades por un ataque aéreo desaparece de la casilla', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const [s] = T.squad(g, es, base, 1);
+    if (g.armyOn(target)) g.removeArmy(g.armyOn(target));
+    const a = T.army(g, fr, target, 1); T.luck(g, 0.99);
+    T.eq(g.airMission(es, [s.id], 'army', target).result, 'hit', 'acierto');
+    T.eq([g.armyAt[target], g.armies.has(a.id)], [0, false], 'desaparece');
+    T.ok(/se disuelve/.test(g.logs.at(-1).msg), 'lo dice el parte');
+    return true;
 }]
 ];
 
