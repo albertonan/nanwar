@@ -1284,6 +1284,12 @@ const CHECKS = [
     T.eq([RESEARCH_BRANCHES.length, TECHS.length, TECH_BY_ID.get('espacio3').name], [16, 48, 'Constelación'], 'árbol');
     return true;
 }],
+// APP-6: la aviación de ala fija es la hélice de dos palas; los dos triángulos son el ala rotatoria (helicópteros).
+['9 · la rama Aviación lleva la misma hélice de ala fija que el resto de la interfaz', () => {
+    T.ok(RS_ICON.plane.includes(propellerPath(16, 16, 9.4)) && !/fill="currentColor"/.test(RS_ICON.plane), 'investigación');
+    T.ok(ICONS.plane.includes(propellerPath(12, 12, 7.2)) && AIR_PROP.includes(propellerPath(13, 10, 7.4)), 'barra y panel');
+    return true;
+}],
 ['9 · Aviación: alcance, munición guiada y guerra electrónica', () => {
     const g = T.game(), es = T.nation('es');
     g.start(es);
