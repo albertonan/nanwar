@@ -1380,8 +1380,8 @@ class GameEngine {
         // Antiaérea no traen el índice 9: 0 antiaéreas.
         const moveScale = data.move === MOVE ? 1 : MOVE / 6;
         for (const x of list(data.armies)) {
-            const id = int(x?.[0], 1, 1e9, 1), cell = cellIdx(x?.[2]);
-            if (g.armyAt[cell] || g.armies.has(id)) continue;
+            const id = int(x?.[0], 1, 1e9, 1), cell = x?.[2];
+            if (!Number.isInteger(cell) || cell < 0 || cell >= G.N || g.armyAt[cell] || g.armies.has(id)) continue;   // una casilla inválida no se cambia por otra
             g.armies.set(id, { id, owner: nat(x?.[1]), cell, units: { infantry: int(x?.[3], 0, 1e6, 0), tank: int(x?.[4], 0, 1e6, 0), artillery: int(x?.[5], 0, 1e6, 0), antiair: int(x?.[9], 0, 1e6, 0) }, used: Math.min(999, int(x?.[6], 0, 999, 0) * (x?.[6] >= 999 ? 1 : moveScale)), from: 0, hunger: int(x?.[7], 0, 99, 0), disorgUntil: int(x?.[8], 0, 1e6, 0) });
             g.armyAt[cell] = id;
         }
@@ -3056,6 +3056,7 @@ class GameEngine {
                 const v = path[i + 1];
                 if (afloat(v)) {   // embarca (fin del turno) o cruza una casilla y desembarca enfrente
                     const used = start - dist[path[i]];
+                    if (used >= per) break;   // sin movimiento no embarca: lo hará al turno siguiente (como en reach)
                     i++;
                     if (i < last && !afloat(path[i + 1]) && used + MOVE + dist[path[i]] - dist[path[i + 1]] <= per) i++;
                     break;
@@ -3171,18 +3172,22 @@ class GameEngine {
         return false;
     }
     // Desembarco a la vez: un ejército de una ofensiva que ya está en el mar junto a la costa por la que entra hacia
-    // `dest` espera (true) si otro de su operación aún navega a 2 turnos de esa costa o menos, y lleva menos de 2 turnos
-    // esperando. Al que también está ya junto a su costa no se le espera: desembarcan los dos.
+    // `dest` espera (true) si otro de su operación aún navega hacia allí, con camino, a 2 turnos de esa costa o menos, y
+    // lleva menos de 2 turnos esperando. El reloj solo empieza cuando hay a quién esperar. Al que también está ya junto a
+    // su costa no se le espera (desembarcan los dos), ni al que no tiene camino.
     holdLanding(a, dest) {
         const op = a.op ? this.ops.get(a.op) : null;
-        const shore = b => { if (!afloat(b.cell)) return -1; const f = this.orderField(b.owner, dest); if (f.to(b.cell) === Infinity) return -1; const c = f.next[b.cell]; return c >= 0 && isLand(c) ? c : -1; };
-        const coast = op?.kind === 'ofensiva' ? shore(a) : -1;
-        if (coast < 0) { a.seaWait = 0; return false; }
-        a.seaWait ||= this.turn;
-        if (this.turn - a.seaWait >= 2) return false;
+        const f = op?.kind === 'ofensiva' && afloat(a.cell) ? this.orderField(a.owner, dest) : null;
+        // La costa a la que llega un ejército en el mar (−1 si aún navega), o null si no tiene camino.
+        const shore = b => { if (f.to(b.cell) === Infinity) return null; const c = f.next[b.cell]; return c >= 0 && isLand(c) ? c : -1; };
+        const coast = f ? shore(a) : null;
+        if (coast === null || coast < 0) { a.seaWait = 0; return false; }
         const range = 2 * this.rules(a.owner).seaSpeed;
-        return this.opMembers(op).some(b => b !== a && afloat(b.cell) && shore(b) < 0
+        const wait = this.opMembers(op).some(b => b !== a && afloat(b.cell) && shore(b) === -1
             && Math.hypot(G.cx[b.cell] - G.cx[coast], G.cy[b.cell] - G.cy[coast]) / G.W <= range);
+        if (!wait) return false;
+        a.seaWait ||= this.turn;
+        return this.turn - a.seaWait < 2;
     }
     // Rodeado (3 lados o más): se aparta hacia la casilla libre con menos enemigos alrededor. true si se ha movido.
     flee(a, r) {
@@ -5693,10 +5698,11 @@ class GameEngine {
     }
 
     // Sin enemigos a los que ir, los ejércitos que han quedado en el mar navegan hacia la costa propia libre más cercana.
+    // Los de una operación o una formación, y los que tienen orden, siguen lo suyo.
     aiSailHome(id) {
         for (const a of [...this.armies.values()]) {
             if (this.over) return;
-            if (a.owner !== id || !afloat(a.cell) || !this.armies.has(a.id) || this.armyOn(a.cell) !== a || this.mp(a) <= 0) continue;
+            if (a.owner !== id || a.op || a.form || a.order || !afloat(a.cell) || !this.armies.has(a.id) || this.armyOn(a.cell) !== a || this.mp(a) <= 0) continue;
             const home = this.nearestCoast(id, a.cell);
             if (home >= 0) this.advance(a, home, this.reach(id, a.cell, this.mp(a), a.used === 0));
         }
@@ -7412,6 +7418,8 @@ class GameUI {
         this.game = g;
         this.legendKey = null;
         Object.assign(this.view, { game: g, builtVersion: -1, builtRoads: -1, builtForts: -1, preview: null, stretch: null, hoverNation: -1 });
+        // Lo que quedaba por animar es de la otra partida: sus números de ejército se repiten en la nueva.
+        this.view.motion.clear(); this.view.motion.facings.clear();
         this.stretch = null;
         this.repair = this.fortRepair = null;
         this.tool = 'command';

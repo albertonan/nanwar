@@ -586,6 +586,74 @@ const CHECKS = [
     try { ui.view.scale = 1; ui.view.centerOn(s, 14); ui.view.draw(); } finally { delete ui.view.drawCounter; }
     T.eq([seen.get(ship.id), seen.get(land.id)], [true, false], 'afloat');
     return true;
+}],
+// Pendientes tras publicar el agua (.superpowers/sdd/pendientes/lista.md).
+['Pend 13 · sin ciudades a las que ir, la IA no lleva a la costa un barco de una operación, de una formación o con orden', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es);
+    T.eq(g.enemiesOf(fr), [], 'precondición: Francia en paz');
+    const [land, s] = T.coast(g, fr);
+    const nbs = j => [0, 1, 2, 3, 4, 5].map(d => G.nb[j * 6 + d]).filter(x => x >= 0);
+    const far = [...g.nearCells(s, 3)].find(([j, d]) => d === 3 && T.seaFree(g, j) && nbs(j).every(x => !isLand(x)))?.[0];
+    T.ok(far !== undefined, 'no hay alta mar cerca');
+    const a = T.embark(g, fr, far, 3), op = g.createOp(fr, 'defensa', [land], { noCap: true });
+    const out = [];
+    a.op = op.id; g.aiArmies(fr); out.push(a.cell === far);
+    a.op = 0; a.form = op.id; g.aiArmies(fr); out.push(a.cell === far);
+    a.form = 0; T.ok(g.setOrder(a, { kind: 'hold' }), 'orden aceptada'); g.aiArmies(fr); out.push(a.cell === far);
+    a.order = null; g.aiArmies(fr); out.push(g.armies.get(a.id)?.cell === far);
+    T.eq(out, [true, true, true, false], 'operación, formación y orden se quedan; el libre vuelve');
+    return true;
+}],
+['Pend 14 · cambiar de partida borra los trazos que quedaban por animar', () => {
+    T.uiStart('es');
+    const m = ui.view.motion;
+    m.tracks.set(1, [{ kind: 'move', id: 1, cells: [0, 1], pts: [[G.cx[0], G.cy[0]], [G.cx[1], G.cy[1]]], times: [0, 100], start: 0, end: 1e12 }]);
+    m.facings.set(1, -1); m.busy.set(1, 1e12);
+    T.uiStart('es');
+    const v = ui.view.motion;
+    T.eq([v.tracks.size, v.facings.size, v.busy.size], [0, 0, 0], 'sin trazos de la partida de antes');
+    return true;
+}],
+['Pend 15 · pathTurns no embarca sin movimiento: si los pasos de tierra lo gastan en la costa, embarca al turno siguiente', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es);
+    const [c, s] = T.coast(g, es, { near: g.nations[es].capitalCell }), nbs = j => [0, 1, 2, 3, 4, 5].map(d => G.nb[j * 6 + d]).filter(x => x >= 0);
+    const A = nbs(c).find(j => isLand(j) && g.owner[j] === es), s2 = nbs(s).find(j => !isLand(j)), D = g.nations[fr].capitalCell;
+    T.ok(A !== undefined && s2 !== undefined && g.inSupply(es, A) && g.inSupply(es, c), `hay sitio, con suministro: ${[A, s2, g.inSupply(es, A), g.inSupply(es, c)]}`);
+    const units = { infantry: 1, tank: 0, artillery: 0 }, per = speedOf(units, g.rules(es)) * MOVE;
+    // Un camino de tierra (A → c) y de mar (s → s2) hasta D; `used` es lo que cuesta llegar a la costa.
+    const turns = used => { const dist = new Float64Array(G.N); dist[A] = 100 + used; dist[c] = 100; dist[s] = 60; dist[s2] = 30; return g.pathTurns(es, units, [A, c, s, s2, D], dist); };
+    T.eq([turns(per - 1), turns(per)], [2, 3], 'con movimiento de sobra embarca; sin él, no');
+    return true;
+}],
+['Pend 16 · desembarco a la vez: sin nadie a quien esperar no empieza el reloj, y al que no tiene camino no se le espera', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+    g.start(es); g.declareWar(es, fr);
+    T.ok(g.turn > 0, 'el reloj se distingue de 0');
+    const [c, s] = T.coast(g, fr), nbs = j => [0, 1, 2, 3, 4, 5].map(d => G.nb[j * 6 + d]).filter(x => x >= 0);
+    const far = [...g.nearCells(s, 4)].find(([j, d]) => d === 4 && T.seaFree(g, j) && nbs(j).every(x => T.seaFree(g, x)))?.[0];
+    T.ok(far !== undefined, 'no hay alta mar cerca');
+    const a = T.embark(g, es, s, 3), b = T.embark(g, es, far, 3);
+    const op = g.createOp(es, 'ofensiva', [g.nations[es].capitalCell, c], { noCap: true });
+    a.op = op.id;
+    T.eq([g.holdLanding(a, c), a.seaWait || 0], [false, 0], 'solo: no espera ni empieza el reloj');
+    b.op = op.id;
+    const walls = nbs(far).map(j => T.embark(g, pt, j, 1));   // barcos portugueses alrededor: no tiene camino
+    T.eq([g.orderField(es, c).to(far), g.holdLanding(a, c), a.seaWait || 0], [Infinity, false, 0], 'al que no tiene camino no se le espera');
+    for (const w of walls) g.removeArmy(w);
+    T.eq([g.holdLanding(a, c), a.seaWait], [true, g.turn], 'al que navega, sí');
+    return true;
+}],
+['Pend 17 · al cargar se descartan los ejércitos con una casilla inválida o fuera del mapa', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    const data = JSON.parse(JSON.stringify(g.serialize())), bad = ['x', G.N + 50, -3, 1.5, null, '12'];
+    bad.forEach((cell, i) => data.armies.push([90001 + i, es, cell, 1, 0, 0, 0, 0, 0, 0]));
+    const h = GameEngine.load(data);
+    T.eq(bad.map((_, i) => h.armies.has(90001 + i)), bad.map(() => false), 'descartados');
+    T.eq(h.armies.size, g.armies.size, 'los buenos siguen');
+    return true;
 }]
 ];
 
