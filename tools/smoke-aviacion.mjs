@@ -3,7 +3,7 @@
 // Uso: node basicmilitary/tools/smoke-aviacion.mjs [filtro]   (CHROME=<ruta> para usar otro navegador)
 import { chromium } from 'playwright';
 import { createServer } from 'node:http';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -125,6 +125,11 @@ const setup = () => {
                 .sort((a, b) => hexDist(a, cell) - hexDist(b, cell) || a - b)[0];
             if (c === undefined) throw new Error('no hay base a su alcance');
             return c;
+        },
+        // Alto de la ficha y del mapa, como los mide smoke-vista en el móvil.
+        mobileCard() {
+            const card = document.querySelector('#card'), h = sel => document.querySelector(sel).getBoundingClientRect().height;
+            return { hidden: card.hidden, card: h('#card'), stage: h('#stage') };
         },
         // Texto de la tarjeta al pasar el ratón por `cell` ('' si no sale).
         hover(cell) {
@@ -724,6 +729,120 @@ const CHECKS = [
     T.eq([g.armyAt[target], g.armies.has(a.id)], [0, false], 'desaparece');
     T.ok(/se disuelve/.test(g.logs.at(-1).msg), 'lo dice el parte');
     return true;
+}],
+['5 · tecla 6: herramienta Aviación; un clic en tu aeródromo elige sus escuadrones listos', () => {
+    const g = T.uiStart('es'), es = g.player, cap = g.nations[es].capitalCell;
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '6' }));
+    T.eq(ui.tool, 'air', 'herramienta');
+    ui.clickCell(cap);
+    T.eq([ui.air.base, ui.air.picked.size], [cap, g.squadronsAt(cap).filter(s => g.canFly(s)).length], 'elegidos');
+    T.ok(/Escuadrones en/.test(document.querySelector('#card').textContent), 'ficha del aeródromo');
+    return true;
+}],
+['5 · un blanco a tu alcance enseña sus misiones con la previsión; fuera de alcance, no', () => {
+    const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+    g.declareWar(es, fr); T.bare(g);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); T.squad(g, es, base, 2); g.fort[target] = 2; g.fortVersion++;
+    ui.setTool('air'); ui.clickCell(base); ui.clickCell(target);
+    const b = document.querySelector('[data-action="air-mission"][data-kind="fort"]');
+    T.ok(b && /% de acierto/.test(b.closest('.air-mission').textContent), 'previsión');
+    const pick = ui.view.airPick;
+    T.eq([pick.bases, pick.target, pick.range, pick.path.length], [[base], target, g.airRange(es), flightPath(base, target).length], 'lo que dibuja el mapa');
+    ui.clickCell(PROVINCES.find(p => g.owner[p.city] === fr && hexDist(base, p.city) > 25).city);
+    T.ok(!document.querySelector('[data-action="air-mission"]') && /Fuera de alcance/.test(document.querySelector('#card').textContent), 'fuera');
+    return true;
+}],
+['5 · mandar la misión desde la ficha la resuelve y sale en el parte', () => {
+    const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+    g.declareWar(es, fr); T.bare(g);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); T.squad(g, es, base, 2); g.fort[target] = 2; g.fortVersion++; T.luck(g, 0.99);
+    ui.setTool('air'); ui.clickCell(base); ui.clickCell(target);
+    document.querySelector('[data-action="air-mission"][data-kind="fort"]').click();
+    T.ok(g.fort[target] === 1 && g.logs.some(l => /Tus 2 escuadrones/.test(l.msg)), 'resuelta y en el parte');
+    T.eq(ui.air.picked.size, 0, 'ya no queda ninguno listo');
+    T.ok(/Ya ha volado/.test(document.querySelector('#card').textContent), 'su estado');
+    return true;
+}],
+['5 · niebla: el antiaéreo que no conoces no cuenta en la previsión; dispara entero y después se conoce', () => {
+    const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr');
+    g.declareWar(es, fr); T.bare(g);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const [s] = T.squad(g, es, base, 1); g.fort[target] = 2; g.fortVersion++; T.site(g, fr, target);
+    ui.setTool('air'); ui.clickCell(base); ui.clickCell(target);
+    const o = g.missionOdds(es, [s], 'fort', target);
+    T.eq([o.fire, o.unknown], [0, true], 'no cuenta');
+    const text = () => document.querySelector('#card').textContent;
+    T.ok(/Puede haber antiaéreo que no conoces/.test(text()), 'avisa');
+    T.ok(/A ciegas: rinde la mitad/.test(text()), 'a ciegas');
+    T.ok(!ui.view.airPick.known.some(k => k.cell === target), 'el mapa no lo dibuja');
+    T.luck(g, 0.2);
+    document.querySelector('[data-action="air-mission"][data-kind="fort"]').click();
+    T.eq([g.fort[target], g.canFly(s)], [2, false], 'dispara entero: fracasa y vuelve dañado');
+    T.ok(/Dañado: vuelve a volar el turno/.test(text()), 'dañado en la ficha');
+    const [s2] = T.squad(g, es, base, 1);
+    T.eq(g.missionOdds(es, [s2], 'fort', target).fire, 10, 'ahora lo conoces');
+    ui.render();
+    T.ok(ui.view.airPick.known.some(k => k.cell === target), 'y el mapa lo dibuja');
+    return true;
+}],
+['5 · desde la ficha se compra un escuadrón y se construyen aeródromo y antiaéreo', () => {
+    const g = T.uiStart('es'), es = g.player, cap = g.nations[es].capitalCell;
+    g.nations[es].gold = 5000; T.bare(g);
+    ui.setTool('air'); ui.clickCell(cap);
+    document.querySelector('[data-action="air-build-field"]').click();
+    T.ok(g.airfields.get(cap)?.left > 0, 'aeródromo en obra');
+    document.querySelector('[data-action="air-build-aa"]').click();
+    T.eq(g.aaSites.get(cap)?.left, 2, 'antiaéreo en obra');
+    g.airfields.get(cap).left = 0; g.airVersion++; ui.clickCell(cap);
+    document.querySelector('[data-action="air-buy"]').click();
+    T.eq(g.squadronsAt(cap).length, 1, 'comprado');
+    return true;
+}],
+['5 · la ficha quita y pone escuadrones, traslada a otro aeródromo y Esc deshace por pasos', () => {
+    const g = T.uiStart('es'), es = g.player;
+    T.bare(g);
+    const [a, b] = T.pair(g, es, es, (x, y) => x !== y, 2, 20);
+    T.airfield(g, es, a); T.airfield(g, es, b); const [s1, s2] = T.squad(g, es, a, 2);
+    ui.setTool('air'); ui.clickCell(a);
+    document.querySelector(`[data-action="air-pick"][data-id="${s1.id}"]`).click();
+    T.eq([...ui.air.picked], [s2.id], 'quitado');
+    ui.clickCell(b);
+    T.eq(ui.air.target, b, 'el otro aeródromo es el blanco');
+    T.ok(document.querySelector('[data-action="air-mission"][data-kind="patrol"]'), 'se puede proteger');
+    document.querySelector('[data-action="air-rebase"]').click();
+    T.eq([s1.base, s2.base, ui.air.base], [a, b, b], 'trasladado el elegido');
+    ui.clickCell(a); ui.clickCell(g.nations[T.nation('fr')].capitalCell);
+    T.ok(ui.air.target >= 0, 'blanco');
+    ui.cancel(); T.eq([ui.tool, ui.air.target, ui.air.base], ['air', -1, a], 'Esc: el blanco');
+    ui.cancel(); T.eq([ui.tool, ui.air.base, ui.air.picked.size], ['air', -1, 0], 'Esc: la base');
+    ui.cancel(); T.eq(ui.tool, 'command', 'Esc: la herramienta');
+    return true;
+}],
+['5 · en el mar solo se elige un blanco: sin escuadrones elegidos no hace nada', () => {
+    const g = T.uiStart('es'), es = g.player;
+    T.bare(g);
+    const [, sea] = T.coast(g, es), base = T.baseFor(g, es, sea);
+    T.airfield(g, es, base); T.squad(g, es, base, 1);
+    ui.setTool('air'); ui.clickCell(sea);
+    T.eq([ui.air.base, ui.air.target], [-1, -1], 'nada');
+    ui.clickCell(base); ui.clickCell(sea);
+    T.eq(ui.air.target, sea, 'blanco en el mar');
+    T.ok(document.querySelector('[data-action="air-mission"][data-kind="patrol"]'), 'proteger el mar');
+    return true;
+}],
+['5 · móvil: la ficha de Aviación va en la hoja inferior y no tapa el mapa', () => {
+    const g = T.uiStart('es');
+    T.ok(isMobile(), 'pantalla de móvil');
+    ui.setSheet('media'); ui.setTool('air'); ui.clickCell(g.nations[g.player].capitalCell);
+    const m = T.mobileCard();
+    T.ok(!m.hidden && m.card > 0 && m.card <= m.stage * 0.42, `media: ${JSON.stringify(m)}`);
+    ui.setSheet('mini'); const mini = T.mobileCard().card;
+    ui.setSheet('grande'); const big = T.mobileCard().card;
+    ui.setSheet('media');
+    T.ok(mini <= 90 && big >= m.stage * 0.8, `tamaños de la hoja: ${mini}, ${big} de ${m.stage}`);
+    return true;
 }]
 ];
 
@@ -731,26 +850,57 @@ const exe = process.env.CHROME ?? ['C:/Program Files/Google/Chrome/Application/c
 const browser = await chromium.launch(exe ? { executablePath: exe } : {});
 let failed = 0, ran = 0;
 try {
-    // Las pruebas «M ·» usan el mapa del mundo; el resto, el de Europa.
+    // Las pruebas «M ·» usan el mapa del mundo; las «· móvil», el de Europa en una pantalla de teléfono como la de
+    // smoke-vista; el resto, el de Europa.
+    const PHONE = { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true };
     const pages = new Map();
-    const pageFor = async mapa => {
-        if (pages.has(mapa)) return pages.get(mapa);
-        const page = await browser.newPage();
+    const pageFor = async kind => {
+        if (pages.has(kind)) return pages.get(kind);
+        const page = await browser.newPage(kind === 'movil' ? PHONE : {});
         page.errors = [];
         page.on('pageerror', e => page.errors.push(e.message));
-        await page.goto(`http://localhost:${port}/?seed=7&mapa=${mapa}`);
+        await page.goto(`http://localhost:${port}/?seed=7&mapa=${kind === 'mundo' ? 'mundo' : 'europa'}`);
         await page.waitForFunction(() => typeof GameEngine === 'function' && typeof ui === 'object');
         await page.evaluate(setup);
-        pages.set(mapa, page);
+        pages.set(kind, page);
         return page;
     };
     for (const [name, fn] of CHECKS) {
         if (filter && !name.includes(filter)) continue;
         ran++;
-        const page = await pageFor(name.startsWith('M ·') ? 'mundo' : 'europa');
+        const page = await pageFor(name.startsWith('M ·') ? 'mundo' : name.includes('· móvil') ? 'movil' : 'europa');
         const result = await page.evaluate(`Promise.resolve().then(${fn.toString()}).catch(e => String(e && e.stack || e))`);
         if (result === true) console.log(`ok    ${name}`);
         else { failed++; console.log(`FALLA ${name}\n      ${String(result).split('\n').slice(0, 3).join('\n      ')}`); }
+    }
+    // Capturas de la herramienta Aviación con los escuadrones de la capital elegidos y un blanco: escritorio y móvil.
+    const SHOTS = '5 · capturas de la ficha de Aviación';
+    if (!filter || SHOTS.includes(filter)) {
+        ran++;
+        const out = join(root, 'tools/cache/smoke'), errors = [];
+        mkdirSync(out, { recursive: true });
+        for (const [file, opts] of [['aviacion-ficha', { viewport: { width: 1200, height: 800 } }], ['aviacion-ficha-movil', PHONE]]) {
+            const page = await browser.newPage(opts);
+            page.on('pageerror', e => errors.push(`${file}: ${e.message}`));
+            await page.goto(`http://localhost:${port}/?seed=7&mapa=europa`);
+            await page.waitForFunction(() => typeof GameEngine === 'function' && typeof ui === 'object');
+            await page.evaluate(setup);
+            await page.evaluate(() => {
+                const g = T.uiStart('es'), es = g.player, fr = T.nation('fr'), cap = g.nations[es].capitalCell;
+                g.declareWar(es, fr);
+                const target = PROVINCES.filter(p => g.owner[p.city] === fr && hexDist(cap, p.city) <= g.airRange(es))
+                    .sort((a, b) => hexDist(cap, a.city) - hexDist(cap, b.city))[0].city;
+                g.fort[target] = 2; g.fortVersion++;
+                ui.setTool('air'); ui.clickCell(cap); ui.clickCell(target);
+            });
+            await page.waitForFunction(() => ['ready', 'failed'].includes(ui.view.realistic.state), null, { timeout: 60000 });
+            await page.evaluate(() => new Promise(r => { ui.view.centerOn(ui.air.target, 10); ui.render(); requestAnimationFrame(() => requestAnimationFrame(r)); }));
+            await page.waitForTimeout(400);
+            await page.screenshot({ path: join(out, `${file}.png`) });
+            await page.close();
+        }
+        if (errors.length) { failed++; console.log(`FALLA ${SHOTS}\n      ${errors.join('\n      ')}`); }
+        else console.log(`ok    ${SHOTS} (${join(out, 'aviacion-ficha.png')}, aviacion-ficha-movil.png)`);
     }
     for (const page of pages.values()) if (page.errors.length) { failed++; console.log(`FALLA errores en la página:\n      ${page.errors.join('\n      ')}`); }
 } finally {
