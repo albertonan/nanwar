@@ -133,6 +133,58 @@ const CHECKS = [
     T.eq(g.moveArmy(a, c, r).used, 999, 'turno gastado');
     return true;
 }],
+['2 · un ejército de tierra ataca desde tierra aunque el salto por mar sea más barato', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(es, fr);
+    const nbs = c => [0, 1, 2, 3, 4, 5].map(d => G.nb[c * 6 + d]).filter(j => j >= 0);
+    // Costa c con mar s; enemigo en t, vecina de s y de la tierra l (vecina de c), pero no de c.
+    let set = null;
+    for (const c of G.land) {
+        if (set || g.owner[c] !== es || CITY_OF[c] >= 0 || g.armyAt[c] || !g.inSupply(es, c) || nbs(c).some(j => isLand(j) && g.armyAt[j])) continue;
+        for (const s of nbs(c).filter(j => T.seaFree(g, j))) {
+            const t = nbs(s).find(j => isLand(j) && j !== c && !nbs(c).includes(j) && !g.armyAt[j] && CITY_OF[j] < 0
+                && nbs(c).some(l => isLand(l) && g.owner[l] === es && !g.armyAt[l] && nbs(j).includes(l)));
+            if (t !== undefined) { set = [c, s, t]; break; }
+        }
+    }
+    T.ok(set, 'no hay costa así');
+    const [c, s, t] = set;
+    const a = T.army(g, es, c, 3);
+    T.army(g, fr, t, 1);
+    const r = g.reach(es, c, g.mp(a), true);
+    T.ok(r.exp.get(s)?.hop && r.attacks.has(t), 'el salto y el ataque existen');
+    T.ok(isLand(r.attacks.get(t)), `ataca desde ${r.attacks.get(t)}, que es de mar`);
+    return true;
+}],
+['2 · un ejército rodeado no huye al mar', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(es, fr);
+    const nbs = c => [0, 1, 2, 3, 4, 5].map(d => G.nb[c * 6 + d]).filter(j => j >= 0);
+    // Costa con 3 vecinas de tierra o más, todas libres, y una de mar libre: el enemigo ocupa toda la tierra.
+    const c = G.land.find(c => g.owner[c] === es && CITY_OF[c] < 0 && !g.armyAt[c] && nbs(c).some(j => T.seaFree(g, j))
+        && nbs(c).filter(isLand).length >= 3 && nbs(c).every(j => !isLand(j) || (!g.armyAt[j] && CITY_OF[j] < 0)));
+    T.ok(c !== undefined, 'no hay costa así');
+    const a = T.army(g, es, c, 3);
+    for (const j of nbs(c).filter(isLand)) T.army(g, fr, j, 1);
+    const r = g.reach(es, c, g.mp(a), true);
+    T.ok([...g.destinations(r)].some(afloat), 'el mar es destino');
+    g.flee(a, r);
+    T.ok(isLand(g.armies.get(a.id).cell), 'sigue en tierra');
+    return true;
+}],
+['2 · embarcar sobre un barco propio los une', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    const [c, s] = T.coast(g, es);
+    const a = T.army(g, es, c, 3);
+    T.embark(g, es, s, 2);
+    const r = g.reach(es, c, g.mp(a), true);
+    T.ok(r.term.get(s)?.embark, 'se puede embarcar');
+    g.moveArmy(a, s, r);
+    const at = [...g.armies.values()].filter(x => x.cell === s);
+    T.eq([at.length, countUnits(at[0].units)], [1, 5], 'un solo ejército con las cinco');
+    return true;
+}],
 ['M · cruce corto: de España a Marruecos en un turno, desembarcando', () => {
     const g = T.game(), es = T.nation('es'), ma = T.nation('ma');
     g.start(es); g.declareWar(es, ma);

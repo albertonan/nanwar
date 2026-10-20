@@ -2070,7 +2070,7 @@ class GameEngine {
         if (sides < CONFIG.FLANKED_SIDES) return false;
         let best = -1, bestSides = sides;
         for (const v of this.destinations(r)) {
-            if (this.armyAt[v]) continue;
+            if (this.armyAt[v] || afloat(v)) continue;   // huir al mar sería quedar indefenso
             const n = this.hostileSides(a.owner, v);
             if (n < bestSides) { bestSides = n; best = v; }
         }
@@ -3149,9 +3149,13 @@ class GameEngine {
                 if (v < 0 || !this.armyAt[v]) continue;
                 const o = this.armies.get(this.armyAt[v]).owner;
                 if (o === a || !this.atWar(a, o)) continue;
+                // Desde tierra antes que desde el mar (el asalto anfibio solo si no hay otra); entre iguales, el más barato.
                 const prev = attacks.get(v);
-                const prevCost = prev === undefined ? Infinity : (exp.get(prev) ?? term.get(prev)).cost;
-                if (cost < prevCost) attacks.set(v, from);
+                if (prev !== undefined) {
+                    const better = isLand(prev) !== isLand(from) ? isLand(from) : cost < (exp.get(prev) ?? term.get(prev)).cost;
+                    if (!better) continue;
+                }
+                attacks.set(v, from);
             }
         };
         for (let c = 0; c <= mp; c++) {
