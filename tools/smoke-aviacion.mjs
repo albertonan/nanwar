@@ -1721,6 +1721,130 @@ const CHECKS = [
     T.eq(g.aaReach(es, fr), 8, 'y sube con su Defensa aérea 2');
     return true;
 }],
+['Pend 3 · el botón «Reparar un nivel» se rehace: con el enemigo al lado desaparece y reparar dice por qué no', () => {
+    const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+    T.learn(g, es, 'fortificacion1'); g.nations[es].gold = 1000;
+    const [a, c] = T.plainPair(g, es);
+    g.fort[c] = 1; g.fortVersion++;
+    ui.setTool('fort'); ui.clickCell(c);
+    const plan = ui.fortRepair;
+    T.ok(plan && document.querySelector('[data-action="repair-fort"]'), 'botón');
+    g.declareWar(es, fr); T.army(g, fr, a, 1); ui.render();
+    const bar = document.querySelector('#confirm').textContent;
+    ui.setTool('command');
+    T.ok(!/Reparar un nivel/.test(bar) && /enemigo al lado/.test(bar), `ya no vale, y dice por qué: ${bar}`);
+    T.ok(!g.playerRepairFort(plan) && /No puedes reparar la fortificación de .*: hay un enemigo al lado/.test(g.logs.at(-1).msg), `parte: ${g.logs.at(-1).msg}`);
+    return true;
+}],
+['Pend 4 · la tarjeta solo dice «se repara con Fortificar» si se puede; si no, por qué', () => {
+    const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+    T.learn(g, es, 'fortificacion1');
+    const [a, c] = T.plainPair(g, es);
+    g.fort[c] = 1; g.fortVersion++;
+    T.ok(/Dañada: se repara con Fortificar/.test(T.hover(c)), 'se puede');
+    g.declareWar(es, fr); T.army(g, fr, a, 1);
+    const t = T.hover(c);
+    T.ok(!/se repara con Fortificar/.test(t) && /no se puede reparar: hay un enemigo al lado/.test(t), `con el enemigo al lado: ${t}`);
+    return true;
+}],
+['Pend 5 · solo repara su dueño legal: la tierra ocupada no', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.learn(g, fr, 'fortificacion1'); g.nations[fr].gold = 5000;
+    const [, c] = T.plainPair(g, es);
+    g.fort[c] = 1; g.owner[c] = fr; g.version++; g.fortVersion++;
+    T.eq([g.legal[c], g.fortRepairPlan(fr, c)], [es, null], 'ocupada');
+    g.aiRepairForts(fr, 5000);
+    T.ok(!g.fortWork.has(c), 'la IA no la repara');
+    g.legal[c] = fr;
+    T.ok(g.fortRepairPlan(fr, c), 'ya suya, sí');
+    return true;
+}],
+['Pend 6 · la nota de Búnkeres habla del nivel de cada casilla', () => {
+    const t = TECHS.find(x => x.id === 'fortificacion2');
+    T.ok(!/según tus reglas/.test(t.note) && /nivel/.test(t.note), t.note);
+    return true;
+}],
+['Pend 7 · las bajas de un ataque a un ejército salen de strikeLoss, en el motor y en la previsión', () => {
+    const g = T.uiStart('es'), es = g.player, fr = T.nation('fr'), A = CONFIG.AIR;
+    g.declareWar(es, fr); T.bare(g);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const sq = T.squad(g, es, base, 2);
+    if (g.armyOn(target)) g.removeArmy(g.armyOn(target));
+    const a = T.army(g, fr, target, 30), n = 30;
+    T.eq([g.strikeLoss(es, a, 0), g.strikeLoss(es, a, 0.5), g.strikeLoss(es, a, 1)],
+        [0, 0.5, 1].map(x => Math.min(n, Math.max(1, Math.round(n * (A.STRIKE + A.STRIKE_RAND * x) * g.rules(es).airDamage)))), 'fórmula');
+    g.strikeLoss = () => 7;
+    try {
+        ui.setTool('air'); ui.clickCell(base); ui.clickCell(target);
+        T.ok(/le quitarías unas 7 unidades/.test(document.querySelector('#card').textContent), 'la previsión la usa');
+        T.luck(g, 0.99); g.airMission(es, sq.map(q => q.id), 'army', target);
+        T.eq(countUnits(a.units), 23, 'el ataque la usa');
+    } finally { delete g.strikeLoss; ui.setTool('command'); }
+    return true;
+}],
+['Pend 8 · un escuadrón dañado sin haber volado sale «Dañado», también tras guardar', () => {
+    const g = T.uiStart('es'), es = g.player, cap = g.nations[es].capitalCell;
+    const q = g.squadronsAt(cap).sort((x, y) => x.id - y.id)[0];
+    T.eq(q.flown, 0, 'no ha volado nunca');
+    g.damageSquadron(q);
+    ui.setTool('air'); ui.clickCell(cap);
+    const row = document.querySelector(`[data-action="air-pick"][data-id="${q.id}"]`).textContent;
+    ui.setTool('command');
+    T.ok(/Dañado: vuelve a volar el turno/.test(row) && !/Nuevo/.test(row), row);
+    const data = JSON.parse(JSON.stringify(g.serialize()));
+    T.eq(GameEngine.load(data).squadrons.get(q.id).damaged, true, 'se guarda');
+    for (const x of data.air.sq) x.length = 9;   // una partida de antes
+    T.eq(GameEngine.load(data).squadrons.get(q.id).damaged, false, 'las de antes, no');
+    g.turn = q.ready; g.airTurn(es);
+    T.eq(q.damaged, false, 'listo otra vez');
+    return true;
+}],
+['Pend 9 · la previsión de un ataque con parte de un ejército desorganizado lo cuenta, como la batalla', () => {
+    const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+    g.declareWar(es, fr);
+    const [from, c] = T.plainPair(g, es);
+    const mine = T.army(g, es, from, 4); mine.disorgUntil = g.turn + 1;
+    const foe = T.army(g, fr, c, 1);
+    ui.select(from); ui.send = { ...ui.send, infantry: 2 };
+    ui.reachInfo = { attacks: new Set([c]), moves: new Set(), from: new Map([[c, from]]) };
+    const t = T.hover(c);
+    T.ok(/Tu ataque \d+ \([^)]*desorganizado ×0,8/.test(t), t);
+    const part = g.split(mine, ui.send), fx = g.combatFactors(es, part.units, from, foe, c, part.id);
+    T.ok(t.includes(`Tu ataque ${Math.round(fx.atk)} `), `el mismo que la batalla (${Math.round(fx.atk)}): ${t}`);
+    return true;
+}],
+['Pend 10 · createOp se queda solo con los fines que existen', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(es, fr);
+    const [from, to] = T.pair(g, es, fr);
+    T.eq(g.createOp(es, 'ofensiva', [from, to], { aims: ['army', 'nada', 'army', '__proto__', 7, 'roads'] }).aims, ['army', 'roads'], 'filtrados');
+    T.eq(g.createOp(es, 'ofensiva', [from, to], { aims: 'army' }).aims, OP_AIM_DEFAULT.ofensiva, 'si no es una lista, los de serie');
+    return true;
+}],
+['Pend 11 · la reserva no manda escuadrones a una operación en manual', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const [s] = T.squad(g, es, base, 1);
+    const off = g.createOp(es, 'ofensiva', [base, target], { auto: 'manual' });
+    const res = g.createOp(es, 'reserva', [base], { auto: 'auto' }); g.assignSquadron(s, res.id);
+    g.executeOps(es, [res.id]); T.eq(s.op, res.id, 'en manual no vuela: se queda en la reserva');
+    off.auto = 'auto'; g.turn++;
+    g.executeOps(es, [res.id]); T.eq(s.op, off.id, 'en automático, sí');
+    return true;
+}],
+['Pend 12 · al eliminar un país se borran sus satélites', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+    g.start(es); g.declareWar(es, pt);
+    for (const id of [fr, pt]) { T.learn(g, id, 'espacio1'); g.nations[id].gold = 1e6; g.launchSat(id, g.nations[es].capitalCell); }
+    for (const c of G.land) if (g.owner[c] === pt) g.owner[c] = es;
+    g.version++; g.checkElimination(pt, es);
+    T.eq([g.nations[pt].alive, g.sats.map(s => s.owner)], [false, [fr]], 'solo quedan los de Francia');
+    const data = JSON.parse(JSON.stringify(g.serialize()));
+    data.air.sats.push([pt, 10, 3]);
+    T.eq(GameEngine.load(data).sats.map(s => s.owner), [fr], 'al cargar tampoco');
+    return true;
+}],
 ['M · con seis guerras, la fase de la IA con aviación tarda como mucho 1,25 veces lo mismo sin ella', () => {
     const run = bare => {
         const g = T.game(11); g.start(T.nation('us'));

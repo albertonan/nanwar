@@ -856,7 +856,7 @@ const TECH_TREE = {
     ],
     fortificacion: [
         ['Hormigón armado', { fortDefense: 2, fortTurns: 2 }, [['Defensa en casilla fortificada', '×1,75', '×2'], ['Turnos de obra', '3', '2']], 'En montaña o en una capital ya pasa del tope ×3: por eso el nivel 2 lo sube.'],
-        ['Búnkeres', { fortCap: 3.5, wallCost: 2 * MOVE }, [['Tope de defensa si está fortificada', '×3', '×3,5'], ['Cruzar tu muro (el enemigo)', '+1 punto', '+2 puntos']], 'El coste del muro lo pagan los demás según tus reglas.'],
+        ['Búnkeres', { fortCap: 3.5, wallCost: 2 * MOVE }, [['Tope de defensa si está fortificada', '×3', '×3,5'], ['Cruzar tu muro (el enemigo)', '+1 punto', '+2 puntos']], 'Cruzar un muro cuesta según el nivel de esa casilla: uno dañado por debajo de búnkeres vuelve a costar 1 punto.'],
         ['Casamatas', { fortFlankImmune: true, fortCost: 25 }, [['Rodeado en tu fortificación', '×0,75 / ×0,5', '×1'], ['Oro por casilla fortificada', '40', '25']], 'Una línea fortificada aguanta aunque la envuelvan.']
     ],
     reconocimiento: [
@@ -1164,7 +1164,7 @@ class GameEngine {
             this.settle(this.newArmy(p.country, p.city, units, 0));
         }
         // Aviación: escuadrones con base en un aeródromo (4 como mucho en cada uno) y la que tenía cada país en 2024.
-        this.squadrons = new Map();   // id → { id, owner, base, ready, flown, patrol, op, task }
+        this.squadrons = new Map();   // id → { id, owner, base, ready, flown, patrol, op, task, damaged }
         this.nextSquadronId = 1;
         this.airfields = new Map();   // casilla → { owner, left, downUntil }: left, turnos de obra; downUntil, inservible hasta
         this.aaSites = new Map();     // casilla → { owner, left, hits, known }: antiaéreo fijo; known, quién lo conoce
@@ -1236,7 +1236,7 @@ class GameEngine {
             orders: [...this.armies.values()].filter(a => a.order).map(a => [a.id, a.order.kind, a.order.dest, a.order.target, a.order.ratio, a.order.flee ? 1 : 0, a.order.since, a.order.stuck]),
             blocs: this.blocs.map(b => ({ id: b.id, name: b.name, founder: b.founder, secret: b.secret, since: b.since, members: [...b.members] })),
             nextBlocId: this.nextBlocId,
-            air: { sq: [...this.squadrons.values()].map(q => [q.id, q.owner, q.base, q.ready, q.flown, q.patrol, q.op, q.task ? q.task.cell : -1, q.task ? q.task.aims : []]), nextSq: this.nextSquadronId,
+            air: { sq: [...this.squadrons.values()].map(q => [q.id, q.owner, q.base, q.ready, q.flown, q.patrol, q.op, q.task ? q.task.cell : -1, q.task ? q.task.aims : [], q.damaged ? 1 : 0]), nextSq: this.nextSquadronId,
                 fields: [...this.airfields].map(([c, f]) => [c, f.owner, f.left, f.downUntil]),
                 aa: [...this.aaSites].map(([c, s]) => [c, s.owner, s.left, s.hits, [...s.known]]),
                 hits: [...this.airHits].filter(([, t]) => t === this.turn).map(([k]) => k),
@@ -1452,7 +1452,7 @@ class GameEngine {
                 if (!id || g.squadrons.has(id) || g.airfields.get(base)?.owner !== owner || (based.get(base) ?? 0) >= CONFIG.AIR.PER_AIRFIELD) continue;
                 based.set(base, (based.get(base) ?? 0) + 1);
                 const sq = { id, owner, base, ready: int(x?.[3], 0, 1e6, 0), flown: int(x?.[4], 0, 1e6, 0), patrol: int(x?.[5], -1, G.N - 1, -1),
-                    op: op && op.owner === owner ? op.id : 0, task: null };
+                    op: op && op.owner === owner ? op.id : 0, task: null, damaged: x?.[9] === 1 };   // las de antes no traen el 9: no dañado
                 if (!sq.op) g.setAirTask(sq, int(x?.[7], -1, G.N - 1, -1) >= 0 ? { cell: int(x[7], 0, G.N - 1, 0), aims: list(x?.[8]).slice(0, 8) } : null);
                 g.squadrons.set(id, sq);
             }
@@ -1469,7 +1469,7 @@ class GameEngine {
             // Satélites: en una casilla del mapa y con los turnos que dura uno de su dueño como mucho.
             for (const x of list(data.air.sats)) {
                 const owner = nat(x?.[0]), c = int(x?.[1], -1, G.N - 1, -1);
-                if (c >= 0) g.sats.push({ owner, cell: c, left: int(x?.[2], 1, g.rules(owner).satTurns, 1) });
+                if (c >= 0 && g.nations[owner].alive) g.sats.push({ owner, cell: c, left: int(x?.[2], 1, g.rules(owner).satTurns, 1) });   // los de un país eliminado, no
             }
         } else g.seedAir();
         g.airVersion++;
@@ -1859,11 +1859,22 @@ class GameEngine {
     }
     // Nivel de una fortificación nueva de `id`: 1 (sacos terreros) más su nivel de Fortificación.
     fortMax(id) { return 1 + this.techLevel(id, 'fortificacion'); }
-    // Reparar una fortificación dañada de `id`: sube un nivel por obra y cuesta la mitad de fortificar. Solo si es suya,
-    // está por debajo de su máximo, no tiene obra y no hay enemigos al lado.
+    // Reparar una fortificación dañada de `id`: sube un nivel por obra y cuesta la mitad de fortificar. Solo si es suya
+    // (también su dueño legal: la tierra ocupada no se repara), está por debajo de su máximo, no tiene obra y no hay
+    // enemigos al lado.
     fortRepairPlan(id, cell) {
-        if (cell < 0 || this.owner[cell] !== id || !this.fort[cell] || this.fort[cell] >= this.fortMax(id) || this.fortWork.has(cell) || this.repairBlocked(id, cell, cell)) return null;
+        if (this.fortRepairWhy(id, cell)) return null;
         return { cell, cost: Math.round(this.rules(id).fortCost / 2), cls: 'fortRepair' };
+    }
+    // Por qué `id` no puede reparar la fortificación de `cell`, en pocas palabras ('' si puede).
+    fortRepairWhy(id, cell) {
+        if (cell < 0 || this.owner[cell] !== id) return 'no es tuya';
+        if (this.legal[cell] !== id) return 'es tierra ocupada';
+        if (!this.fort[cell]) return 'no hay fortificación';
+        if (this.fort[cell] >= this.fortMax(id)) return 'está intacta';
+        if (this.fortWork.has(cell)) return 'ya está en obra';
+        if (this.repairBlocked(id, cell, cell)) return 'hay un enemigo al lado';
+        return '';
     }
     startFortRepair(id, plan) {
         const n = this.nations[id], p = plan ? this.fortRepairPlan(id, plan.cell) : null;
@@ -1875,6 +1886,8 @@ class GameEngine {
     }
     playerRepairFort(plan) {
         if (this.over || !plan) return false;
+        const why = this.fortRepairWhy(this.player, plan.cell);   // el plan puede haber dejado de valer
+        if (why) { this.log(`No puedes reparar la fortificación de ${this.placeName(plan.cell)}: ${why}.`); return false; }
         if (plan.cost > this.nations[this.player].gold) { this.log(`Fondos insuficientes: la reparación cuesta ${plan.cost}g.`); return false; }
         if (!this.startFortRepair(this.player, plan)) return false;
         this.log(`Reparas la fortificación de ${this.placeName(plan.cell)} por ${plan.cost} de oro.`);
@@ -1905,7 +1918,7 @@ class GameEngine {
     // Radio de acción de los escuadrones de `id`, en casillas.
     airRange(id) { return kmCells(this.rules(id).airRangeKm); }
     newSquadron(owner, base, ready = 0) {
-        const sq = { id: this.nextSquadronId++, owner, base, ready, flown: 0, patrol: -1, op: 0, task: null };
+        const sq = { id: this.nextSquadronId++, owner, base, ready, flown: 0, patrol: -1, op: 0, task: null, damaged: false };
         this.squadrons.set(sq.id, sq);
         this.airVersion++;
         return sq;
@@ -2026,8 +2039,9 @@ class GameEngine {
             this.log(`Pierdes el aeródromo de ${this.placeName(c)}${parts.length ? `: ${parts.join(' y ')}` : ''}.`);
         }
     }
-    // Al empezar el turno de `id`: avanzan sus obras de aeródromo y de antiaéreo, sus escuadrones dejan de patrullar y sus
-    // satélites gastan un turno. Se olvidan los aciertos y lo desvelado de turnos pasados.
+    // Al empezar el turno de `id`: avanzan sus obras de aeródromo y de antiaéreo, sus escuadrones dejan de patrullar (y los
+    // dañados que ya pueden volar dejan de contar como dañados) y sus satélites gastan un turno. Se olvidan los aciertos y
+    // lo desvelado de turnos pasados.
     airTurn(id) {
         for (const [c, f] of this.airfields) {
             if (f.owner !== id || f.left <= 0) continue;
@@ -2039,7 +2053,11 @@ class GameEngine {
             if (--s.left === 0 && id === this.player) this.log(`Antiaéreo terminado en ${this.placeName(c)}.`);
             this.airVersion++;
         }
-        for (const q of this.squadrons.values()) if (q.owner === id && q.patrol >= 0) { q.patrol = -1; this.airVersion++; }
+        for (const q of this.squadrons.values()) {
+            if (q.owner !== id) continue;
+            if (q.patrol >= 0) { q.patrol = -1; this.airVersion++; }
+            if (q.damaged && this.turn >= q.ready) { q.damaged = false; this.airVersion++; }   // reparado
+        }
         // Sus satélites gastan un turno; el que llega a 0 deja de transmitir.
         for (const s of this.sats) {
             if (s.owner !== id) continue;
@@ -2353,8 +2371,10 @@ class GameEngine {
         return { why, hit: (1 - o.fail) * (known ? 1 : this.rules(owner).blindHit), down: o.down, damaged: o.damaged, known, get unknown() { return c.unknown; },
             fire: c.seen.fire, loss: c.seen.loss, power, patrol };
     }
-    // Un escuadrón vuelve dañado: no vuela hasta pasado el próximo turno de su dueño, y deja de proteger su casilla.
+    // Un escuadrón vuelve dañado: no vuela hasta pasado el próximo turno de su dueño, y deja de proteger su casilla. Queda
+    // marcado como dañado hasta que vuelve a estar listo (en airTurn).
     damageSquadron(q) {
+        q.damaged = true;
         q.ready = Math.max(q.ready, this.nextOwnTurn(q.owner) + 1);
         q.patrol = -1;
         this.airVersion++;
@@ -2383,13 +2403,18 @@ class GameEngine {
         this.fortVersion++;
         return this.fort[cell] ? `baja a ${FORT_LEVELS[this.fort[cell] - 1]}` : 'desaparece';
     }
+    // Unidades que pierde el ejército `a` con un acierto de `owner`: del 10 al 15 % (más con Munición guiada), al menos una,
+    // y el doble si está embarcado. `rand` (0 a 1) es la tirada; la previsión usa la media, 0,5.
+    strikeLoss(owner, a, rand) {
+        const A = CONFIG.AIR, n = countUnits(a.units);
+        return Math.min(n, Math.max(1, Math.round(n * (A.STRIKE + A.STRIKE_RAND * rand) * this.rules(owner).airDamage * (afloat(a.cell) ? A.SEA_STRIKE : 1))));
+    }
     // Lo que hace un acierto de `owner` en `cell`; devuelve cómo lo cuenta el parte.
     airEffect(owner, kind, cell, src) {
         const A = CONFIG.AIR;
         switch (kind) {
             case 'army': {   // primero caen tanques, artillería y antiaéreas; el doble a un ejército embarcado
-                const a = this.armyOn(cell), n = countUnits(a.units);
-                const lost = Math.min(n, Math.max(1, Math.round(n * (A.STRIKE + A.STRIKE_RAND * this.rng()) * this.rules(owner).airDamage * (afloat(cell) ? A.SEA_STRIKE : 1))));
+                const a = this.armyOn(cell), lost = this.strikeLoss(owner, a, this.rng());
                 let k = lost;
                 for (const t of ['tank', 'artillery', 'antiair', 'infantry']) {
                     if (!a.units[t]) continue;
@@ -2854,8 +2879,9 @@ class GameEngine {
     }
     // Lo que pesa la situación de un ejército en su ataque y su defensa: rodeado o cercado, aislado y, en territorio
     // enemigo, sin carretera al alcance; y, también en el mar, desorganizado por un ataque aéreo (el del ejército
-    // `selfId`). Cada parte es [nombre, factor] y `mult` es su producto.
-    armyState(owner, cell, units, selfId = 0) {
+    // `selfId` o, si se manda solo una parte de un ejército, el de `fromId`, del que sale). Cada parte es [nombre, factor]
+    // y `mult` es su producto.
+    armyState(owner, cell, units, selfId = 0, fromId = selfId) {
         const parts = [];
         if (!afloat(cell)) {   // en el mar no hay rodeo, aislamiento ni carretera
             const flank = this.flankFactor(owner, cell);
@@ -2863,7 +2889,7 @@ class GameEngine {
             if (this.isolated(owner, cell, selfId)) parts.push(['aislado', CONFIG.ISOLATED_FACTOR]);
             if (this.atWar(owner, this.legal[cell]) && !this.roadInReach(owner, cell, units)) parts.push(['sin carretera', CONFIG.NO_ROAD_FACTOR]);
         }
-        const self = selfId ? this.armies.get(selfId) : null;
+        const self = fromId ? this.armies.get(fromId) : null;
         if (self && this.turn <= self.disorgUntil) parts.push(['desorganizado', CONFIG.AIR.DISORG]);
         return { mult: parts.reduce((m, [, x]) => m * x, 1), parts };
     }
@@ -3454,7 +3480,7 @@ class GameEngine {
         const op = { id: this.nextOpId++, owner, kind, name, cells: kind === 'ofensiva' ? cells : [...new Set(cells)],
             ratio: opts.ratio ?? (kind === 'defensa' ? 1.8 : POSTURES[this.nations[owner].command.posture].ratio), auto: opts.auto ?? 'auto', paused: false, fortify: !!opts.fortify,
             since: this.turn, waiting: 0, uncovered: 0, drawn: kind === 'defensa' ? [...new Set(cells)] : null, state: 'aguanta', rel: null, gold: OP_GOLD.includes(opts.gold) ? opts.gold : 0, template: opts.template ?? 'auto', pool: 0, formed: 0, form: null,
-            aims: [...(opts.aims ?? OP_AIM_DEFAULT[kind])] };
+            aims: Array.isArray(opts.aims) ? [...new Set(opts.aims.filter(k => Object.hasOwn(OP_AIMS, k)))] : [...OP_AIM_DEFAULT[kind]] };   // solo fines que existen
         this.ops.set(op.id, op);
         this.orderVersion++;
         return op;
@@ -3601,11 +3627,12 @@ class GameEngine {
                     tally.sent.push(o.name);
                     this.orderVersion++;
                 }
-                // Y escuadrones, en el mismo orden: uno a cada operación con fines que tenga su punto clave a su alcance.
+                // Y escuadrones, en el mismo orden: uno a cada operación con fines que tenga su punto clave a su alcance (no a
+                // las que van en manual, donde no vuelan).
                 const R = this.airRange(id), wings = [...this.squadrons.values()].filter(q => q.op === op.id && q.owner === id).sort((x, y) => x.id - y.id);
                 for (const [o] of needy) {
                     if (!wings.length) break;
-                    const key = this.opKey(o), i = o.aims?.length ? wings.findIndex(q => hexDist(q.base, key) <= R) : -1;
+                    const key = this.opKey(o), i = o.aims?.length && o.auto !== 'manual' ? wings.findIndex(q => hexDist(q.base, key) <= R) : -1;
                     if (i < 0) continue;
                     wings.splice(i, 1)[0].op = o.id;
                     tally.sentAir.push(o.name);
@@ -4397,8 +4424,10 @@ class GameEngine {
     }
 
     // Factores de un combate, sin azar: sirven para resolverlo, preverlo y explicarlo.
-    // `attId` es el ejército que ataca, para no contarlo como su propio apoyo; `def.id`, el que defiende.
-    combatFactors(attOwner, attUnits, fromCell, def, cell, attId = 0) {
+    // `attId` es el ejército que ataca, para no contarlo como su propio apoyo; `def.id`, el que defiende. Para prever el
+    // ataque de una parte de un ejército (attId 0: el resto se queda y sí apoya), `attFrom` es ese ejército, del que la
+    // parte se lleva la desorganización, como en split.
+    combatFactors(attOwner, attUnits, fromCell, def, cell, attId = 0, attFrom = attId) {
         const sea = afloat(cell), ra = this.rules(attOwner), rd = this.rules(def.owner);
         const terrain = sea ? null : terrainOf(cell), d = G.dirTo(fromCell, cell);
         const parts = [];
@@ -4412,7 +4441,7 @@ class GameEngine {
         const raw = parts.reduce((m, [, x]) => m * x, 1);
         const cap = fx ? fx.fortCap : CONFIG.MAX_DEFENSE_BONUS;
         const bonus = Math.min(raw, cap);
-        const attState = this.armyState(attOwner, fromCell, attUnits, attId);
+        const attState = this.armyState(attOwner, fromCell, attUnits, attId, attFrom);
         const defState = this.armyState(def.owner, cell, def.units, def.id ?? 0);
         const baseAtk = unitPower(attUnits, 'atk', ra), baseDef = unitPower(def.units, 'def', rd);
         // Desde un barco se ataca con asalto anfibio; un ejército en el mar solo cuenta con el casco (sin terreno ni tope).
@@ -4597,6 +4626,7 @@ class GameEngine {
         this.blocsChanged();
         for (const a of [...this.armies.values()]) if (a.owner === id) this.removeArmy(a);
         for (const op of this.opsOf(id)) this.endOp(op);
+        if (this.sats.some(s => s.owner === id)) { this.sats = this.sats.filter(s => s.owner !== id); this.airVersion++; }   // sin nadie que los use
         for (const o of this.nations) if (o.id !== id) Object.assign(this.rel(id, o.id), { state: 'paz' });
         this.warVersion++;
         for (const b of this.blocsOf(id)) this.leaveBloc(b, id);
@@ -7581,7 +7611,10 @@ class GameUI {
             const lv = g.fortLevel(g.player, cell), w = g.fortWork.get(cell);
             lines.push(lv === null ? 'Fortificada (no sabes de qué nivel)' : `Fortificada con ${FORT_LEVELS[lv]}: defensa ×${decimal(FORT_FX[g.fort[cell]].fortDefense)}`);
             if (w?.up && lv !== null) lines.push(`Reparando la fortificación: ${plural(w.left, 'turno', 'turnos')}`);
-            else if (g.owner[cell] === g.player && g.fort[cell] < g.fortMax(g.player)) lines.push('<span class="muted">Dañada: se repara con Fortificar</span>');
+            else if (g.owner[cell] === g.player && g.fort[cell] < g.fortMax(g.player)) {   // dañada: si se puede reparar ahora y, si no, por qué
+                const why = g.fortRepairWhy(g.player, cell);
+                lines.push(`<span class="muted">Dañada: ${why ? `no se puede reparar: ${why}` : 'se repara con Fortificar'}</span>`);
+            }
         }
         else if (g.fortWork.has(cell)) lines.push(`Fortificando: ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}`);
         if (!sea) lines.push(...this.airLines(cell));
@@ -7601,7 +7634,7 @@ class GameUI {
             lines.push('<span class="muted">Sin Reconocimiento 2 ni un espía en la provincia no hay previsión del combate.</span>');
         } else if (this.reachInfo?.attacks.has(cell) && a) {
             const mine = this.selectedArmy();
-            const fx = g.combatFactors(g.player, this.send, this.reachInfo.from.get(cell) ?? mine.cell, a, cell, sameUnits(this.send, mine.units) ? mine.id : 0);
+            const fx = g.combatFactors(g.player, this.send, this.reachInfo.from.get(cell) ?? mine.cell, a, cell, sameUnits(this.send, mine.units) ? mine.id : 0, mine.id);
             // Lo que no puedes saber (aislado bajo la niebla) no entra ni en las partes ni en la cuenta de la previsión.
             const defParts = this.isolationHidden(a) ? fx.defState.parts.filter(([k]) => k !== 'aislado') : fx.defState.parts;
             const dfn = defParts === fx.defState.parts ? fx.dfn : Math.max(0.5, fx.baseDef * fx.bonus * defParts.reduce((m, [, x]) => m * x, 1));
@@ -7898,8 +7931,8 @@ class GameUI {
         const g = this.game;
         if (q.patrol >= 0) return `Protege ${esc(g.placeName(q.patrol))}`;
         if (!g.airfieldUp(q.base)) return 'Su aeródromo no está en servicio';
-        // Uno recién comprado aún no ha volado nunca; uno que no vuela hasta otro turno y ya voló, vuelve dañado.
-        if (g.turn < q.ready) return q.flown ? `Dañado: vuelve a volar el turno ${q.ready}` : `Nuevo: vuela a partir del turno ${q.ready}`;
+        // Uno que no vuela hasta otro turno: dañado (en una misión o en un combate aéreo) o recién comprado.
+        if (g.turn < q.ready) return q.damaged ? `Dañado: vuelve a volar el turno ${q.ready}` : `Nuevo: vuela a partir del turno ${q.ready}`;
         return q.flown === g.turn ? 'Ya ha volado' : 'Listo';
     }
     // El encargo de un escuadrón, en pocas palabras ('' si no tiene).
@@ -7979,8 +8012,7 @@ class GameUI {
                 const lost = fly.length * o.down, a = kind === 'army' ? g.armyOn(c) : null;
                 strikes++;
                 // Las bajas que haría, solo contra un ejército identificado (el mismo límite que la previsión de combate).
-                const k = a && g.armyView(p0, a).n !== null
-                    ? Math.min(countUnits(a.units), Math.max(1, Math.round(countUnits(a.units) * (CONFIG.AIR.STRIKE + CONFIG.AIR.STRIKE_RAND / 2) * r.airDamage * (afloat(c) ? CONFIG.AIR.SEA_STRIKE : 1)))) : 0;
+                const k = a && g.armyView(p0, a).n !== null ? g.strikeLoss(p0, a, 0.5) : 0;
                 what = `<span class="small" title="Cada escuadrón: ${pct(o.down)} % de que lo derriben y ${pct(o.damaged)} % de que vuelva dañado">${pct(o.hit)} % de acierto, ${lost >= 0.5 ? `pierdes unos ${Math.round(lost)}` : 'casi sin pérdidas'}${k ? `; le quitarías ${k === 1 ? 'una unidad' : `unas ${k} unidades`}` : ''}</span>`;
                 if (!o.known) warn.add(`A ciegas: rinde ${r.blindHit === 0.5 ? 'la mitad' : `el ${pct(r.blindHit)} %`}. Con la casilla a la vista y Reconocimiento 2 o un espía, acertarías más.`);
                 if (o.unknown) warn.add('Puede haber antiaéreo que no conoces.');
@@ -9146,15 +9178,22 @@ class GameUI {
         }
         if (this.tool === 'road' && g.player !== null && !g.over) { this.renderRoadBar(el); return; }
         if (!plan || g.player === null) {
-            // Una fortificación propia dañada elegida con Fortificar: repararla un nivel.
-            const fr = this.tool === 'fort' && g.player !== null && !g.over ? this.fortRepair : null;
+            // Una fortificación propia dañada elegida con Fortificar: repararla un nivel. El plan se rehace en cada dibujo:
+            // tras los turnos de la IA puede haber dejado de valer (un enemigo al lado) y entonces se dice por qué.
+            const cell = this.tool === 'fort' && g.player !== null && !g.over && this.fortRepair ? this.fortRepair.cell : -1;
+            const fr = cell >= 0 ? g.fortRepairPlan(g.player, cell) : null;
+            const damaged = cell >= 0 && g.owner[cell] === g.player && g.fort[cell] > 0 && g.fort[cell] < g.fortMax(g.player);
+            const why = !fr && damaged ? g.fortRepairWhy(g.player, cell) : '';
+            if (cell >= 0) this.fortRepair = fr ?? (why ? this.fortRepair : null);
             // Con el dedo, mientras se construye, un botón visible para terminar (no hay clic derecho ni Esc).
             const stop = this.touch && ['road', 'fort'].includes(this.tool) && g.player !== null;
-            el.hidden = !fr && !stop;
+            el.hidden = !fr && !why && !stop;
             if (el.hidden) { el.innerHTML = ''; return; }
             const r = this.myRules(), frOk = fr && fr.cost <= g.nations[g.player].gold;
-            el.innerHTML = `${fr ? `<span class="small">Fortificación dañada: ${FORT_LEVELS[g.fort[fr.cell] - 1]}; las tuyas nuevas son de ${FORT_LEVELS[g.fortMax(g.player) - 1]}.</span>
+            const state = cell >= 0 ? `Fortificación dañada: ${FORT_LEVELS[g.fort[cell] - 1]}; las tuyas nuevas son de ${FORT_LEVELS[g.fortMax(g.player) - 1]}` : '';
+            el.innerHTML = `${fr ? `<span class="small">${state}.</span>
                 <button class="btn primary" data-action="repair-fort" ${frOk ? '' : 'disabled'} title="Cuesta la mitad que fortificar">Reparar un nivel (${fr.cost} de oro, ${plural(r.fortTurns, 'turno', 'turnos')})</button>`
+                : why ? `<span class="small">${state}. Ahora no se puede reparar: ${why}.</span>`
                 : `<span class="small">${this.anchor < 0 ? 'Toca una casilla tuya para empezar' : 'Toca dónde termina la obra'}</span>`}
                 ${stop ? '<button class="btn" data-action="stop-build">Terminar obras</button>' : ''}`;
             return;
