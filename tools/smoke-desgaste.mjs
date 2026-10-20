@@ -189,7 +189,73 @@ const CHECKS = [
     const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
     T.eq([...h.roadWork], [...g.roadWork], 'misma obra');
     return true;
-}]
+}],
+['A3 · cercado en tierra ocupada pierde una infantería cada 3 turnos; con Sanidad militar, cada 4', () => {
+    const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+    g.start(es); g.declareWar(es, pt);
+    const [, c] = T.plainPair(g, es);
+    T.pocket(g, es, pt, c);
+    const a = T.army(g, es, c, 2, 1);
+    T.ok(g.starving(es, c), 'pasa hambre');
+    for (let i = 0; i < 3; i++) g.beginNationTurn(es);
+    T.eq([a.units.infantry, a.units.tank], [1, 1], 'pierde primero infantería');
+    T.learn(g, es, 'doctrina3');
+    for (let i = 0; i < 3; i++) g.beginNationTurn(es);
+    T.eq(a.units.infantry, 1, 'aún no con Sanidad militar');
+    g.beginNationTurn(es);
+    T.eq(a.units.infantry, 0, 'al cuarto');
+    return true;
+}],
+['A3 · un ejército de una unidad que pasa hambre desaparece limpio', () => {
+    const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+    g.start(es); g.declareWar(es, pt);
+    const [, c] = T.plainPair(g, es);
+    T.pocket(g, es, pt, c);
+    const a = T.army(g, es, c, 1);
+    for (let i = 0; i < 3; i++) g.beginNationTurn(es);
+    T.eq([g.armies.has(a.id), g.armyAt[c]], [false, 0], 'sin ejército ni rastro');
+    return true;
+}],
+['A3 · en la costa, el mar también cerca; con una vecina propia, no hay hambre y el contador vuelve a 0', () => {
+    const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+    g.start(es); g.declareWar(es, pt);
+    const coast = G.land.find(c => g.owner[c] === es && CITY_OF[c] < 0 && !g.armyAt[c] && [0, 1, 2, 3, 4, 5].some(d => G.nb[c * 6 + d] >= 0 && !isLand(G.nb[c * 6 + d])));
+    T.pocket(g, es, pt, coast);
+    const a = T.army(g, es, coast, 3);
+    T.ok(g.starving(es, coast), 'costa cercada');
+    g.beginNationTurn(es);
+    T.eq(a.hunger, 1, 'cuenta');
+    const j = [0, 1, 2, 3, 4, 5].map(d => G.nb[coast * 6 + d]).find(x => x >= 0 && isLand(x));
+    g.owner[j] = es; g.version++;
+    g.beginNationTurn(es);
+    T.eq([g.starving(es, coast), a.hunger], [false, 0], 'se rompe el cerco');
+    return true;
+}],
+['A3 · un cerco de vecinas en paz no pasa hambre', () => {
+    const g = T.game(), es = T.nation('es'), pt = T.nation('pt'), fr = T.nation('fr');
+    g.start(es); g.declareWar(es, pt);
+    const [, c] = T.plainPair(g, es);
+    T.pocket(g, es, fr, c);
+    T.ok(!g.starving(es, c), 'dueño legal en paz: no no hay hambre');
+    g.legal[c] = pt; g.version++;   // dueño legal en guerra: solo las vecinas (de Francia, en paz) lo salvan
+    const a = T.army(g, es, c, 2);
+    T.ok(!g.starving(es, c), 'vecinas en paz: no hay hambre');
+    for (let i = 0; i < 4; i++) g.beginNationTurn(es);
+    T.eq([a.hunger, a.units.infantry], [0, 2], 'sin contar ni perder');
+    return true;
+}],
+['A3 · el hambre se guarda', () => {
+    const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+    g.start(es); g.declareWar(es, pt);
+    const [, c] = T.plainPair(g, es);
+    T.pocket(g, es, pt, c);
+    const a = T.army(g, es, c, 3);
+    g.beginNationTurn(es); g.beginNationTurn(es);
+    const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+    T.eq(h.armies.get(a.id).hunger, 2, 'dos turnos de hambre');
+    return true;
+}],
+
 ];
 
 const exe = process.env.CHROME ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome'].find(existsSync);
