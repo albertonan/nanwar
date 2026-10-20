@@ -572,6 +572,8 @@ const CONFIG = {
     SURROUNDED_SIDES: 5,            // con 5 o más lados: cercado...
     SURROUNDED_FACTOR: 0.5,         // ... ataque y defensa a la mitad y solo avanza una casilla
     HUNGER_TURNS: 3,                // turnos seguidos cercado en tierra ocupada para perder una unidad por hambre
+    ISOLATED_FACTOR: 0.9,           // fuera de una ciudad y sin ejércitos propios o aliados al lado: ataque y defensa ×0,9
+    NO_ROAD_FACTOR: 0.85,           // en territorio enemigo sin carretera intacta al alcance de un turno: ×0,85
     SIEGE_TURNS: 3,                 // turnos con tropas en una ciudad ajena para tomarla
     CAPITAL_LOST_RESOURCES: 0.5,    // sin su capital, un país saca la mitad de sus yacimientos e industria
     LOOT_FACTOR: 2,                 // saqueo al tomar una ciudad: 2 × el peso de la provincia en la renta del defensor...
@@ -959,6 +961,8 @@ class GameEngine {
         this.nextOpId = 1;
         this.fields = new Map();    // caminos hacia los destinos de las órdenes (se rehacen si cambia el mapa)
         this.fieldStamp = '';
+        this.roadReach = new Map(); // ¿llega a una carretera en un turno? por dueño, casilla y velocidad (ver roadInReach)
+        this.roadReachStamp = '';
         this.visCache = null;
 
         // Carreteras: clase por arista dirigida (0 nada, 1 carretera, 2 autopista). Se empieza sin ninguna: las construyen los jugadores.
@@ -1753,6 +1757,56 @@ class GameEngine {
         const n = this.hostileSides(owner, cell);
         return n >= CONFIG.SURROUNDED_SIDES ? r.surrounded : n >= CONFIG.FLANKED_SIDES ? r.flanked : 1;
     }
+    // Apoyo mutuo: fuera de una ciudad, sin ningún ejército propio o aliado en las 6 vecinas, está aislado. `selfId` es
+    // el propio ejército: si ataca desde la casilla de al lado de la suya, no se cuenta a sí mismo como apoyo.
+    isolated(owner, cell, selfId = 0) {
+        if (CITY_OF[cell] >= 0) return false;
+        for (let d = 0; d < 6; d++) {
+            const j = G.nb[cell * 6 + d], id = j >= 0 ? this.armyAt[j] : 0;
+            if (!id || id === selfId) continue;
+            const o = this.armies.get(id).owner;
+            if (o === owner || this.allied(owner, o)) return false;
+        }
+        return true;
+    }
+    // ¿Llega con su movimiento completo de un turno (sin el recorte por suministro ni por rodeado) a alguna casilla con
+    // un tramo de carretera intacto, de cualquier dueño? Pasa por territorio propio, aliado o enemigo sin mirar ejércitos,
+    // y la propia casilla cuenta. Se guarda por dueño, casilla y velocidad hasta que cambie el mapa, la red o las reglas.
+    roadInReach(owner, cell, units) {
+        const budget = speedOf(units, this.rules(owner)) * MOVE;
+        const stamp = `${this.version}:${this.roadVersion}:${this.techVersion}:${this.blocVersion}:${this.fortVersion}`;
+        if (stamp !== this.roadReachStamp) { this.roadReach.clear(); this.roadReachStamp = stamp; }
+        const key = `${owner}:${cell}:${budget}`;
+        let hit = this.roadReach.get(key);
+        if (hit !== undefined) return hit;
+        hit = false;
+        const dist = new Map([[cell, 0]]), heap = new MinHeap();
+        heap.push(0, cell);
+        search: while (heap.size) {
+            const [k, v] = heap.pop();
+            if (k > dist.get(v)) continue;
+            for (let d = 0; d < 6; d++) if (this.road[v * 6 + d] > 0) { hit = true; break search; }
+            for (let d = 0; d < 6; d++) {
+                const u = G.nb[v * 6 + d];
+                if (u < 0 || !isLand(u)) continue;
+                const o = this.owner[u], hostile = this.atWar(owner, o);
+                if (!(o === owner || hostile || this.allied(owner, o))) continue;
+                const c = k + this.stepCost(owner, v, d, hostile);
+                if (c <= budget && c < (dist.get(u) ?? Infinity)) { dist.set(u, c); heap.push(c, u); }
+            }
+        }
+        this.roadReach.set(key, hit);
+        return hit;
+    }
+    // Lo que pesa la situación de un ejército en su ataque y su defensa: rodeado o cercado, aislado y, en territorio
+    // enemigo, sin carretera al alcance. Cada parte es [nombre, factor] y `mult` es su producto.
+    armyState(owner, cell, units, selfId = 0) {
+        const parts = [], flank = this.flankFactor(owner, cell);
+        if (flank < 1) parts.push([this.hostileSides(owner, cell) >= CONFIG.SURROUNDED_SIDES ? 'cercado' : 'rodeado', flank]);
+        if (this.isolated(owner, cell, selfId)) parts.push(['aislado', CONFIG.ISOLATED_FACTOR]);
+        if (this.atWar(owner, this.legal[cell]) && !this.roadInReach(owner, cell, units)) parts.push(['sin carretera', CONFIG.NO_ROAD_FACTOR]);
+        return { mult: parts.reduce((m, [, x]) => m * x, 1), parts };
+    }
     moveBudget(owner, cell, units, used) {
         if (!this.inSupply(owner, cell)) return Math.max(0, 1 - used);
         const sides = this.hostileSides(owner, cell);
@@ -1871,10 +1925,10 @@ class GameEngine {
     }
     // Relación de fuerzas que espera `owner` al atacar `def` en `cell`. Si no conoce el ejército (niebla de guerra),
     // supone lo peor de su escalón en infantería, para que la orden no use información que el jugador no tiene.
-    expectedRatio(owner, units, from, def, cell) {
-        if (this.intel(owner, def.owner, cell).exact) { const fx = this.combatFactors(owner, units, from, def, cell); return fx.atk / fx.dfn; }
+    expectedRatio(owner, units, from, def, cell, attId = 0) {
+        if (this.intel(owner, def.owner, cell).exact) { const fx = this.combatFactors(owner, units, from, def, cell, attId); return fx.atk / fx.dfn; }
         const n = countUnits(def.units), guess = n <= 3 ? 3 : n <= 9 ? 9 : n <= 24 ? 24 : 40;
-        const fx = this.combatFactors(owner, units, from, { owner: def.owner, units: { infantry: guess, tank: 0, artillery: 0 } }, cell);
+        const fx = this.combatFactors(owner, units, from, { owner: def.owner, units: { infantry: guess, tank: 0, artillery: 0 } }, cell, attId);
         return fx.atk / fx.dfn;
     }
     orderTarget(a) {
@@ -1946,7 +2000,7 @@ class GameEngine {
         if (o.flee && this.flee(a, r)) { this.refreshOrder(a); return 'fled'; }
         if (o.kind === 'attack' && r.attacks.has(dest)) {
             const def = this.armyOn(dest), from = r.attacks.get(dest);
-            if (this.expectedRatio(owner, a.units, from, def, dest) >= o.ratio) {
+            if (this.expectedRatio(owner, a.units, from, def, dest, a.id) >= o.ratio) {
                 this.attack(a, from, dest, r);
                 const after = this.armies.get(a.id);
                 if (after && after.cell === dest) { this.clearOrder(after); return 'arrived'; }
@@ -2379,7 +2433,7 @@ class GameEngine {
                 let best = null, bestScore = -Infinity, wanted = false;
                 for (const [target, from] of r.attacks) {
                     if (far(target) > far(a.cell) + 0.5) continue;   // no se desvía hacia atrás
-                    const ratio = this.expectedRatio(id, a.units, from, this.armyOn(target), target);
+                    const ratio = this.expectedRatio(id, a.units, from, this.armyOn(target), target, a.id);
                     if (ratio < op.ratio) { wanted = true; continue; }
                     const score = Math.min(ratio, 5) + (CITY_OF[target] >= 0 ? 1 : 0) + (target === obj ? 5 : 0) - far(target) * 0.05;
                     if (score > bestScore) { bestScore = score; best = { target, from }; }
@@ -2547,7 +2601,7 @@ class GameEngine {
                 const r = this.reach(id, a.cell, this.mp(a), a.used === 0);
                 for (const [target, from] of r.attacks) {
                     if (!line.has(target) || (!anyFrom && from !== a.cell)) continue;
-                    if (this.expectedRatio(id, a.units, from, this.armyOn(target), target) >= op.ratio) { this.attack(a, from, target, r); tally.attacked++; break; }
+                    if (this.expectedRatio(id, a.units, from, this.armyOn(target), target, a.id) >= op.ratio) { this.attack(a, from, target, r); tally.attacked++; break; }
                 }
             }
         };
@@ -2607,7 +2661,7 @@ class GameEngine {
                     // Rodeado: rompe el cerco por donde lo acerque a la línea, con una previsión de al menos 1.
                     let best = null, bd = Infinity;
                     for (const [target, from] of r.attacks) {
-                        if (this.expectedRatio(id, a.units, from, this.armyOn(target), target) < 1) continue;
+                        if (this.expectedRatio(id, a.units, from, this.armyOn(target), target, a.id) < 1) continue;
                         const d = Math.min(...op.cells.map(c => (G.cx[c] - G.cx[target]) ** 2 + (G.cy[c] - G.cy[target]) ** 2));
                         if (d < bd) { bd = d; best = { target, from }; }
                     }
@@ -3149,7 +3203,8 @@ class GameEngine {
     }
 
     // Factores de un combate, sin azar: sirven para resolverlo, preverlo y explicarlo.
-    combatFactors(attOwner, attUnits, fromCell, def, cell) {
+    // `attId` es el ejército que ataca, para no contarlo como su propio apoyo; `def.id`, el que defiende.
+    combatFactors(attOwner, attUnits, fromCell, def, cell, attId = 0) {
         const terrain = terrainOf(cell), d = G.dirTo(fromCell, cell), ra = this.rules(attOwner), rd = this.rules(def.owner);
         const parts = [];
         if (terrain.def > 1) parts.push([terrain.name.toLowerCase(), terrain.def]);
@@ -3161,10 +3216,10 @@ class GameEngine {
         const raw = parts.reduce((m, [, x]) => m * x, 1);
         const cap = rf ? rf.fortCap : CONFIG.MAX_DEFENSE_BONUS;
         const bonus = Math.min(raw, cap);
-        const attFlank = this.flankFactor(attOwner, fromCell), defFlank = this.flankFactor(def.owner, cell);
+        const attState = this.armyState(attOwner, fromCell, attUnits, attId), defState = this.armyState(def.owner, cell, def.units, def.id ?? 0);
         const baseAtk = unitPower(attUnits, 'atk', ra), baseDef = unitPower(def.units, 'def', rd);
-        return { baseAtk, baseDef, parts, bonus, cap, capped: raw > bonus, attFlank, defFlank,
-            atk: baseAtk * attFlank, dfn: Math.max(0.5, baseDef * bonus * defFlank) };
+        return { baseAtk, baseDef, parts, bonus, cap, capped: raw > bonus, attState, defState,
+            atk: baseAtk * attState.mult, dfn: Math.max(0.5, baseDef * bonus * defState.mult) };
     }
     // Probabilidad de que gane el atacante (cada lado tira un ±20 % de azar).
     winChance(atk, dfn) {
@@ -3176,7 +3231,7 @@ class GameEngine {
     battle(att, def, cell) {
         const roll = () => 0.8 + this.rng() * 0.4;
         const p = PROVINCES[G.prov[cell]];
-        const fx = this.combatFactors(att.owner, att.units, att.cell, def, cell);
+        const fx = this.combatFactors(att.owner, att.units, att.cell, def, cell, att.id);
         const nA0 = countUnits(att.units), nD0 = countUnits(def.units);
         const from = att.cell;
         this.note({ kind: 'battle', att: att.id, def: def.id, from, cell, attOwner: att.owner, defOwner: def.owner,
@@ -3216,8 +3271,9 @@ class GameEngine {
     // Parte de combate para el registro, contado desde el lado del jugador.
     battleReport(a, d, p, fx, atk, dfn, attWins, nA0, nD0, nA1, nD1, retreatNote) {
         const num = x => String(Math.round(x * 100) / 100).replace('.', ',');
-        const factors = fx.parts.map(([n, x]) => ` ×${num(x)} ${n}`).join('') + (fx.capped ? ` (tope ×${num(fx.cap)})` : '') + (fx.defFlank < 1 ? ` ×${num(fx.defFlank)} rodeado` : '');
-        const atkTxt = `${Math.round(fx.baseAtk)}${fx.attFlank < 1 ? ` ×${num(fx.attFlank)} rodeado` : ''}`;
+        const state = s => s.parts.map(([n, x]) => ` ×${num(x)} ${n}`).join('');
+        const factors = fx.parts.map(([n, x]) => ` ×${num(x)} ${n}`).join('') + (fx.capped ? ` (tope ×${num(fx.cap)})` : '') + state(fx.defState);
+        const atkTxt = `${Math.round(fx.baseAtk)}${state(fx.attState)}${fx.attState.parts.length ? ` = ${Math.round(fx.atk)}` : ''}`;
         const defTxt = `${Math.round(fx.baseDef)}${factors}${factors ? ` = ${Math.round(fx.dfn)}` : ''}`;
         const luck = `con el azar, ${Math.round(atk)} contra ${Math.round(dfn)}`;
         if (a === this.player) {
@@ -4310,12 +4366,11 @@ class GameEngine {
                 army = this.split(army, send);
             }
             const r = this.reach(id, army.cell, this.mp(army), army.used === 0);
-            const atk = unitPower(army.units, 'atk', this.rules(id)) * this.flankFactor(id, army.cell);
             const trapped = this.hostileSides(id, army.cell);
             let best = null, bestScore = 0;
             for (const [target, from] of r.attacks) {
                 const def = this.armyOn(target);
-                const fx = this.combatFactors(id, army.units, from, def, target);
+                const fx = this.combatFactors(id, army.units, from, def, target, army.id);
                 const ratio = fx.atk / fx.dfn;
                 // Rodeada, le basta una ventaja menor para atacar y prefiere romper el cerco antes que huir.
                 if (ratio < (trapped >= CONFIG.FLANKED_SIDES ? 1.1 : 1.3)) continue;
@@ -5655,14 +5710,15 @@ class GameUI {
             lines.push('<span class="muted">Sin Reconocimiento 2 ni un espía en la provincia no hay previsión del combate.</span>');
         } else if (this.reachInfo?.attacks.has(cell) && a) {
             const mine = this.selectedArmy();
-            const fx = g.combatFactors(g.player, this.send, this.reachInfo.from.get(cell) ?? mine.cell, a, cell);
+            const fx = g.combatFactors(g.player, this.send, this.reachInfo.from.get(cell) ?? mine.cell, a, cell, sameUnits(this.send, mine.units) ? mine.id : 0);
             const chance = g.winChance(fx.atk, fx.dfn), r = fx.atk / fx.dfn, n = countUnits(this.send);
             const winLeft = Math.round(n * (1 - Math.min(1, 0.3 / r))), loseLeft = Math.round(n * (1 - Math.min(1, 0.35 + 0.35 * (1 / r - 1))));
             const num = x => String(Math.round(x * 100) / 100).replace('.', ',');
-            const factors = fx.parts.map(([nm, x]) => `${nm} ×${num(x)}`).concat(fx.capped ? [`tope ×${num(fx.cap)}`] : [], fx.defFlank < 1 ? [`rodeado ×${num(fx.defFlank)}`] : []).join(', ');
+            const state = s => s.parts.map(([nm, x]) => `${nm} ×${num(x)}`);
+            const factors = fx.parts.map(([nm, x]) => `${nm} ×${num(x)}`).concat(fx.capped ? [`tope ×${num(fx.cap)}`] : [], state(fx.defState)).join(', ');
             const color = chance >= 0.7 ? '#a8e38a' : chance >= 0.35 ? '#ffd166' : '#ff8a78';
             lines.push(`<b style="color:${color}">Clic para atacar: ${Math.round(chance * 100)} % de victoria</b>`);
-            lines.push(`Tu ataque ${Math.round(fx.atk)}${fx.attFlank < 1 ? ' (rodeado)' : ''} contra su defensa ${Math.round(fx.dfn)}${factors ? ` (${factors})` : ''}`);
+            lines.push(`Tu ataque ${Math.round(fx.atk)}${fx.attState.parts.length ? ` (${state(fx.attState).join(', ')})` : ''} contra su defensa ${Math.round(fx.dfn)}${factors ? ` (${factors})` : ''}`);
             lines.push(`Si ganas te quedan unas ${winLeft} de ${n}; si pierdes, unas ${loseLeft}`);
         } else if (this.reachInfo?.attacks.has(cell)) lines.push('<b style="color:#ff8a78">Clic para atacar</b>');
         else if (this.reachInfo?.moves.has(cell)) lines.push('<b style="color:#a8e38a">Clic para mover aquí</b>');
@@ -7107,7 +7163,7 @@ class GameUI {
                 const foes = new Map();
                 for (const a of members) for (let d = 0; d < 6; d++) { const c = G.nb[a.cell * 6 + d], e = c >= 0 ? g.armyOn(c) : null; if (e && g.atWar(p0, e.owner) && g.sees(p0, c)) foes.set(e.id, [e, a]); }
                 let dfn = 0;
-                for (const [e, a] of foes.values()) { const r = g.expectedRatio(p0, a.units, a.cell, e, e.cell); dfn += unitPower(a.units, 'atk', rules) * g.flankFactor(p0, a.cell) / Math.max(0.01, r); }
+                for (const [e, a] of foes.values()) { const r = g.expectedRatio(p0, a.units, a.cell, e, e.cell, a.id); dfn += unitPower(a.units, 'atk', rules) * g.armyState(p0, a.cell, a.units, a.id).mult / Math.max(0.01, r); }
                 const ratio = dfn ? atk / dfn : null, pct = x => Math.max(3, Math.min(100, x / 3 * 100));
                 front = ratio === null ? '<p class="small muted">Aún no toca al enemigo: no hay relación de fuerzas que calcular.</p>'
                     : `<div class="meter op-meter"><i style="width:${pct(ratio)}%;background:${ratio >= op.ratio ? 'var(--go)' : 'var(--signal)'}"></i><b style="left:${pct(op.ratio)}%"></b></div>
