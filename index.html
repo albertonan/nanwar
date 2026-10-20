@@ -1977,15 +1977,33 @@ class GameEngine {
         o.eta = o.path.length ? this.pathTurns(a.owner, a.units, o.path, f.dist) : null;
     }
     // Turnos para recorrer un camino: con suministro, lo que dé su velocidad (al menos una casilla); sin él, una casilla.
+    // Mar, como en reach: embarcar acaba el turno; embarcado navega `seaSpeed` casillas y desembarca si llega a la costa
+    // antes de agotarlas (eso también acaba el turno). Un cruce de una sola casilla de mar desembarca en la otra orilla
+    // el mismo turno si le llega el movimiento para la casilla de mar y el desembarco.
     pathTurns(owner, units, path, dist) {
-        const per = speedOf(units, this.rules(owner)) * MOVE;
+        const rl = this.rules(owner), per = speedOf(units, rl) * MOVE, last = path.length - 1;
         let i = 0, turns = 0;
-        while (i < path.length - 1 && turns < 500) {
+        while (i < last && turns < 500) {
             turns++;
+            if (afloat(path[i])) {   // embarcado: navega y, si alcanza la costa con casillas de sobra, desembarca
+                let k = 0;
+                while (i < last && afloat(path[i + 1]) && k < rl.seaSpeed) { i++; k++; }
+                if (i < last && k < rl.seaSpeed) i++;
+                continue;
+            }
             if (!this.inSupply(owner, path[i])) { i++; continue; }
             const start = dist[path[i]];
-            i++;
-            while (i < path.length - 1 && start - dist[path[i + 1]] <= per) i++;
+            for (let first = true; i < last; first = false) {
+                const v = path[i + 1];
+                if (afloat(v)) {   // embarca (fin del turno) o cruza una casilla y desembarca enfrente
+                    const used = start - dist[path[i]];
+                    i++;
+                    if (i < last && !afloat(path[i + 1]) && used + MOVE + dist[path[i]] - dist[path[i + 1]] <= per) i++;
+                    break;
+                }
+                if (!first && start - dist[v] > per) break;
+                i++;
+            }
         }
         return Math.max(1, turns);
     }
@@ -2041,6 +2059,7 @@ class GameEngine {
             return 'waiting';
         }
         if (o.kind === 'follow' && G.dirTo(a.cell, dest) >= 0) return null;   // ya va pegado detrás
+        if (this.holdLanding(a, dest)) return 'waiting';
         const res = this.advance(a, dest, r, o.kind !== 'follow');           // sigue al otro ejército sin juntarse con él
         if (res === 'blocked') {
             if (o.stuckTurn !== this.turn) { o.stuckTurn = this.turn; o.stuck++; }
@@ -2056,19 +2075,45 @@ class GameEngine {
     // Un paso de turno hacia `dest` por el camino más rápido, sin juntarse con otros ejércitos por el camino (en el
     // destino, solo si `merge`). Devuelve 'moved', 'arrived', 'merged' o 'blocked'.
     // Con `avoid`, una casilla junto a un ejército enemigo cuenta como tres casillas más (para replegarse sin rozarlo).
+    // Una casilla de mar expuesta (exposedAtSea) también cuenta tres casillas más, con o sin `avoid`: embarcado apenas
+    // se defiende.
     advance(a, dest, r, merge = true, avoid = false) {
         const f = this.orderField(a.owner, dest), here = f.to(a.cell);
         let best = -1, bestD = here;
         for (const v of this.destinations(r)) {
             if (this.armyAt[v] && !(merge && v === dest)) continue;   // con otro ejército solo se entra en el destino, y si `merge`
             if (!f.done[v] || f.dist[v] >= here) continue;            // solo están calculadas las más cercanas que `here`
-            const d = f.dist[v] + (avoid && v !== dest && this.zoc(v, a.owner) ? 3 * MOVE : 0);
+            const risky = v !== dest && ((avoid && this.zoc(v, a.owner)) || this.exposedAtSea(a.owner, v));
+            const d = f.dist[v] + (risky ? 3 * MOVE : 0);
             if (d < bestD) { bestD = d; best = v; }
         }
         if (best < 0) return 'blocked';
         const moved = this.moveArmy(a, best, r);
         if (moved !== a || !this.armies.has(a.id)) return 'merged';
         return a.cell === dest ? 'arrived' : 'moved';
+    }
+    // ¿Está `cell` en el mar con un ejército de un país en guerra con `owner` al lado (en tierra o en el mar)?
+    exposedAtSea(owner, cell) {
+        if (!afloat(cell)) return false;
+        for (let d = 0; d < 6; d++) {
+            const j = G.nb[cell * 6 + d], id = j >= 0 ? this.armyAt[j] : 0;
+            if (id && this.atWar(owner, this.armies.get(id).owner)) return true;
+        }
+        return false;
+    }
+    // Desembarco a la vez: un ejército de una ofensiva que ya está en el mar junto a la costa por la que entra hacia
+    // `dest` espera (true) si otro de su operación aún navega a 2 turnos de esa costa o menos, y lleva menos de 2 turnos
+    // esperando. Al que también está ya junto a su costa no se le espera: desembarcan los dos.
+    holdLanding(a, dest) {
+        const op = a.op ? this.ops.get(a.op) : null;
+        const shore = b => { if (!afloat(b.cell)) return -1; const f = this.orderField(b.owner, dest); if (f.to(b.cell) === Infinity) return -1; const c = f.next[b.cell]; return c >= 0 && isLand(c) ? c : -1; };
+        const coast = op?.kind === 'ofensiva' ? shore(a) : -1;
+        if (coast < 0) { a.seaWait = 0; return false; }
+        a.seaWait ||= this.turn;
+        if (this.turn - a.seaWait >= 2) return false;
+        const range = 2 * this.rules(a.owner).seaSpeed;
+        return this.opMembers(op).some(b => b !== a && afloat(b.cell) && shore(b) < 0
+            && Math.hypot(G.cx[b.cell] - G.cx[coast], G.cy[b.cell] - G.cy[coast]) / G.W <= range);
     }
     // Rodeado (3 lados o más): se aparta hacia la casilla libre con menos enemigos alrededor. true si se ha movido.
     flee(a, r) {
@@ -2469,6 +2514,7 @@ class GameEngine {
                     if (score > bestScore) { bestScore = score; best = { target, from }; }
                 }
                 if (best) { this.attack(a, best.from, best.target, r); this.reattach(a); tally.attacked++; continue; }
+                if (this.holdLanding(a, obj)) continue;   // en el mar, espera a los demás para desembarcar a la vez
                 const res = this.advance(a, obj, r);
                 if (res === 'blocked') { this.reattach(a); if (wanted) tally.waiting++; } else tally.moved++;
             }
@@ -3539,7 +3585,7 @@ class GameEngine {
     intel(viewer, owner, cell) {
         if (!this.settings.fog || viewer === null || owner === viewer || owner < 0 || this.allied(viewer, owner)) return { exact: true, levels: true };
         const r = this.rules(viewer);
-        if (viewer === this.player && this.spiedProvinces().has(G.prov[cell])) return { exact: true, levels: r.spyWide || r.intelLevels };
+        if (viewer === this.player && this.spiedProvinces().has(SEA_PROV[cell])) return { exact: true, levels: r.spyWide || r.intelLevels };
         return { exact: r.intelExact, levels: r.intelLevels };
     }
     // Cómo ve `viewer` un ejército: tipo y unidades si los conoce (si no, solo el escalón) y galones si conoce los niveles.
@@ -4430,12 +4476,17 @@ class GameEngine {
         }
     }
 
+    // Cada ejército libre ataca lo que tenga a tiro con ventaja (también un barco enemigo) o avanza hacia la ciudad
+    // enemiga más cercana. El que tiene camino por tierra se guía por él y del mar solo usa los cruces cortos; el que no
+    // lo tiene (una isla, otro continente) se guía por el mar y embarca. Nunca acaba el turno en un mar expuesto si no
+    // es para atacar.
     aiArmies(id) {
         const enemies = this.enemiesOf(id);
         if (!enemies.length) return;
         const targets = PROVINCES.filter(p => enemies.includes(this.owner[p.city])).map(p => p.city);
         if (!targets.length) return;
-        const dist = this.field(id, targets);
+        const land = this.landSteps(id, targets);
+        let sea = null;   // pasos contando el mar: solo si algún ejército no tiene camino por tierra
         const mine = [...this.armies.values()].filter(a => a.owner === id && this.mp(a) > 0 && !a.op && !a.form)
             .sort((x, y) => unitPower(y.units, 'atk', this.rules(id)) - unitPower(x.units, 'atk', this.rules(id)));
         for (const army0 of mine) {
@@ -4451,6 +4502,7 @@ class GameEngine {
             }
             const r = this.reach(id, army.cell, this.mp(army), army.used === 0);
             const trapped = this.hostileSides(id, army.cell);
+            const byLand = land[army.cell] < 1e9, dist = byLand ? land : (sea ??= this.field(id, targets));
             let best = null, bestScore = 0;
             for (const [target, from] of r.attacks) {
                 const def = this.armyOn(target);
@@ -4462,6 +4514,7 @@ class GameEngine {
                 if (score > bestScore) { bestScore = score; best = { kind: 'attack', target, from }; }
             }
             for (const v of this.destinations(r)) {
+                if (afloat(v) && (byLand || this.exposedAtSea(id, v))) continue;   // por tierra no embarca; al mar expuesto, no
                 const hostile = this.atWar(id, this.owner[v]);
                 const gain = dist[army.cell] - dist[v];
                 if (gain <= 0 && !(CITY_OF[v] >= 0 && hostile) && !(trapped >= CONFIG.FLANKED_SIDES && this.hostileSides(id, v) < trapped)) continue;

@@ -278,7 +278,79 @@ const CHECKS = [
     T.eq([g.mp(a), g.rules(es).amphibious], [10 * MOVE, 0.65], 'niveles 2 y 3');
     return true;
 }],
-['4 · el árbol tiene 13 ramas y 39 investigaciones', () => { T.eq([RESEARCH_BRANCHES.length, TECHS.length], [13, 39], 'árbol'); return true; }]
+['4 · el árbol tiene 13 ramas y 39 investigaciones', () => { T.eq([RESEARCH_BRANCHES.length, TECHS.length], [13, 39], 'árbol'); return true; }],
+['M · una orden de marcha lleva un ejército de la península a Canarias en 5 turnos o menos', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    const can = PROVINCES.find(p => p.name === 'Canarias'), city = can.city;
+    g.armyOn(city) && g.removeArmy(g.armyOn(city));
+    const [c] = T.coast(g, es, { near: city, skip: can.id });
+    const a = T.army(g, es, c, 3);
+    T.ok(g.setOrder(a, { kind: 'march', dest: city }), 'orden aceptada');
+    let turns = 0, b = a;
+    while (b.cell !== city && turns < 8) { g.beginNationTurn(es); g.stepOrder(b); b = [...g.armies.values()].find(x => x.owner === es && countUnits(x.units) === 3 && (x.id === a.id || x.cell === city)) ?? b; turns++; }
+    T.ok(b.cell === city && turns <= 5, `llega en ${turns} turnos`);
+    return true;
+}],
+['M · la ficha de la orden cuenta los turnos por mar como se navegan', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    const can = PROVINCES.find(p => p.name === 'Canarias'), city = can.city;
+    g.armyOn(city) && g.removeArmy(g.armyOn(city));
+    const [c] = T.coast(g, es, { near: city, skip: can.id });
+    const a = T.army(g, es, c, 3);
+    g.setOrder(a, { kind: 'march', dest: city });
+    const eta = a.order.eta;
+    let turns = 0, b = a;
+    while (b.cell !== city && turns < 8) { g.beginNationTurn(es); g.stepOrder(b); b = [...g.armies.values()].find(x => x.owner === es && countUnits(x.units) === 3 && (x.id === a.id || x.cell === city)) ?? b; turns++; }
+    T.eq(eta, turns, 'turnos previstos');
+    return true;
+}],
+['5 · en una ofensiva, el barco junto a la costa espera 2 turnos como mucho a otro que aún navega', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(es, fr);
+    const [c, s] = T.coast(g, fr);
+    const open = j => T.seaFree(g, j) && [0, 1, 2, 3, 4, 5].every(d => { const x = G.nb[j * 6 + d]; return x < 0 || !isLand(x); });
+    const far = [...g.nearCells(s, 4)].find(([j, d]) => d === 4 && open(j))?.[0];
+    T.ok(far !== undefined, 'no hay alta mar cerca');
+    const a = T.embark(g, es, s, 3), b = T.embark(g, es, far, 3);
+    const op = g.createOp(es, 'ofensiva', [g.nations[es].capitalCell, c], { noCap: true });
+    a.op = b.op = op.id;
+    g.setOrder(b, { kind: 'hold' });   // el otro se queda donde está: la ofensiva no lo mueve
+    const cells = [];
+    for (let t = 0; t < 3; t++) { g.executeOp(op); cells.push(g.armies.get(a.id)?.cell); g.turn++; g.beginNationTurn(es); }
+    T.eq(cells, [s, s, c], 'espera dos turnos y desembarca');
+    return true;
+}],
+['5 · la orden prefiere no terminar el turno en una casilla de mar expuesta', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(es, fr);
+    const [, s] = T.coast(g, es);
+    T.ok(g.exposedAtSea(es, s) === false, 'libre');
+    const n = G.nb[s * 6 + [0, 1, 2, 3, 4, 5].find(d => { const j = G.nb[s * 6 + d]; return j >= 0 && !isLand(j); })];
+    T.embark(g, fr, n, 1);
+    T.ok(g.exposedAtSea(es, s), 'expuesta');
+    return true;
+}],
+['M · la IA ataca un barco enemigo que tiene a tiro', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(fr, es);
+    const [c, s] = T.coast(g, fr);
+    T.army(g, fr, c, 10);
+    const boat = T.embark(g, es, s, 3);
+    g.aiArmies(fr);
+    T.ok(!g.armies.has(boat.id) || g.armies.get(boat.id).cell !== s, 'el barco ha caído o se ha retirado');
+    return true;
+}],
+['M · el espía de la provincia de la costa ve el barco', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es);
+    const [, s] = T.coast(g, fr);
+    const boat = T.embark(g, fr, s, 3);
+    g.spies.set(SEA_PROV[s], { since: g.turn, revealedTurn: g.turn }); g.spyVersion++;
+    T.ok(g.intel(es, fr, s).exact, 'sabe tipo y número');
+    return true;
+}]
 ];
 
 const exe = process.env.CHROME ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome'].find(existsSync);
