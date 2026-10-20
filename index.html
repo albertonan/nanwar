@@ -4531,7 +4531,10 @@ class GameEngine {
         for (const c of p.cells) {
             if (this.owner[c] !== prev) continue;
             const ar = this.armyOn(c);
-            if ((!ar || ar.owner !== prev) && !this.fort[c]) this.owner[c] = holder(c);
+            if ((!ar || ar.owner !== prev) && !this.fort[c]) {
+                this.owner[c] = holder(c);
+                if (byForce) this.loseAirfield(c);   // un aeródromo fuera de la ciudad cae con ella, como el de la ciudad
+            }
         }
         if (byForce && prev >= 0) this.plunder(a, prev, p);
         if (CAPITAL_OF[cell] >= 0 || this.involvesPlayer(a, prev)) {
@@ -5502,10 +5505,11 @@ class GameEngine {
 
     // Qué investigaría la nación ahora: lo que tenga en pausa o la investigación disponible con más peso.
     // En guerra pesan su tipo de tropa, Doctrina y Fortificación; en paz, Ciencia, Industria, Infraestructura y
-    // Movilización; Movilidad si su tierra es abrupta. La IA juega sin niebla: no investiga Inteligencia.
+    // Movilización; Movilidad si su tierra es abrupta. No investiga Inteligencia (Reconocimiento ni Espionaje): con
+    // niebla, la IA se arregla con lo que ve.
     // El desempate es fijo por nación (no consume azar), así ahorra para el mismo objetivo turno tras turno.
     aiTechChoice(id) {
-        const key = `${this.turn}:${this.techVersion}:${this.version}:${this.blocVersion}`, s = this.nations[id].tech;
+        const key = `${this.turn}:${this.techVersion}:${this.version}:${this.blocVersion}:${this.airVersion}`, s = this.nations[id].tech;
         if (s.aiChoice?.key === key) return s.aiChoice.tech;
         let tech = TECHS.find(t => this.techState(id, t.id) === 'paused')?.id ?? null;
         if (!tech) {
@@ -6134,8 +6138,10 @@ const airIcon = (kind, color) => `<svg class="nato" viewBox="0 0 26 18" aria-hid
     + (kind === 'aa' ? '<path d="M5.5 17A7.5 8 0 0 1 20.5 17" fill="none" stroke="#151a12" stroke-width="1.4"/>' : AIR_PROP) + '</svg>';
 const unitIcon = (type, color) =>
     `<svg class="nato" viewBox="0 0 26 16" aria-hidden="true"><rect x="1" y="1" width="24" height="14" fill="${color}" stroke="#151a12" stroke-width="1.5"/>${NATO_MARK[type]}</svg>`;
-// Tipo que más pesa en un ejército: decide el símbolo de su ficha en el mapa.
-const dominantType = u => UNIT_KEYS.reduce((best, k) => (u[k] * CONFIG.TYPES[k].cost > u[best] * CONFIG.TYPES[best].cost ? k : best), 'infantry');
+// Tipo que más pesa en un ejército: decide el símbolo de su ficha en el mapa. Las antiaéreas, solo si son la mayoría
+// de sus unidades: dos de cuatro no hacen de una columna una unidad antiaérea.
+const dominantType = u => (u.antiair || 0) * 2 > countUnits(u) ? 'antiair'
+    : UNIT_KEYS.reduce((best, k) => (k !== 'antiair' && u[k] * CONFIG.TYPES[k].cost > u[best] * CONFIG.TYPES[best].cost ? k : best), 'infantry');
 const isMobile = () => matchMedia('(max-width: 760px)').matches;
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;

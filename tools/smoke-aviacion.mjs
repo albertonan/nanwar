@@ -313,6 +313,19 @@ const CHECKS = [
     T.eq([g.airfields.has(city), [...g.squadrons.values()].filter(s => s.owner === fr).length], [false, 0], 'perdidos');
     return true;
 }],
+// Israel y Taiwán empiezan con aeródromos fuera de sus ciudades: si cae la provincia a la fuerza, también se pierden.
+['2 · tomar a la fuerza la provincia de un aeródromo fuera de la ciudad también lo pierde con sus escuadrones', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const cap = g.nations[fr].capitalCell, p = PROVINCES.find(p => p.country === fr && p.city !== cap && p.cells.some(c => c !== p.city && T.free(g, c) && !g.fort[c]));
+    const field = p.cells.find(c => c !== p.city && T.free(g, c) && !g.fort[c]);
+    T.airfield(g, fr, cap); T.airfield(g, fr, field); const sq = T.squad(g, fr, field, 2);
+    if (g.armyOn(p.city)) g.removeArmy(g.armyOn(p.city));
+    g.capture(p.city, es, true); g.sieges.delete(p.city); g.completeCity(p.city, es, fr, true);   // el asedio, cumplido
+    g.airSweep();
+    T.eq([g.owner[field], g.airfields.has(field), sq.filter(q => g.squadrons.has(q.id)).length], [es, false, 0], 'perdidos, no trasladados');
+    return true;
+}],
 ['2 · una ciudad que cambia de manos sin combate traslada sus escuadrones a otro aeródromo propio', () => {
     const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
     g.start(es); T.bare(g);
@@ -1290,6 +1303,16 @@ const CHECKS = [
     T.ok(ICONS.plane.includes(propellerPath(12, 12, 7.2)) && AIR_PROP.includes(propellerPath(13, 10, 7.4)), 'barra y panel');
     return true;
 }],
+// Lo que investiga la IA depende de los escuadrones de sus enemigos: comprar uno cambia la elección en el mismo turno.
+['9 · la IA vuelve a elegir investigación cuando cambian los escuadrones', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    T.learn(g, fr, ...TECHS.map(t => t.id).filter(k => !/^(antiaerea|ciencia)\d$/.test(k)));
+    const before = g.aiTechChoice(fr);
+    T.squad(g, es, g.nations[es].capitalCell, 2);
+    T.eq([before, g.aiTechChoice(fr)], ['ciencia1', 'antiaerea1'], 'sin aviación enemiga, Ciencia; con ella, Defensa aérea');
+    return true;
+}],
 ['9 · Aviación: alcance, munición guiada y guerra electrónica', () => {
     const g = T.game(), es = T.nation('es');
     g.start(es);
@@ -1351,6 +1374,16 @@ const CHECKS = [
     T.learn(g, es, 'antiaerea1', 'antiaerea2', 'antiaerea3');
     T.ok(g.recruit(es, p, 'antiair'), 'con Defensa aérea 3');
     T.eq([CONFIG.TYPES.antiair.cost, g.rules(es).types.antiair], [250, { atk: 2, def: 3, speed: 4 }], 'tropa');
+    return true;
+}],
+// La ficha de un ejército lleva el símbolo de Antiaérea solo si las antiaéreas son la mayoría de sus unidades; si no,
+// el de lo que más pesa del resto, como siempre.
+['10 · la ficha es de Antiaérea solo con mayoría de antiaéreas', () => {
+    const t = u => dominantType({ infantry: 0, tank: 0, artillery: 0, antiair: 0, ...u });
+    T.eq([t({ infantry: 2, antiair: 2 }), t({ infantry: 1, antiair: 1 }), t({ tank: 1, antiair: 1 }), t({ infantry: 1, antiair: 2 }), t({ antiair: 1 })],
+        ['infantry', 'infantry', 'tank', 'antiair', 'antiair'], 'antiaéreas');
+    T.eq([t({ infantry: 3, tank: 1 }), t({ infantry: 3, artillery: 1 }), t({ infantry: 1 }), dominantType({ infantry: 2, tank: 0, artillery: 0 })],
+        ['infantry', 'artillery', 'infantry', 'infantry'], 'el resto, por lo que pesa');
     return true;
 }],
 ['10 · protege su casilla y las vecinas con la mitad de un sitio por unidad', () => {
