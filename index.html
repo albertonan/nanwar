@@ -2075,18 +2075,21 @@ class GameEngine {
     // Un paso de turno hacia `dest` por el camino más rápido, sin juntarse con otros ejércitos por el camino (en el
     // destino, solo si `merge`). Devuelve 'moved', 'arrived', 'merged' o 'blocked'.
     // Con `avoid`, una casilla junto a un ejército enemigo cuenta como tres casillas más (para replegarse sin rozarlo).
-    // Una casilla de mar expuesta (exposedAtSea) también cuenta tres casillas más, con o sin `avoid`: embarcado apenas
-    // se defiende.
+    // Una casilla de mar expuesta (exposedAtSea) cuenta, con o sin `avoid`, como tres casillas de mar más (cada una vale
+    // MOVE * 3 en orderField): embarcado apenas se defiende. Sin `avoid`, si solo puede avanzar por mar expuesto, avanza.
     advance(a, dest, r, merge = true, avoid = false) {
         const f = this.orderField(a.owner, dest), here = f.to(a.cell);
-        let best = -1, bestD = here;
+        let best = -1, bestD = here, risk = -1, riskD = here;
         for (const v of this.destinations(r)) {
             if (this.armyAt[v] && !(merge && v === dest)) continue;   // con otro ejército solo se entra en el destino, y si `merge`
             if (!f.done[v] || f.dist[v] >= here) continue;            // solo están calculadas las más cercanas que `here`
-            const risky = v !== dest && ((avoid && this.zoc(v, a.owner)) || this.exposedAtSea(a.owner, v));
-            const d = f.dist[v] + (risky ? 3 * MOVE : 0);
+            const exposed = v !== dest && this.exposedAtSea(a.owner, v);
+            const risky = exposed || (avoid && v !== dest && this.zoc(v, a.owner));
+            const d = f.dist[v] + (risky ? (afloat(v) ? 3 * 3 * MOVE : 3 * MOVE) : 0);
             if (d < bestD) { bestD = d; best = v; }
+            if (exposed && !avoid && f.dist[v] < riskD) { riskD = f.dist[v]; risk = v; }
         }
+        if (best < 0) best = risk;
         if (best < 0) return 'blocked';
         const moved = this.moveArmy(a, best, r);
         if (moved !== a || !this.armies.has(a.id)) return 'merged';

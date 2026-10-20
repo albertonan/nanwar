@@ -350,6 +350,80 @@ const CHECKS = [
     g.spies.set(SEA_PROV[s], { since: g.turn, revealedTurn: g.turn }); g.spyVersion++;
     T.ok(g.intel(es, fr, s).exact, 'sabe tipo y número');
     return true;
+}],
+['5 · una orden en el mar no termina en una casilla expuesta si tiene otra', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); g.declareWar(es, fr);
+    const [c, s] = T.coast(g, es);
+    const nbs = j => [0, 1, 2, 3, 4, 5].map(d => G.nb[j * 6 + d]).filter(x => x >= 0);
+    const open = j => T.seaFree(g, j) && nbs(j).every(x => !isLand(x));
+    // Alta mar a 9 casillas de la costa: desde allí no se llega en un turno a esa costa.
+    const far = [...g.nearCells(s, 9)].find(([j, d]) => d === 9 && open(j))?.[0];
+    T.ok(far !== undefined, 'no hay alta mar lejos');
+    const a = T.embark(g, es, far, 3);
+    T.ok(g.setOrder(a, { kind: 'march', dest: c }), 'orden aceptada');
+    // La casilla más directa a la que llega, y un barco enemigo pegado a ella por detrás.
+    const f = g.orderField(es, c), r = g.reach(es, far, g.mp(a));
+    const sea = [...g.destinations(r)].filter(v => afloat(v) && f.to(v) < Infinity);
+    const best = sea.reduce((x, y) => (f.dist[y] < f.dist[x] ? y : x));
+    const behind = nbs(best).filter(j => T.seaFree(g, j)).sort((x, y) => f.dist[y] - f.dist[x])[0];
+    T.embark(g, fr, behind, 1);
+    T.ok(g.exposedAtSea(es, best), 'la más directa queda expuesta');
+    T.eq(g.stepOrder(a), 'moved', 'avanza');
+    const b = g.armies.get(a.id);
+    T.ok(b.cell !== far && !g.exposedAtSea(es, b.cell), `acaba en ${b.cell}, expuesta`);
+    // La expuesta cuenta tres casillas de mar más: si todo lo que está a menos de dos pasos de mar de la más directa
+    // estuviera expuesto, aun así prefiere una casilla segura dos pasos más atrás.
+    const h = T.game();
+    h.start(es); h.declareWar(es, fr);
+    const a2 = T.embark(h, es, far, 3);
+    h.setOrder(a2, { kind: 'march', dest: c });
+    const f2 = h.orderField(es, c), r2 = h.reach(es, far, h.mp(a2));
+    const dests = [...h.destinations(r2)].filter(v => f2.to(v) < f2.to(far));
+    const minD = Math.min(...dests.filter(afloat).map(v => f2.dist[v])), cut = minD + 2 * 3 * MOVE;
+    h.exposedAtSea = (o, v) => afloat(v) && f2.dist[v] < cut;
+    // Con la penalización de una sola casilla de mar, la expuesta más directa (minD + 3 MOVE) ganaría a todas estas.
+    T.ok(dests.some(v => !h.exposedAtSea(es, v) && f2.dist[v] > minD + 3 * MOVE && f2.dist[v] < minD + 3 * 3 * MOVE), 'hay una segura algo más atrás');
+    h.stepOrder(a2);
+    T.ok(!h.exposedAtSea(es, h.armies.get(a2.id).cell), 'acaba en una casilla segura');
+    return true;
+}],
+['M · una orden que solo puede seguir por un mar expuesto embarca igualmente', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es);
+    const can = PROVINCES.find(p => p.name === 'Canarias'), city = can.city;
+    g.armyOn(city) && g.removeArmy(g.armyOn(city));
+    const [c] = T.coast(g, es, { near: city, skip: can.id });
+    const a = T.army(g, es, c, 3);
+    g.setOrder(a, { kind: 'march', dest: city });
+    // Lo pone en la casilla del camino donde embarca.
+    const path = a.order.path, k = path.findIndex((j, i) => isLand(j) && afloat(path[i + 1]));
+    g.armyAt[c] = 0; a.cell = path[k]; g.settle(a);
+    g.setOrder(a, { kind: 'march', dest: city });
+    T.ok(afloat(a.order.path[1]), 'el camino embarca enseguida');
+    g.exposedAtSea = (o, v) => afloat(v);   // todo el mar, expuesto
+    T.eq(g.stepOrder(a), 'moved', 'no se queda bloqueada');
+    T.ok(afloat(g.armies.get(a.id).cell), 'embarca');
+    return true;
+}],
+['M · la IA lleva por mar un ejército que no tiene camino por tierra', () => {
+    const g = T.game(), es = T.nation('es'), ma = T.nation('ma');
+    g.start(ma); g.declareWar(es, ma);
+    // Un ejército libre en Canarias: hasta Marruecos solo se llega por mar.
+    const can = PROVINCES.find(p => p.name === 'Canarias');
+    const cell = can.cells.find(j => CITY_OF[j] < 0 && !g.armyAt[j]);
+    const a = T.army(g, es, cell, 5);
+    T.ok(g.landSteps(es, PROVINCES.filter(p => g.owner[p.city] === ma).map(p => p.city))[cell] >= 1e9, 'sin camino por tierra');
+    const cells = [];
+    for (let t = 0; t < 8 && g.armies.has(a.id); t++) {
+        g.beginNationTurn(es); g.aiArmies(es);
+        const b = g.armies.get(a.id);
+        if (b) cells.push(b.cell);
+        if (b && isLand(b.cell) && g.legal[b.cell] === ma) break;
+    }
+    const sailed = cells.findIndex(afloat), landed = cells.findIndex(j => isLand(j) && g.legal[j] === ma);
+    T.ok(sailed >= 0 && landed > sailed, `casillas: ${cells.map(j => (afloat(j) ? 'mar' : PROVINCES[G.prov[j]].name)).join(', ')}`);
+    return true;
 }]
 ];
 
