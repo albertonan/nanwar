@@ -256,6 +256,18 @@ const CHECKS = [
     return true;
 }],
 
+['B6 · la herramienta Carretera ofrece reparar un tramo roto y lo pone en obra', () => {
+    const g = T.uiStart('es'), es = g.player;
+    const [a, b] = T.plainPair(g, es), d = G.dirTo(a, b);
+    g.broken[a * 6 + d] = 1; g.broken[b * 6 + (d + 3) % 6] = 1; g.roadVersion++;
+    g.nations[es].gold = 1e4;
+    ui.setTool('road'); ui.clickCell(a);
+    const btn = document.querySelector('[data-action="repair-roads"]');
+    T.ok(btn && /Reparar/.test(btn.textContent), 'botón de reparar con su precio');
+    btn.click();
+    T.ok(g.roadWork.has(edgeKey(a, d)), 'obra empezada');
+    return true;
+}],
 ];
 
 const exe = process.env.CHROME ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome'].find(existsSync);

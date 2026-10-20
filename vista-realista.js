@@ -552,6 +552,16 @@ class RealisticMap {
                 } else for (const d of mine) { const a = mid(i, d); p.moveTo(G.cx[i], G.cy[i]); p.lineTo(a[0], a[1]); }
             }
         }
+        // Tramos rotos y en obra: discontinuos, con una marca de corte en su centro
+        this.cuts = { line: new Path2D(), work: new Path2D(), mark: new Path2D() };
+        for (const i of G.land) for (let d = 0; d < 3; d++) {
+            if (!g.broken[i * 6 + d]) continue;
+            const j = G.nb[i * 6 + d], len = Math.hypot(G.cx[j] - G.cx[i], G.cy[j] - G.cy[i]) || 1, k = G.S * 0.2;
+            const nx = -(G.cy[j] - G.cy[i]) / len * k, ny = (G.cx[j] - G.cx[i]) / len * k, [mx, my] = mid(i, d);
+            const into = g.roadWork.has(edgeKey(i, d)) ? this.cuts.work : this.cuts.line;
+            into.moveTo(G.cx[i], G.cy[i]); into.lineTo(G.cx[j], G.cy[j]);
+            this.cuts.mark.moveTo(mx - nx, my - ny); this.cuts.mark.lineTo(mx + nx, my + ny);
+        }
         this.roadKey = g.roadVersion;
     }
 
@@ -608,6 +618,11 @@ class RealisticMap {
         x.strokeStyle = '#efe3c0'; x.lineWidth = Math.max(0.2, 1.1 / b); x.stroke(this.roads[1]);
         x.strokeStyle = 'rgba(70,45,20,0.7)'; x.lineWidth = Math.max(0.6, 3 / b); x.stroke(this.roads[2]);
         x.strokeStyle = '#f3d27a'; x.lineWidth = Math.max(0.32, 1.6 / b); x.stroke(this.roads[2]);
+        x.lineCap = 'butt'; x.setLineDash([2.2 / b, 2.2 / b]); x.lineWidth = Math.max(0.3, 1.5 / b);
+        x.strokeStyle = 'rgba(70,55,35,0.75)'; x.stroke(this.cuts.line);
+        x.strokeStyle = '#f0e8cf'; x.stroke(this.cuts.work);
+        x.setLineDash([]); x.strokeStyle = 'rgba(60,25,15,0.9)'; x.lineWidth = Math.max(0.45, 2 / b); x.stroke(this.cuts.mark);
+        x.lineCap = 'round';
 
         // Fronteras: cinta del color de cada país por dentro de su territorio y línea discontinua encima
         const band = Math.max(0.55, 4 / b);
