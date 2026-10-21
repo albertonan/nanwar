@@ -571,7 +571,7 @@ const CONFIG = {
     FORT_COST: 40,                  // oro por casilla fortificada
     FORT_TURNS: 3,                  // turnos de obra hasta que la fortificación funciona
     FORT_DEFENSE: 1.75,             // defensa en casilla fortificada
-    SUPPLY_ROAD_RANGE: 4,           // casillas abastecidas alrededor de la red de carreteras unida a la capital
+    SUPPLY_ROAD_RANGE: 4,           // casillas abastecidas alrededor de la red de carreteras unida a la capital (también por mar, de puerto a puerto)
     SUPPLY_CITY_RANGE: 2,           // casillas abastecidas alrededor de cada ciudad propia
     // Progresión: las provincias se desarrollan con el tiempo, expandirse da renta extra y los recursos pesan más.
     DEV_GROWTH_CONNECTED: 10,       // desarrollo por turno (en milésimas) de una provincia unida por carretera a la capital
@@ -1061,6 +1061,28 @@ const SEA_PROV = new Int16Array(G.N).fill(-1);     // celda → provincia de la 
         for (let d = 0; d < 6; d++) { const j = G.nb[c * 6 + d]; if (j >= 0 && SEA_PROV[j] < 0) { SEA_PROV[j] = SEA_PROV[c]; queue.push(j); } }
     }
 }
+const SEA_BODY = new Int16Array(G.N).fill(-1);     // celda de mar → mar al que pertenece (masas de agua unidas)
+{
+    let n = 0;
+    for (let s = 0; s < G.N; s++) {
+        if (isLand(s) || SEA_BODY[s] >= 0) continue;
+        SEA_BODY[s] = n;
+        const stack = [s];
+        while (stack.length) {
+            const u = stack.pop();
+            for (let d = 0; d < 6; d++) { const v = G.nb[u * 6 + d]; if (v >= 0 && afloat(v) && SEA_BODY[v] < 0) { SEA_BODY[v] = n; stack.push(v); } }
+        }
+        n++;
+    }
+}
+// Puertos: provincias cuya ciudad toca el mar o está a una casilla de tierra de él; `seas`, los mares a los que da.
+for (const p of PROVINCES) {
+    const seas = new Set(), shore = c => { for (let d = 0; d < 6; d++) { const j = G.nb[c * 6 + d]; if (j >= 0 && afloat(j)) seas.add(SEA_BODY[j]); } };
+    shore(p.city);
+    for (let d = 0; d < 6; d++) { const j = G.nb[p.city * 6 + d]; if (j >= 0 && isLand(j)) shore(j); }
+    p.seas = [...seas];
+}
+const PORTS = PROVINCES.filter(p => p.seas.length);
 const CAPITAL_OF = new Int16Array(G.N).fill(-1);  // celda → país del que es capital
 E.countries.forEach((c, i) => { CAPITAL_OF[PROVINCES[c.capital].city] = i; });
 const START_PROVINCES = E.countries.map((c, i) => E.provinces.filter(p => p.country === i).length);
@@ -1541,28 +1563,38 @@ class GameEngine {
     }
 
     // --- Economía ---
-    // Casillas a las que llega la red de carreteras desde la capital, pasando por territorio propio o aliado.
+    // Casillas a las que llega la red de carreteras desde la capital, pasando por territorio propio o aliado. El mar
+    // también une: un puerto propio al que llega la red la lleva a los demás puertos propios del mismo mar.
     reachedRoadCells(id) {
         const seen = new Uint8Array(G.N);
         const cap = this.nations[id].capitalCell;
         if (this.owner[cap] !== id) return seen;
-        const queue = [cap];
-        seen[cap] = 1;
-        for (let d = 0; d < 6; d++) {
-            const j = G.nb[cap * 6 + d];
-            if (j >= 0 && this.owner[j] === id) { seen[j] = 1; queue.push(j); }
-        }
-        while (queue.length) {
-            const u = queue.pop();
+        const spread = start => {
+            const queue = [start];
+            seen[start] = 1;
             for (let d = 0; d < 6; d++) {
-                if (!this.road[u * 6 + d]) continue;
-                const v = G.nb[u * 6 + d];
-                if (seen[v]) continue;
-                const o = this.owner[v];
-                if (o !== id && !this.allied(id, o)) continue;
-                seen[v] = 1;
-                queue.push(v);
+                const j = G.nb[start * 6 + d];
+                if (j >= 0 && this.owner[j] === id) { seen[j] = 1; queue.push(j); }
             }
+            while (queue.length) {
+                const u = queue.pop();
+                for (let d = 0; d < 6; d++) {
+                    if (!this.road[u * 6 + d]) continue;
+                    const v = G.nb[u * 6 + d];
+                    if (seen[v]) continue;
+                    const o = this.owner[v];
+                    if (o !== id && !this.allied(id, o)) continue;
+                    seen[v] = 1;
+                    queue.push(v);
+                }
+            }
+        };
+        spread(cap);
+        const ports = PORTS.filter(p => this.owner[p.city] === id), seas = new Set();
+        for (let grew = true; grew;) {
+            grew = false;
+            for (const p of ports) if (this.nearSeen(seen, p.city)) for (const s of p.seas) if (!seas.has(s)) { seas.add(s); grew = true; }
+            for (const p of ports) if (!this.nearSeen(seen, p.city) && p.seas.some(s => seas.has(s))) { spread(p.city); grew = true; }
         }
         return seen;
     }
@@ -1668,7 +1700,8 @@ class GameEngine {
         return { in: inn, out };
     }
     income(id) { const t = this.tribute(id); return this.economy(id).total - t.out + t.in; }
-    // Alcance del suministro: casillas propias o aliadas cerca de la red de carreteras unida a la capital o de una ciudad propia.
+    // Alcance del suministro: casillas propias o aliadas cerca de la red de carreteras unida a la capital (por tierra o por
+    // mar, de puerto a puerto) o de una ciudad propia.
     // Devuelve, por casilla, el alcance que le queda (−1 = sin suministro).
     supplyMap(id) {
         const key = `${this.version}:${this.roadVersion}:${this.blocVersion}:${this.techVersion}`;
@@ -7606,7 +7639,7 @@ class GameUI {
         if (!sea) lines.push(`<b>${esc(p.name)}</b>${g.isDisputed(cell) ? ` <span class="muted">(en disputa: es de ${g.nm(g.legal[cell])})</span>` : ''}`,
             `<span style="color:${g.nations[o].color}">■</span> ${g.nm(o)}${g.player !== null && o !== g.player ? ` ${this.relationChip(o)}` : ''}`);
         if (sea) { /* en el mar no hay dueño, ciudad, terreno, suministro ni obras */ }
-        else if (CITY_OF[cell] >= 0) lines.push(`${CAPITAL_OF[cell] >= 0 ? '★ Capital' : '● Ciudad'}: ${esc(p.cityName)}`);
+        else if (CITY_OF[cell] >= 0) lines.push(`${CAPITAL_OF[cell] >= 0 ? '★ Capital' : '● Ciudad'}: ${esc(p.cityName)}${p.seas.length ? ' (puerto)' : ''}`);
         if (res) {
             const reach = g.resourceReach(res).length;
             lines.push(`${CONFIG.RESOURCE_ICON[res.type]} ${res.typeName} de ${esc(res.name)}: +${res.value} de oro, ${reach ? `abastece a su provincia y a ${plural(reach, 'otra', 'otras')}` : 'abastece solo a su provincia'}`);
@@ -8800,7 +8833,7 @@ class GameUI {
                     const cercado = sides >= CONFIG.SURROUNDED_SIDES;
                     return `<p class="note warn">${cercado ? 'Cercado' : 'Rodeado'} por ${sides} lados: ataque y defensa ×${g.flankFactor(p0, a.cell)} y ${cercado ? 'solo puede avanzar una casilla' : 'mueve la mitad'}. Mejor retirarse o romper el cerco.</p>`; })()}
                 ${this.wearLines(a, true).map(w => `<p class="note warn">${w}</p>`).join('')}
-                ${supplied ? '' : `<p class="note warn">Sin suministro: lejos de tus ciudades y de tu red de carreteras solo avanza una casilla por turno. Construye carreteras hasta el frente para abastecerlo (llegan a ${g.rules(p0).supplyRoad} casillas de la red).</p>`}
+                ${supplied ? '' : `<p class="note warn">Sin suministro: lejos de tus ciudades y de la red de carreteras unida a tu capital (por tierra o, de puerto a puerto, por mar) solo avanza una casilla por turno. Construye carreteras hasta el frente para abastecerlo (llegan a ${g.rules(p0).supplyRoad} casillas de la red).</p>`}
                 ${left <= 0 ? '' : sea ? `<p class="note">Haz clic en una casilla ${this.view.isRealistic() ? 'de la zona clara' : 'verde'} para navegar (${r.seaSpeed} casillas por turno) o desembarcar en la costa, o en una roja para el asalto anfibio (ataque ×${decimal(r.amphibious)}). Desembarcar o asaltar gasta el resto del turno.</p>`
                     : `<p class="note">Haz clic en una casilla ${this.view.isRealistic() ? 'de la zona clara' : 'verde'} para mover o en una roja para atacar. Por carretera llegas más lejos; si no se ha movido este turno, siempre puede avanzar al menos una casilla.</p>`}
             </section>`);
@@ -8887,7 +8920,7 @@ class GameUI {
             <h3>Provincia</h3>
             <div class="control-bar">${bar}</div>
             <dl class="facts">
-                <dt>Ciudad</dt><dd>${esc(p.cityName)}${CAPITAL_OF[p.city] >= 0 ? ' ★' : ''}, en manos de ${g.nm(cityOwner)}</dd>
+                <dt>Ciudad</dt><dd>${esc(p.cityName)}${CAPITAL_OF[p.city] >= 0 ? ' ★' : ''}${p.seas.length ? ', con puerto' : ''}, en manos de ${g.nm(cityOwner)}</dd>
                 <dt>Población</dt><dd>${(p.population / 1e6).toLocaleString('es-ES', { maximumFractionDigits: 2 })} millones</dd>
                 <dt>Renta</dt><dd>${Math.round(p.value * (1 + g.dev[p.id] / 1000))} de oro${connected ? ` (+${CONFIG.ROAD_BONUS * 100} % por carretera)` : ', sin carretera a la capital'}</dd>
                 <dt>Desarrollo</dt><dd>+${Math.round(g.dev[p.id] / 10)} % de renta${g.dev[p.id] < (connected ? CONFIG.DEV_MAX_CONNECTED : CONFIG.DEV_MAX) && g.legal[p.city] === cityOwner ? `, crece un ${(connected ? CONFIG.DEV_GROWTH_CONNECTED : CONFIG.DEV_GROWTH) / 10} % por turno${connected ? '' : ' (con carretera a la capital crecería más)'}` : ''}</dd>
@@ -9695,7 +9728,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.21-000538';
+const APP_VERSION = '2026.10.21-093633';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {

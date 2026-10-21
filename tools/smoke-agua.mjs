@@ -50,6 +50,12 @@ const setup = () => {
             }
             throw new Error('no hay estrecho');
         },
+        // Carretera de la capital de `id` a la ciudad de la provincia `p`, pagada aparte (true si se construye).
+        link(g, id, p) {
+            g.nations[id].gold += 1e7;
+            const plan = g.planRoad(id, g.nations[id].capitalCell, c => c === p.city, 1);
+            return !!plan && g.buildRoad(id, plan) > 0;
+        },
         // Ejército de `n` infanterías de `owner` embarcado en la casilla de mar `sea`.
         embark(g, owner, sea, n = 1) { return g.settle(g.newArmy(owner, sea, { infantry: n, tank: 0, artillery: 0 }, 0)); },
         // Partida empezada desde la interfaz, como haría el jugador (la de smoke-desgaste).
@@ -653,6 +659,41 @@ const CHECKS = [
     const h = GameEngine.load(data);
     T.eq(bad.map((_, i) => h.armies.has(90001 + i)), bad.map(() => false), 'descartados');
     T.eq(h.armies.size, g.armies.size, 'los buenos siguen');
+    return true;
+}],
+['7 · puertos: un puerto propio lejano del mismo mar queda unido a la capital y abastece como la red', () => {
+    const g = T.game(), es = T.nation('es');
+    const take = (p, id) => { for (const c of p.cells) { const x = g.armyOn(c); if (x) g.removeArmy(x); g.owner[c] = id; g.legal[c] = id; } g.version++; };
+    const home = PORTS.filter(p => g.owner[p.city] === es).sort((a, b) => hexDist(a.city, g.nations[es].capitalCell) - hexDist(b.city, g.nations[es].capitalCell))[0];
+    T.ok(T.link(g, es, home), `no hay carretera de Madrid a ${home.cityName}`);
+    const apart = p => p.cells.every(c => [0, 1, 2, 3, 4, 5].every(d => { const j = G.nb[c * 6 + d]; return j < 0 || g.owner[j] !== es; }));
+    const far = PORTS.find(p => g.owner[p.city] !== es && p.seas.some(s => home.seas.includes(s)) && hexDist(p.city, home.city) > 40 && apart(p));
+    const inland = PROVINCES.find(p => !p.seas.length && g.owner[p.city] !== es && hexDist(p.city, home.city) > 40 && apart(p));
+    take(far, es); take(inland, es);
+    const e = g.economy(es);
+    T.ok(e.connected.has(far.id), `${far.name} no queda unida por mar`);
+    T.eq(g.supplyMap(es)[far.city], g.rules(es).supplyRoad, 'alcance de la red en el puerto lejano');
+    T.ok(!e.connected.has(inland.id), `${inland.name}, sin puerto, no debería quedar unida`);
+    T.eq(g.supplyMap(es)[inland.city], CONFIG.SUPPLY_CITY_RANGE, 'una ciudad suelta solo abastece su entorno');
+    // Sin puertos propios unidos a Madrid, el lejano se queda suelto.
+    const fr = T.nation('fr');
+    for (const p of PORTS) if (p !== far && g.owner[p.city] === es) { g.owner[p.city] = fr; g.legal[p.city] = fr; }
+    g.version++;
+    T.ok(!g.economy(es).connected.has(far.id), 'sin puerto en casa, el lejano no debería quedar unido');
+    return true;
+}],
+['M · puertos: Canarias está unida a Madrid por mar y tiene suministro', () => {
+    const g = T.game(), es = T.nation('es');
+    const islands = PROVINCES.filter(p => g.owner[p.city] === es && /Canari|Palmas|Santa Cruz/i.test(`${p.name} ${p.cityName}`));
+    T.ok(islands.length, 'no hay Canarias');
+    T.ok(islands.every(p => !g.economy(es).connected.has(p.id)), 'sin carreteras, Canarias no debería estar unida');
+    const port = PORTS.find(p => g.owner[p.city] === es && /Valencia|Cádiz|Sevilla|Málaga|Barcelona/.test(p.cityName) && p.seas.some(s => islands[0].seas.includes(s)));
+    T.ok(port && T.link(g, es, port), 'no hay carretera de Madrid a un puerto peninsular');
+    for (const p of islands) {
+        T.ok(p.seas.length, `${p.name} no tiene puerto`);
+        T.ok(g.economy(es).connected.has(p.id), `${p.name} no queda unida a Madrid`);
+        T.ok(g.inSupply(es, p.city), `${p.name} sin suministro`);
+    }
     return true;
 }]
 ];
