@@ -939,6 +939,54 @@ const CHECKS = [
         T.eq(op.phase, 'avance', 'y sale');
         return true;
     }],
+    ['A5 · la IA sale en cuanto está reunida aunque no llegue a la ventaja', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), is = T.nation('is');
+        g.start(is); g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 10);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O], { auto: 'auto' });
+        const foe = T.samples(S, O).find(c => hexDist(c, S) === 5);
+        g.owner[foe] = fr; g.legal[foe] = fr; g.version++;
+        g.settle(g.newArmy(fr, foe, { infantry: 200, tank: 0, artillery: 0 }, 0));
+        const xs = T.cellsAt(g, es, S, [0, 1]).map(c => T.army(g, es, c, 0, 3, 0));
+        for (const a of xs) g.assignArmy(a, op.id);
+        const st = g.opReady(op);
+        T.ok(!st.strong && st.ready, `reunida y sin ventaja (${st.ratio}), la IA sale`);
+        g.player = es;
+        T.ok(!g.opReady(op).ready, 'la del jugador, «cuando esté lista», esperaría');
+        g.player = is;
+        const seen = new Set(g.motion);
+        g.executeOp(op);
+        T.eq(op.phase, 'avance', 'sale');
+        T.eq(g.motion.filter(e => e.kind === 'battle' && !seen.has(e)).length, 0, 'pero no ataca lo que no puede');
+        return true;
+    }],
+    ['A5 · en el avance ocupa casillas enemigas vacías del pasillo', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 10, { m: 1, supply: true });
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O]), lane = g.opCorridor(op);
+        // Los flancos del pasillo (a 2 casillas o más de la recta), entre las casillas 3 y 7 del camino, pasan a Francia.
+        const L = Math.hypot(G.cx[O] - G.cx[S], G.cy[O] - G.cy[S]);
+        const off = c => Math.abs((G.cx[O] - G.cx[S]) * (G.cy[c] - G.cy[S]) - (G.cy[O] - G.cy[S]) * (G.cx[c] - G.cx[S])) / L / G.W;
+        const flank = [...lane].filter(c => isLand(c) && g.owner[c] === es && !g.armyAt[c] && CITY_OF[c] < 0 && off(c) >= 1.8 && g.opAlong(op, c) >= 3 && g.opAlong(op, c) <= 7);
+        T.ok(flank.length >= 4, `flancos (${flank.length})`);
+        for (const c of flank) { g.owner[c] = fr; g.legal[c] = fr; }
+        g.version++;
+        const [tk, inf] = T.cellsAt(g, es, S, [0, 1]).map((c, i) => T.army(g, es, c, i ? 6 : 0, i ? 0 : 6, 0));
+        for (const a of [tk, inf]) g.assignArmy(a, op.id);
+        for (let t = 0; t < 25 && g.ops.has(op.id); t++) {
+            T.turns(g, es, 1);
+            if (!g.ops.has(op.id)) break;
+            T.ok(g.opAlong(op, tk.cell) - g.opAlong(op, inf.cell) <= OP_LEAD + 1e-9, 'sin perder la cohesión');
+            T.ok(lane.has(tk.cell) && lane.has(inf.cell), 'dentro del pasillo');
+        }
+        const taken = flank.filter(c => g.owner[c] === es).length;
+        T.ok(taken > 0, `toma casillas de los flancos (${taken} de ${flank.length})`);
+        T.eq(g.owner[O], es, 'y el objetivo');
+        return true;
+    }],
     ['A5 · sigue los puntos de la flecha en orden', () => {
         const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
         g.start(es); g.declareWar(es, fr);
