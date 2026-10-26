@@ -341,7 +341,7 @@ Dos ramas nuevas en el área Militar:
   - Prefiere ocupar ciudades sin guarnición o con guarnición débil y los cruces de carreteras. Al entrar en una ciudad enemiga empieza el asedio, como hoy.
   - **Deja guarnición**: al seguir adelante desde una ciudad asediada, deja en ella un destacamento que mantiene el asedio. Son 2 infanterías, o la unidad más barata si no lleva infantería. Así el asedio no se pierde.
   - Una punta que se queda sin suministro o pasa hambre lo dice el parte. Igualmente sigue mientras tenga el umbral.
-  - Se detiene si se aleja más de 6 casillas por delante del seguimiento (10 en el mundo, en km: 120 y 850 km), para no quedar cercada. Espera a que el seguimiento se acerque.
+  - Se detiene si se aleja más de 6 casillas por delante del seguimiento, en los dos mapas (unos 120 km en Europa y 510 km en el mundo), para no quedar cercada. Espera a que el seguimiento se acerque.
 - **(Decisión mía)** Con la parte A, «aislado» y «sin carretera» ya castigan a la punta que se interna sola. Es el precio de la velocidad, y el seguimiento lo compensa (D3).
 
 ### D3 · Escalón de seguimiento y logística
