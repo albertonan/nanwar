@@ -1188,6 +1188,58 @@ const CHECKS = [
         T.eq([old[0], old.at(-1)], [300, 0], `partida sin la cuenta: ${old}`);
         return true;
     }],
+    ['Revisión · la invitación de un país que se vuelve paria se retira, y no se acepta la de un paria', () => {
+        const g = T.game(), es = T.nation('es'), it = T.nation('it'), de = T.nation('de'), fr = T.nation('fr');
+        g.start(es);
+        const bl = g.createBloc(de, 'Pacto de prueba', false);
+        bl.members.add(fr); g.blocsChanged();
+        g.proposals.push({ kind: 'bloque', from: it, blocId: null }, { kind: 'bloque', from: de, blocId: bl.id }, { kind: 'paz', from: it });
+        g.makePariah(it);
+        T.eq(g.proposals.map(p => p.kind + p.from), ['bloque' + de, 'paz' + it], 'la de Italia se retira; la paz sigue');
+        T.luck(g, 0.99);   // nadie deja el bloque
+        g.makePariah(fr);
+        T.eq(g.proposals.map(p => p.kind + p.from), ['paz' + it], 'la de un bloque con un paria, también');
+        // Aunque estuviera en pie, aceptarla no alía con el paria.
+        g.proposals.push({ kind: 'bloque', from: it, blocId: null });
+        g.answerProposal(g.proposals.length - 1, true);
+        T.eq(g.allied(es, it), false, 'sin alianza');
+        T.ok(/paria nuclear/.test(g.logs.at(-1).msg), `parte: ${g.logs.at(-1).msg}`);
+        return true;
+    }],
+    ['Revisión · la provincia contaminada no recupera desarrollo mientras dure', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), R = kmCells(40);
+        g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'estrategicas3');
+        const cell = T.clear(g, fr, R + 1), pid = G.prov[cell];
+        const other = PROVINCES.find(p => g.owner[p.city] === fr && g.legal[p.city] === fr && hexDist(p.city, cell) > 2 * R + 2).id;
+        g.nations[es].arsenal.nuclear = 1;
+        const t0 = g.turn;
+        g.launchStrike(es, 'nuclear', 1, 'area', cell);
+        g.dev[other] = 0;
+        T.eq(g.dev[pid], 0, 'arrasada');
+        g.beginNationTurn(fr);
+        T.eq([g.dev[pid], g.dev[other] > 0], [0, true], 'no crece; otra provincia sí');
+        g.turn = t0 + NUKE.FALLOUT_TURNS;
+        g.beginNationTurn(fr);
+        T.ok(g.dev[pid] > 0, 'sin contaminación, vuelve a crecer');
+        return true;
+    }],
+    ['Revisión · el misil pesado destruye el aeródromo con sus escuadrones; el misil lo deja inservible', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'cohete3');
+        const city = PROVINCES.map(p => p.city).find(c => g.owner[c] === fr && g.launchers(es, 'missile', c).length > 0);
+        T.airfield(g, fr, city);
+        const sqs = T.squad(g, fr, city, 2);
+        Object.assign(g.nations[es].arsenal, { missile: 1, heavy: 1 });
+        T.luck(g, 0.5);
+        let res = g.launchStrike(es, 'missile', 1, 'airfield', city);
+        T.ok(g.airfields.has(city) && !g.airfieldUp(city) && sqs.every(q => g.squadrons.has(q.id)), `misil: inservible: ${res.text}`);
+        g.airfields.get(city).downUntil = 0;
+        T.ok(/destruye con sus escuadrones/.test(g.strikeOdds(es, 'heavy', 1, 'airfield', city).effect), 'previsión');
+        res = g.launchStrike(es, 'heavy', 1, 'airfield', city);
+        T.ok(!g.airfields.has(city) && sqs.every(q => !g.squadrons.has(q.id)), `pesado: destruido: ${res.text}`);
+        T.ok(/queda destruido con 2 escuadrones/.test(res.text), `parte: ${res.text}`);
+        return true;
+    }],
     ['Revisión · una partida de antes de las nucleares siembra a las potencias al cargar', () => {
         const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), S = ['estrategicas1', 'estrategicas2', NUKE_TECH];
         g.start(es);

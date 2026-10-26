@@ -972,7 +972,7 @@ const STRIKE_FX = {
     rocket:      { loss: [0.06, 0.03], kinds: ['army', 'roads'] },
     heavyRocket: { loss: [0.10, 0.04], kinds: ['army', 'roads', 'aa'], aa: 'hit' },
     missile:     { loss: [0.15, 0.05], kinds: ['army', 'fort', 'aa', 'battery', 'airfield'], disorg: true, fort: 1, aa: 'kill' },
-    heavy:       { loss: [0.25, 0.05], kinds: ['army', 'fort', 'aa', 'battery', 'airfield'], fort: 2, aa: 'kill', splash: 0.08, dev: 0.75 },
+    heavy:       { loss: [0.25, 0.05], kinds: ['army', 'fort', 'aa', 'battery', 'airfield'], fort: 2, aa: 'kill', splash: 0.08, dev: 0.75, field: 'kill' },
     guided:      { loss: [0.15, 0.05], kinds: ['army', 'fort', 'aa', 'battery', 'airfield'], fort: 1, aa: 'kill', precise: true },
     nuclear:     { kinds: ['army', 'area'], precise: true, nuke: true }
 };
@@ -3697,7 +3697,7 @@ class GameEngine {
             case 'roads': effect = `corta sus carreteras (${pc(chance)})`; break;
             case 'aa': effect = `${fx.aa === 'hit' ? 'lo daña' : 'lo destruye'} (${pc(chance)})`; break;
             case 'battery': effect = `la destruye (${pc(chance)})`; break;
-            case 'airfield': effect = `lo deja inservible ${STRIKE_DOWN_TURNS} turnos (${pc(chance)})`; break;
+            case 'airfield': effect = fx.field === 'kill' ? `lo destruye con sus escuadrones (${pc(chance)})` : `lo deja inservible ${STRIKE_DOWN_TURNS} turnos (${pc(chance)})`; break;
         }
         if (fx.dev && CITY_OF[cell] >= 0) effect += `; el desarrollo de la provincia baja un ${pc(1 - fx.dev)} por cada uno`;
         return { why, n, through: def.through, stopped: def.stopped, sources: def.sources, hit, hits, known,
@@ -3771,8 +3771,15 @@ class GameEngine {
             case 'battery': this.batteries.delete(cell); this.airVersion++; break;
             case 'airfield': {
                 const f = this.airfields.get(cell);
-                f.downUntil = this.nextOwnTurn(f.owner) + STRIKE_DOWN_TURNS - 1;
-                st.down = f.downUntil;
+                if (fx.field === 'kill') {   // el misil pesado lo destruye, con sus escuadrones (como la bomba)
+                    const lost = this.squadronsAt(cell);
+                    for (const q of lost) this.squadrons.delete(q.id);
+                    this.airfields.delete(cell);
+                    st.field = { squadrons: lost.length };
+                } else {
+                    f.downUntil = this.nextOwnTurn(f.owner) + STRIKE_DOWN_TURNS - 1;
+                    st.down = f.downUntil;
+                }
                 this.airVersion++;
                 break;
             }
@@ -3804,7 +3811,7 @@ class GameEngine {
         this.strikeVersion = (this.strikeVersion ?? 0) + 1;   // la repetición de la IA espera a que se vea
         if (fx.nuke) return this.nukeStrike(owner, n, cell, def, through);
         const known = kind === 'aa' || kind === 'battery' || fx.precise || this.knownCell(owner, cell);
-        const st = { hits: 0, missed: 0, lost: 0, disorg: false, gone: false, splash: new Map(), roads: 0, levels: 0, aa: '', down: 0, dev: null };
+        const st = { hits: 0, missed: 0, lost: 0, disorg: false, gone: false, splash: new Map(), roads: 0, levels: 0, aa: '', down: 0, field: null, dev: null };
         for (let i = 0; i < through && this.strikeStands(kind, cell, army, src); i++) {
             if (!known && this.rng() < 1 - BASE_RULES.blindHit) { st.missed++; continue; }
             st.hits++;
@@ -3845,7 +3852,7 @@ class GameEngine {
             }
             case 'aa': effect = st.aa; break;
             case 'battery': effect = 'queda destruida'; break;
-            case 'airfield': effect = `queda inservible hasta el turno ${st.down + 1}`; break;
+            case 'airfield': effect = st.field ? `queda destruido${st.field.squadrons ? ` con ${plural(st.field.squadrons, 'escuadrón', 'escuadrones')}` : ''}` : `queda inservible hasta el turno ${st.down + 1}`; break;
         }
         if (st.hits && st.dev !== null) effect += `; el desarrollo de la provincia baja de ${st.dev} a ${this.dev[CITY_OF[cell]]}`;
         const tail = [effect, st.missed ? `${plural(st.missed, 'falla', 'fallan')} a ciegas` : ''].filter(Boolean).join('; ');
@@ -3958,7 +3965,8 @@ class GameEngine {
     }
     // Quien lanza una nuclear queda paria NUKE.PARIAH_TURNS turnos: las IA le declaran la guerra con la warRatio ×0,6 y
     // no firman con él la paz ni alianzas (peaceWish, acceptsPeace, acceptsBloc, admits), y cada aliado suyo de la IA deja
-    // el bloque con un 50 % (el jugador decide él). Las propuestas de paz y de alianza que tenga el jugador paria se retiran.
+    // el bloque con un 50 % (el jugador decide él). Las propuestas de paz y de alianza que tenga el jugador paria se retiran;
+    // si el paria es una IA, se retiran sus invitaciones al jugador (y las de los bloques en los que está).
     // Pasado ese tiempo, sus guerras siguen las reglas de siempre (también la salida por tiempo), así que no se eternizan.
     makePariah(id) {
         const nat = this.nations[id];
@@ -3973,6 +3981,7 @@ class GameEngine {
             if (this.rng() < NUKE.ALLY_LEAVE) this.leaveBloc(bl, m, ` tras el ataque nuclear de ${nat.name}`);
         }
         if (id === this.player) this.proposals = this.proposals.filter(p => p.kind !== 'paz' && p.kind !== 'bloque');
+        else this.proposals = this.proposals.filter(p => p.kind !== 'bloque' || (p.from !== id && !this.bloc(p.blocId)?.members.has(id)));
     }
     // ¿Pierde `id` de verdad? Su capital tomada, asediada o con un ejército enemigo al lado, o el 40 % de sus provincias
     // de partida ocupadas por quien está en guerra con él.
@@ -8850,9 +8859,11 @@ class GameEngine {
             if (this.over) return 0;
         }
         const econ = this.economy(id);
+        // Una provincia con alguna casilla contaminada (C4) no crece: la arrasada se queda en 0 mientras dure.
+        const hot = this.fallout.size ? new Set([...this.fallout.keys()].filter(c => this.contaminated(c)).map(c => G.prov[c])) : null;
         let grew = false;
         for (const p of PROVINCES) {
-            if (this.owner[p.city] !== id || this.legal[p.city] !== id) continue;
+            if (this.owner[p.city] !== id || this.legal[p.city] !== id || hot?.has(p.id)) continue;
             const linked = econ.connected.has(p.id);
             const max = linked ? CONFIG.DEV_MAX_CONNECTED : CONFIG.DEV_MAX;
             if (this.dev[p.id] >= max) continue;
@@ -9733,6 +9744,8 @@ class GameEngine {
         if (pr.kind === 'paz' && this.atWar(pr.from, p)) this.settlePeace(p, pr.from, { mode: 'annex' });
         else if (pr.kind === 'bloque' && !this.atWar(pr.from, p)) {
             let bloc = pr.blocId ? this.bloc(pr.blocId) : null;
+            const why = this.pariahWhy(p, pr.from, ...(bloc?.members ?? []));   // nadie firma alianzas con un paria (C4)
+            if (why) { this.log(`No puedes aceptar la alianza de ${this.nm(pr.from)}: ${why}.`); return; }
             if (!bloc) { bloc = this.createBloc(pr.from, `Pacto de ${this.nations[pr.from].capitalName}`, false); this.blocsChanged(); this.log(`Nace ${bloc.name}.`); }
             this.joinBloc(bloc, p);
         }
