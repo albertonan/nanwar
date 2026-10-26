@@ -395,6 +395,7 @@
         .peace-opt.on { border-color: var(--signal); box-shadow: inset 5px 0 0 var(--signal); }
         .peace-opt:disabled { opacity: 0.45; cursor: not-allowed; }
         .warn-text { color: #ffb347; }
+        .ok-text { color: #8fd18f; }
         dialog { border: 0; padding: 0; background: none; color: var(--text); }
         dialog::backdrop { background: rgba(10, 14, 10, 0.6); }
         dialog .float { padding: 18px; width: min(480px, calc(100vw - 32px)); }
@@ -637,6 +638,11 @@ const CONFIG = {
     CITY_DEFENSE: 1.25,
     CAPITAL_DEFENSE: 1.5,
     TRUCE_TURNS: 6,
+    WAR_MIN_TURNS: 8,          // nadie negocia la paz antes, salvo el vencido
+    WAR_REDECLARE_TURNS: 10,   // tras una paz, la IA no vuelve a atacar al mismo país hasta pasada la tregua y estos turnos más
+    WAR_SUPERIOR: 1.25,        // un bando con esta fuerza o más frente al otro se ve muy superior
+    WAR_STALL_TURNS: 6,        // sin ganar terreno en estos turnos, la guerra está estancada
+    PEACE_LOG_TURNS: 5,        // la propuesta de paz que sigue en pie se repite en el registro cada estos turnos
     RECRUIT_PER_MILLION: 1 / 1.5,   // reclutas por turno y provincia: 1 + población/1,5 M
     ROAD_BONUS: 0.25,               // +25 % de renta en provincias unidas por carretera a la capital
     ROAD_MOVE: { 1: 6, 2: 4 },      // coste en subpuntos por tramo: carretera ½, autopista ⅓
@@ -785,6 +791,16 @@ const AGGRESSION = {
     caos: { name: "Caos total", desc: "Todos contra todos: guerras constantes, traiciones entre aliados y paces escasas.",
         warChance: 0.4, warRatio: 0.85, warFrom: 1, maxWars: 3, peaceRatio: 0.25, peaceAfter: 30, blocChance: 0.4, betrayChance: 0.08 }
 };
+// Motivos de una guerra (rel.war.goal.kind): conquista (quien la declara, a por las provincias fronterizas del otro),
+// defensa (el atacado; no se guarda: es el otro lado de una conquista), alianza (entra en defensa de un aliado) y
+// señor (el satélite que entra por su señor).
+const WAR_GOALS = ['conquista', 'defensa', 'alianza', 'señor'];
+// Por qué quiere la paz un país (peaceWish): ha cumplido su objetivo, se ve inferior, ha perdido territorio, la guerra
+// se ha estancado, dura ya demasiado (2 × peaceAfter) o está vencido.
+const PEACE_WHY = ['objetivo', 'inferior', 'territorio', 'estancada', 'larga', 'vencido'];
+// Los mismos motivos, como se dicen en el registro y en el cajón de Países.
+const PEACE_WHY_TEXT = { objetivo: 'ha cumplido su objetivo', inferior: 'se ve inferior', territorio: 'ha perdido territorio',
+    estancada: 'la guerra se ha estancado', larga: 'la guerra dura ya demasiado', vencido: 'está vencido' };
 const ALLIANCE_SETUPS = { reales: "Reales: OTAN y OTSC", ninguna: "Ninguna: cada país por su cuenta" };
 const VICTORY_SETUPS = { 0.5: `Dominar el 50 % ${MAP.of}`, 0.75: `Dominar el 75 % ${MAP.of}`, 1: "Eliminar a todas las naciones" };
 
@@ -1345,7 +1361,8 @@ class GameEngine {
         const n = this.nations.length;
         this.relations = Array.from({ length: n }, () => []);
         for (let a = 0; a < n; a++) for (let b = a + 1; b < n; b++) {
-            const r = { state: 'paz', since: 0, truceUntil: 0 };
+            // war: el motivo de la guerra en curso (ver startWar); noWarUntil: hasta cuándo la IA no vuelve a atacar
+            const r = { state: 'paz', since: 0, truceUntil: 0, noWarUntil: 0, war: null };
             this.relations[a][b] = r; this.relations[b][a] = r;
         }
 
@@ -1420,7 +1437,8 @@ class GameEngine {
         const relations = [];
         for (let a = 0; a < this.nations.length; a++) for (let b = a + 1; b < this.nations.length; b++) {
             const r = this.relations[a][b];
-            if (r.state !== 'paz' || r.since || r.truceUntil) relations.push([a, b, r.state, r.since, r.truceUntil]);
+            // [a, b, estado, desde, tregua, sin volver a atacar hasta, motivo de la guerra en curso]
+            if (r.state !== 'paz' || r.since || r.truceUntil || r.noWarUntil) relations.push([a, b, r.state, r.since, r.truceUntil, r.noWarUntil, r.state === 'guerra' ? r.war : null]);
         }
         return {
             format: 'eurowar-1', mapId: MAP_ID, map: `${G.land.length}:${PROVINCES.length}`, move: MOVE,
@@ -1501,7 +1519,7 @@ class GameEngine {
         g.proposals = list(data.proposals).filter(p => ['paz', 'bloque', 'llamada'].includes(p?.kind)).map(p => (
             p.kind === 'llamada' ? { kind: 'llamada', from: nat(p.from), against: nat(p.against) }
             : p.kind === 'bloque' ? { kind: 'bloque', from: nat(p.from), blocId: p.blocId === null || p.blocId === undefined ? null : int(p.blocId, 0, 1e6, 0) }
-            : { kind: 'paz', from: nat(p.from) }));
+            : { kind: 'paz', from: nat(p.from), ...(PEACE_WHY.includes(p.why) ? { why: p.why } : {}) }));
         g.proposedThisTurn = new Set(list(data.proposed).map(x => str(x, 40)));
         const s = data.settings ?? {};
         g.settings = {
@@ -1624,11 +1642,24 @@ class GameEngine {
         }));
         g.techVersion++;   // lo calculado hasta aquí no conocía la investigación
         for (const c of oldForts) g.fort[c] = g.owner[c] >= 0 ? g.fortMax(g.owner[c]) : 1;
-        for (const row of g.relations) for (const r of row) if (r) Object.assign(r, { state: 'paz', since: 0, truceUntil: 0 });
+        for (const row of g.relations) for (const r of row) if (r) Object.assign(r, { state: 'paz', since: 0, truceUntil: 0, noWarUntil: 0, war: null });
+        // El motivo de una guerra. Las de partidas de antes no lo traen: no se sabe quién la empezó (by −1, sin objetivo).
+        const warOf = (w, a, b, since) => {
+            const kind = WAR_GOALS.includes(w?.goal?.kind) ? w.goal.kind : null;
+            const by = kind && (w?.by === a || w?.by === b) ? w.by : -1;
+            const goal = by < 0 ? null : { kind, provinces: [...new Set(list(w.goal.provinces).slice(0, 400).map(provIdx))],
+                ...(kind === 'alianza' || kind === 'señor' ? { for: natOrNone(w.goal.for) } : {}) };
+            const gain = x => [int(x?.[0], 0, 1e7, 0), int(x?.[1], 0, 1e6, since)];
+            // told: cuándo y por qué se apuntó en el registro la última propuesta de paz al jugador (null: ninguna en pie).
+            const told = Array.isArray(w?.told) && PEACE_WHY.includes(w.told[1]) ? [int(w.told[0], 0, 1e6, 0), w.told[1]] : null;
+            return { by, goal, since: int(w?.since, 0, 1e6, since), gain: { [a]: gain(w?.gain?.[a]), [b]: gain(w?.gain?.[b]) }, told };
+        };
         for (const x of list(data.relations)) {
             const a = nat(x?.[0]), b = nat(x?.[1]);
             if (a === b) continue;
-            Object.assign(g.relations[a][b], { state: x?.[2] === 'guerra' ? 'guerra' : 'paz', since: int(x?.[3], 0, 1e6, 0), truceUntil: int(x?.[4], 0, 1e6, 0) });
+            const state = x?.[2] === 'guerra' ? 'guerra' : 'paz', since = int(x?.[3], 0, 1e6, 0);
+            Object.assign(g.relations[a][b], { state, since, truceUntil: int(x?.[4], 0, 1e6, 0), noWarUntil: int(x?.[5], 0, 1e6, 0),
+                war: state === 'guerra' ? warOf(x?.[6], a, b, since) : null });
         }
         g.warVersion++;
         g.armies = new Map();
@@ -7806,7 +7837,7 @@ class GameEngine {
         for (const a of [...this.armies.values()]) if (a.owner === id) this.removeArmy(a);
         for (const op of this.opsOf(id)) this.endOp(op);
         if (this.sats.some(s => s.owner === id)) { this.sats = this.sats.filter(s => s.owner !== id); this.airVersion++; }   // sin nadie que los use
-        for (const o of this.nations) if (o.id !== id) Object.assign(this.rel(id, o.id), { state: 'paz' });
+        for (const o of this.nations) if (o.id !== id) Object.assign(this.rel(id, o.id), { state: 'paz', war: null });
         this.warVersion++;
         for (const b of this.blocsOf(id)) this.leaveBloc(b, id);
         this.proposals = this.proposals.filter(p => p.from !== id && p.against !== id);
@@ -8196,6 +8227,7 @@ class GameEngine {
         if (this.over || this.player === null) return false;
         this.executeOrders(this.player);   // lo que quede de las órdenes del jugador, antes de que jueguen los demás
         if (this.over) return false;
+        this.trackWarGains();   // lo ganado hasta aquí, para ver qué guerras se estancan
         for (const p of [...this.proposals]) this.answerProposal(this.proposals.indexOf(p), false, true);
         this.proposals = [];
         this.alerts = [];
@@ -8221,28 +8253,61 @@ class GameEngine {
     }
 
     // --- Diplomacia ---
-    declareWar(a, b) {
+    // Pone en guerra a `x` e `y` y guarda el motivo en su relación: quién entra (`by`), su objetivo (goal: { kind,
+    // provinces, for: por quién entra, en alianza o por su señor }) y desde cuándo. gain: lo más que ha llegado a ocupar
+    // cada uno del otro bando y en qué turno (para ver si se estanca; lo apunta trackWarGains). told: la última propuesta
+    // de paz al jugador apuntada en el registro. Lo ganado y lo perdido se mide por lo ocupado, no por casillas legales.
+    startWar(x, y, by, goal) {
+        Object.assign(this.rel(x, y), { state: 'guerra', since: this.turn,
+            war: { by, goal, since: this.turn, gain: { [x]: [0, this.turn], [y]: [0, this.turn] }, told: null } });
+        this.warVersion++;
+    }
+    // Objetivo de una conquista: las provincias de `b` (suyas de derecho y en su poder) que tocan territorio de `a`; si no
+    // se tocan (por mar), las dos ciudades de `b` más cerca de la capital de `a`. Lo que `b` solo ocupa no entra: es de
+    // otro país, que no está en esta guerra.
+    conquestGoal(a, b) {
+        const out = new Set(), own = c => this.legal[c] === b && this.owner[c] === b;
+        for (const i of G.land) {
+            if (this.owner[i] !== a) continue;
+            for (let d = 0; d < 6; d++) {
+                const j = G.nb[i * 6 + d];
+                if (j >= 0 && isLand(j) && own(j) && own(PROVINCES[G.prov[j]].city)) out.add(G.prov[j]);
+            }
+        }
+        if (out.size) return [...out].sort((x, y) => x - y);
+        const cap = this.nations[a].capitalCell, d2 = p => (G.cx[p.city] - G.cx[cap]) ** 2 + (G.cy[p.city] - G.cy[cap]) ** 2;
+        return PROVINCES.filter(p => own(p.city)).sort((x, y) => d2(x) - d2(y) || x.id - y.id).slice(0, 2).map(p => p.id);
+    }
+    declareWar(a, b, goal = null) {
         const r = this.rel(a, b);
         if (r.state === 'guerra' || this.turn < r.truceUntil || !this.nations[b].alive || a === b) return false;
         if (this.nations[a].overlord === b || this.nations[b].overlord === a) return false;   // ni el satélite ni su señor se atacan
         for (const bl of this.sharedBlocs(a, b)) this.leaveBloc(bl, a, ` por atacar a ${this.nm(b)}`);
-        Object.assign(r, { state: 'guerra', since: this.turn });
+        this.startWar(a, b, a, goal ?? { kind: 'conquista', provinces: this.conquestGoal(a, b) });
         this.log(`${this.nm(a)} DECLARA LA GUERRA a ${this.nm(b)}.`);
         if (b === this.player) this.alerts.push({ kind: 'war', from: a });
-        const joined = [], handled = new Set([a, b]);
+        // Cada aliado de `b` decide si acude (allyJoins); el jugador recibe la llamada y decide él.
+        const joined = [], absent = [], handled = new Set([a, b]), powers = this.powers();
         for (const bl of this.blocsOf(b)) {
             for (const c of [...bl.members]) {
                 if (handled.has(c) || !this.nations[c].alive || this.atWar(c, a)) continue;
                 handled.add(c);
+                if (c === this.player) { this.reveal(bl); this.proposals.push({ kind: 'llamada', from: b, against: a }); continue; }
+                if (!this.allyJoins(c, a, b, { powers })) { absent.push(c); continue; }
                 this.reveal(bl);
-                if (c === this.player) { this.proposals.push({ kind: 'llamada', from: b, against: a }); continue; }
                 for (const bl2 of this.sharedBlocs(c, a)) this.leaveBloc(bl2, c, ` para defender a ${this.nm(b)}`);
-                Object.assign(this.rel(c, a), { state: 'guerra', since: this.turn });
+                this.startWar(c, a, c, { kind: 'alianza', provinces: [], for: b });
                 joined.push(this.nm(c));
                 if (a === this.player) this.alerts.push({ kind: 'joined', from: c, defending: b });
             }
         }
         if (joined.length) this.log(`En defensa de ${this.nm(b)} entran en guerra contra ${this.nm(a)}: ${joined.join(', ')}.`);
+        // Quien no acude no entra en guerra. Si su alianza con `b` es pública, `b` deja de fiarse: sale de ella con un 30 %.
+        for (const c of absent) {
+            const shared = this.sharedBlocs(c, b);
+            if (shared.some(bl => !bl.secret) || this.involvesPlayer(b, c)) this.log(`${this.nm(c)} no acude en defensa de ${this.nm(b)}.`);
+            for (const bl of shared) if (!bl.secret && this.rng() < 0.3) this.leaveBloc(bl, c, ` por no acudir en defensa de ${this.nm(b)}`);
+        }
         for (const s of this.nations) {
             if (!s.alive || s.overlord < 0 || handled.has(s.id)) continue;
             const side = s.overlord === a ? a : s.overlord === b ? b : -1;
@@ -8250,20 +8315,21 @@ class GameEngine {
             const foe = side === a ? b : a;
             handled.add(s.id);
             if (this.atWar(s.id, foe)) continue;
-            Object.assign(this.rel(s.id, foe), { state: 'guerra', since: this.turn });
+            this.startWar(s.id, foe, s.id, { kind: 'señor', provinces: [], for: side });
             this.log(`${s.name}, satélite de ${this.nm(side)}, entra en la guerra contra ${this.nm(foe)}.`);
             if (foe === this.player) this.alerts.push({ kind: 'joined', from: s.id, defending: side });
         }
         const lord = this.nations[b].overlord;
         if (lord >= 0 && !handled.has(lord) && lord !== a && !this.atWar(lord, a)) {
             if (lord === this.player) this.proposals.push({ kind: 'llamada', from: b, against: a });
-            else Object.assign(this.rel(lord, a), { state: 'guerra', since: this.turn });
+            else this.startWar(lord, a, lord, { kind: 'alianza', provinces: [], for: b });
         }
         this.warVersion++;
         return true;
     }
     makePeace(a, b, quiet = false) {
-        Object.assign(this.rel(a, b), { state: 'paz', since: this.turn, truceUntil: this.turn + CONFIG.TRUCE_TURNS });
+        Object.assign(this.rel(a, b), { state: 'paz', since: this.turn, truceUntil: this.turn + CONFIG.TRUCE_TURNS,
+            noWarUntil: this.turn + CONFIG.TRUCE_TURNS + CONFIG.WAR_REDECLARE_TURNS, war: null });
         this.warVersion++;
         if (!quiet) this.log(`PAZ entre ${this.nm(a)} y ${this.nm(b)} (tregua hasta el turno ${this.turn + CONFIG.TRUCE_TURNS}).`);
     }
@@ -8310,7 +8376,7 @@ class GameEngine {
         this.blocsChanged();
         // Hace la paz con quien no esté en guerra con su señor y entra en las guerras de su señor.
         for (const e of this.enemiesOf(sat)) if (!this.atWar(lord, e)) this.settlePeace(sat, e, { mode: 'annex' });
-        for (const e of this.enemiesOf(lord)) if (!this.atWar(sat, e)) Object.assign(this.rel(sat, e), { state: 'guerra', since: this.turn });
+        for (const e of this.enemiesOf(lord)) if (!this.atWar(sat, e)) this.startWar(sat, e, sat, { kind: 'señor', provinces: [], for: lord });
         this.warVersion++;
         this.proposals = this.proposals.filter(p => p.from !== sat);
         this.version++;
@@ -8337,13 +8403,47 @@ class GameEngine {
             if (dest >= 0) { a.cell = dest; a.used = 999; this.armies.set(a.id, a); this.settle(a); }
         }
     }
-    // ¿Está `ai` claramente vencido por el jugador y sus satélites? (capital ocupada, el 40 % de su tierra o un tercio de su fuerza)
-    isCrushed(ai) {
-        const side = new Set([this.player, ...this.satellitesOf(this.player)]);
-        let legalCells = 0, occupied = 0;
-        for (const i of G.land) if (this.legal[i] === ai) { legalCells++; if (side.has(this.owner[i])) occupied++; }
-        const powers = this.powers(), mine = [...side].reduce((s, x) => s + powers[x], 0);
-        return side.has(this.owner[this.nations[ai].capitalCell]) || occupied >= legalCells * 0.4 || powers[ai] < mine * 0.35;
+    // Casillas de cada país ocupadas por cada otro (occ[dueño * n + dueño legal]) y casillas legales de cada uno. Se
+    // recalcula solo cuando cambia la propiedad de las casillas.
+    warOccupation() {
+        if (this._occ?.version === this.version) return this._occ;
+        const n = this.nations.length, occ = new Int32Array(n * n), legal = new Int32Array(n);
+        for (const i of G.land) {
+            const o = this.owner[i], l = this.legal[i];
+            if (l < 0) continue;
+            legal[l]++;
+            if (o !== l && o >= 0) occ[o * n + l]++;
+        }
+        return (this._occ = { version: this.version, occ, legal });
+    }
+    // Los dos bandos de la guerra entre `a` y `b`: cada uno con sus aliados en esa misma guerra, su señor y sus
+    // satélites (los que están en guerra con el otro). Se recalcula solo cuando cambian las guerras o las alianzas.
+    warSides(a, b) {
+        const key = `${this.warVersion}:${this.blocVersion}`;
+        if (this._sidesKey !== key) { this._sides = new Map(); this._sidesKey = key; }
+        const k = a * this.nations.length + b;
+        let s = this._sides.get(k);
+        if (!s) {
+            const side = (x, foe) => new Set([x, ...this.nations.filter(n => n.alive && n.id !== x && this.allied(n.id, x) && this.atWar(n.id, foe)).map(n => n.id)]);
+            s = { A: side(a, b), B: side(b, a) };
+            this._sides.set(k, s);
+        }
+        return s;
+    }
+    sidePower(set, powers = this.powers()) { let s = 0; for (const x of set) s += powers[x]; return s; }
+    // ¿Está `x` vencido por el bando `other`? Capital ocupada, el 40 % de su tierra ocupada o su bando (`own`) con menos
+    // de un tercio de la fuerza del otro.
+    crushedBy(x, own, other, powers) {
+        if (other.has(this.owner[this.nations[x].capitalCell])) return true;
+        const { occ, legal } = this.warOccupation(), n = this.nations.length;
+        let taken = 0;
+        for (const o of other) taken += occ[o * n + x];
+        return taken >= legal[x] * 0.4 || this.sidePower(own, powers) * 3 < this.sidePower(other, powers);
+    }
+    // ¿Está `ai` claramente vencido en su guerra con `other` (de partida, el jugador)?
+    isCrushed(ai, other = this.player) {
+        const { A, B } = this.warSides(ai, other);
+        return this.crushedBy(ai, A, B, this.powers());
     }
     // Casillas ocupadas por cada bando en la guerra entre el jugador y `t`.
     occupation(t) {
@@ -8358,16 +8458,191 @@ class GameEngine {
         }
         return { mine, sats, theirs, provinces: provs.size };
     }
+    // ¿Empezó `id` la guerra con `other`, y con qué objetivo? Quien entra por un aliado o por su señor no la empezó; para
+    // quien tiene enfrente cuenta la guerra de origen (la que tiene con `goal.for`): si la empezó él, su objetivo es el de
+    // aquella. target: el país al que quiere quitar esas provincias. rootOver: esa guerra de origen ya ha terminado (se
+    // firmó la paz o el defendido ya no existe).
+    warRole(id, other) {
+        const w = this.rel(id, other).war, none = { started: false, provinces: null, target: -1, rootOver: false };
+        if (!w?.goal || w.by < 0) return none;
+        if (w.goal.kind === 'conquista') return w.by === id ? { started: true, provinces: w.goal.provinces, target: other, rootOver: false } : none;
+        const f = w.goal.for, foe = w.by === id ? other : id;   // w.by entró por `f` contra `foe`
+        if (f < 0 || f === foe || f === w.by) return none;
+        const rootOver = !this.nations[f].alive || !this.atWar(f, foe);
+        if (w.by === id || rootOver) return { ...none, rootOver };
+        const root = this.rel(id, f).war, started = root?.goal?.kind === 'conquista' && root.by === id;
+        return { started, provinces: started ? root.goal.provinces : null, target: started ? f : -1, rootOver };
+    }
+    // Casillas que ocupa el bando de `a` del bando de `b`, y al revés, en su guerra.
+    warHeld(a, b) {
+        const { A, B } = this.warSides(a, b), { occ } = this.warOccupation(), n = this.nations.length;
+        let mine = 0, theirs = 0;
+        for (const x of A) for (const y of B) { mine += occ[x * n + y]; theirs += occ[y * n + x]; }
+        return { A, B, mine, theirs };
+    }
+    // Apunta en cada guerra lo más que ha llegado a ocupar cada bando del otro y en qué turno (gain), para saber si se ha
+    // estancado. Se hace en un solo momento, al empezar la fase de la IA (tras jugar el jugador), para que mirar la
+    // guerra en la interfaz no cambie nada.
+    trackWarGains() {
+        let changed = false;
+        for (let a = 0; a < this.nations.length; a++) {
+            if (!this.nations[a].alive) continue;
+            for (const b of this.enemiesOf(a)) {
+                const w = this.rel(a, b).war;
+                if (!w) continue;
+                const g = w.gain[a] ?? (w.gain[a] = [0, w.since]), { mine } = this.warHeld(a, b);
+                if (mine > g[0]) { g[0] = mine; g[1] = this.turn; changed = true; }
+            }
+        }
+        if (changed) this._wsKey = null;   // los warState de este turno ya no valen
+    }
+    // Cómo va la guerra de `a` con `b`, vista por `a` y por bandos: turnos, casillas que ocupa cada bando del otro,
+    // fuerza de su bando frente al otro, si ha perdido territorio, si ha ganado terreno hace poco (stallIn: turnos que
+    // faltan para que se estanque, según lo apuntado en trackWarGains), si la empezó, si ha cumplido su objetivo y si está
+    // vencido. No cambia nada. Las ocupaciones y los bandos salen de cachés por versión; el estado entero se guarda por
+    // turno, versiones y fuerzas.
+    warState(a, b, powers = this.powers()) {
+        const key = `${this.turn}:${this.version}:${this.warVersion}:${this.blocVersion}`;
+        if (this._wsKey !== key) { this._ws = new Map(); this._wsKey = key; }
+        const k = a * this.nations.length + b, hit = this._ws.get(k);
+        if (hit && hit.powers === powers) return hit.state;
+        const r = this.rel(a, b), w = r.war, { A, B, mine, theirs } = this.warHeld(a, b);
+        const turns = this.turn - r.since, my = this.sidePower(A, powers), other = this.sidePower(B, powers);
+        let stallIn = 0;
+        if (w) {
+            const g = w.gain[a] ?? [0, w.since];
+            stallIn = Math.max(0, g[1] + CONFIG.WAR_STALL_TURNS - this.turn);
+        }
+        // El objetivo: las provincias que siguen siendo de derecho del país al que se las quiere quitar (las que otro se
+        // ha anexionado entretanto ya no se le pueden quitar a él). Sin ninguna, está cumplido.
+        const role = this.warRole(a, b);
+        let goalDone = role.rootOver;
+        if (role.provinces) {
+            const live = role.provinces.filter(pid => this.legal[PROVINCES[pid].city] === role.target);
+            const need = live.length, held = live.filter(pid => A.has(this.owner[PROVINCES[pid].city])).length;
+            goalDone = held >= need || (turns > this.ai.peaceAfter && held * 2 >= need);
+        }
+        const state = { turns, mine, theirs, ratio: other > 0 ? my / other : my > 0 ? Infinity : 1, power: my, enemyPower: other,
+            lost: theirs > mine, gainedRecently: stallIn > 0, stallIn, goalDone, started: role.started, crushed: this.crushedBy(a, A, B, powers) };
+        this._ws.set(k, { powers, state });
+        return state;
+    }
+    // ¿Quiere `ai` la paz con `other`, para proponerla o aceptarla? Nadie antes de WAR_MIN_TURNS turnos salvo el vencido;
+    // pasado ese mínimo, sí si ha cumplido su objetivo, si su bando no llega a 1,25 veces la fuerza del otro o si ha
+    // perdido territorio. Y, porque ha pasado un tiempo, también el que la empezó: tras peaceAfter turnos, si la guerra se
+    // ha estancado (6 turnos sin ganar terreno), y tras 2 × peaceAfter, siempre. Antes, el muy superior que la empezó y
+    // aún no ha cumplido su objetivo ni la propone ni la acepta. blocker: por qué no la quiere y qué le haría quererla;
+    // ways: solo esto último (para la niebla, que no deja ver la fuerza).
+    peaceWish(ai, other, powers = this.powers()) {
+        if (!this.atWar(ai, other)) return { wants: false, why: null, blocker: null, ways: null };
+        const s = this.warState(ai, other, powers), min = CONFIG.WAR_MIN_TURNS, after = this.ai.peaceAfter, long = 2 * after;
+        const yes = why => ({ wants: true, why, blocker: null, ways: null }), t = k => plural(k, 'turno', 'turnos');
+        if (s.crushed) return yes('vencido');
+        if (s.turns < min) return { wants: false, why: null, blocker: `nadie negocia antes de ${min} turnos de guerra; faltan ${t(min - s.turns)}`, ways: null };
+        if (s.goalDone) return yes('objetivo');
+        if (s.ratio < CONFIG.WAR_SUPERIOR) return yes('inferior');
+        if (s.lost) return yes('territorio');
+        if (s.turns > after && !s.gainedRecently) return yes('estancada');
+        if (s.turns >= long) return yes('larga');
+        const stall = Math.max(after + 1 - s.turns, s.stallIn), end = long - s.turns;
+        const ways = `si pierde territorio, si se igualan fuerzas${s.started ? ', cuando cumpla su objetivo' : ''}`
+            + `${stall < end ? `, dentro de ${t(stall)} si se estanca` : ''} y, en todo caso, dentro de ${t(end)}`;
+        const half = s.started && s.turns <= after ? ` (dentro de ${t(after + 1 - s.turns)} le bastará la mitad)` : '';
+        return { wants: false, why: null, ways,
+            blocker: `${s.started ? `se ve muy superior y aún no ha cumplido su objetivo${half}` : 'se ve muy superior'}. Lo hará ${ways}` };
+    }
+    wantsPeace(ai, other, powers = this.powers()) { return this.peaceWish(ai, other, powers).wants; }
+    // Lo que el jugador puede saber de su guerra con `rival`, para el cajón de Países y el diálogo de paz: quién la empezó
+    // y para qué, turnos, fuerza de cada bando (con niebla, la del otro bando es null) y qué haría que el otro aceptase la
+    // paz. Con niebla la frase no deja ver la relación de fuerzas del otro bando: ni dice que se ve inferior o vencido
+    // ni que se ve muy superior.
+    warBrief(rival) {
+        const p = this.player, w = this.rel(p, rival).war, s = this.warState(p, rival), fog = this.settings.fog;
+        const provs = ids => { const n = ids.map(i => PROVINCES[i].name); return n.length > 3 ? `${n.slice(0, 3).join(', ')} y ${n.length - 3} más` : n.join(', '); };
+        const by = w?.by ?? -1, goal = w?.goal, f = goal?.for ?? -1;
+        let origin = 'No consta quién la empezó.';
+        if (goal && by >= 0) {
+            const who = by === p ? 'La declaraste tú' : `La declaró ${this.nm(by)}`, entra = by === p ? 'Entraste' : `${this.nm(by)} entró`;
+            if (goal.kind === 'conquista') origin = `${who} para conquistar ${provs(goal.provinces) || 'territorio'}.`;
+            else if (goal.kind === 'alianza') origin = `${entra} en defensa de ${this.nm(f)}.`;
+            else if (goal.kind === 'señor') origin = `${entra} por su señor ${this.nm(f)}.`;
+        }
+        const wish = this.peaceWish(rival, p);
+        let accept;
+        if (wish.wants) {
+            accept = fog && (wish.why === 'inferior' || wish.why === 'vencido') ? 'Aceptaría la paz.' : `Aceptaría la paz: ${PEACE_WHY_TEXT[wish.why]}.`;
+            if (!this.acceptsWhite(rival, wish.why)) accept += ' Solo quedándose lo que ocupa: no una paz blanca.';
+        } else if (fog && s.turns >= CONFIG.WAR_MIN_TURNS) accept = `No aceptará la paz: no sabes cuánta fuerza reúne su bando. Lo hará ${wish.ways}.`;
+        else accept = `No aceptará la paz: ${wish.blocker}.`;
+        // Si no la empezó él y va por delante, aún puede aceptar que cada uno se quede lo ocupado (ver acceptsPeace).
+        if (!wish.wants && s.turns >= CONFIG.WAR_MIN_TURNS && !this.warRole(rival, p).started) {
+            const occ = this.occupation(rival);
+            if (occ.theirs > occ.mine + occ.sats) accept += ' Aun así, como te ocupa más de lo que le ocupas, puede aceptar que cada uno se quede lo ocupado.';
+        }
+        return { origin, turns: s.turns, power: s.power, enemyPower: fog ? null : s.enemyPower, mine: s.mine, theirs: s.theirs, accept, wants: wish.wants };
+    }
     acceptsPeace(ai, terms, offered) {
         if (terms.mode === 'satellite') return this.isCrushed(ai);
-        if (offered || this.wantsPeace(ai, this.player) || this.isCrushed(ai)) return true;
+        const wish = this.peaceWish(ai, this.player);
+        // Si quiere la paz (o la ha propuesto él), acepta quedarse cada uno lo ocupado; la paz blanca, solo si no pierde con ella.
+        const why = wish.why ?? this.proposals.find(p => p.kind === 'paz' && p.from === ai)?.why;
+        if (offered || wish.wants) return terms.mode !== 'white' || this.acceptsWhite(ai, why);
+        // Además, si va ganando, acepta quedarse lo ocupado: pasado el mínimo de turnos y si no es quien la empezó (el
+        // que la empezó solo la quiere por las razones de peaceWish).
+        const s = this.warState(ai, this.player);
+        if (terms.mode !== 'annex' || s.turns < CONFIG.WAR_MIN_TURNS || s.started) return false;
         const occ = this.occupation(ai);
-        return terms.mode === 'annex' && occ.theirs > occ.mine + occ.sats && this.rng() < 0.6;   // si gana, acepta quedarse lo ocupado
+        return occ.theirs > occ.mine + occ.sats && this.rng() < 0.6;
     }
-    wantsPeace(ai, other, powers = this.powers()) {
-        const r = this.rel(ai, other);
-        if (r.state !== 'guerra') return false;
-        return powers[ai] < powers[other] * this.ai.peaceRatio || (this.turn - r.since >= this.ai.peaceAfter && this.rng() < 0.25);
+    // ¿Acepta `ai`, que quiere la paz con el jugador, que sea blanca? Si está vencido, sí; si no, solo si no pierde nada
+    // con ella: su bando no ocupa más del bando del jugador de lo que este le ocupa a él. Con el objetivo cumplido (o yendo
+    // por delante) quiere la paz quedándose lo ocupado.
+    acceptsWhite(ai, why) {
+        if (why === 'vencido') return true;
+        const o = this.occupation(ai);
+        return o.theirs <= o.mine + o.sats;
+    }
+    // Los bandos que se esperan si `attacker` ataca (o acaba de atacar) a `defender`: los que ya están en guerra, más los
+    // satélites de cada uno (entran siempre) y el señor de `defender`, si lo tiene y no es el jugador.
+    expectedSides(attacker, defender) {
+        const { A, B } = this.warSides(attacker, defender);
+        const atk = new Set([...A, ...this.satellitesOf(attacker)]), def = new Set([...B, ...this.satellitesOf(defender)]);
+        const lord = this.nations[defender].overlord;
+        if (lord >= 0 && lord !== this.player && lord !== attacker) def.add(lord);
+        return { atk, def };
+    }
+    // Probabilidad de que `ally` acuda en defensa de `defender` si lo ataca `attacker`, sin azar: 0 si es mucho más débil
+    // que el atacante (menos del 15 % de su fuerza, sin contar a sus aliados ni satélites); 1 si toca a uno de los dos y
+    // el bando defensor, con él dentro, llega al 70 % del bando atacante; si no, de 0 a 0,8 según la fuerza del bando
+    // defensor frente al atacante. `extra`: fuerza que se da por hecha en el bando defensor (la previsión de E4 suma ahí
+    // a los que acudirían seguro); `sides`: los de expectedSides, si ya se tienen.
+    allyOdds(ally, attacker, defender, powers = this.powers(), extra = 0, sides = this.expectedSides(attacker, defender)) {
+        const { atk: A, def: D } = sides, atk = this.sidePower(A, powers);
+        if (atk <= 0) return 1;
+        if (powers[ally] < 0.15 * powers[attacker]) return 0;
+        const def = this.sidePower(D, powers) + (D.has(ally) ? 0 : powers[ally]) + extra, near = this.borderSets()[ally];
+        if ((near.has(attacker) || near.has(defender)) && def >= 0.7 * atk) return 1;
+        return 0.8 * Math.min(1, def / atk);
+    }
+    // ¿Acude `ally` (una IA) en defensa de `defender`? sure: solo si entraría seguro, sin azar.
+    allyJoins(ally, attacker, defender, { sure = false, powers = this.powers() } = {}) {
+        const p = this.allyOdds(ally, attacker, defender, powers);
+        if (p >= 1) return true;
+        return !sure && p > 0 && this.rng() < p;
+    }
+    // Fuerza que espera encontrar `attacker` si ataca a `defender`: el bando de este, más sus aliados conocidos que
+    // acudirían seguro y la mitad de la fuerza de los dudosos. El jugador decide él: cuenta como dudoso.
+    expectedDefense(attacker, defender, powers = this.powers()) {
+        const sides = this.expectedSides(attacker, defender), { def } = sides;
+        let total = this.sidePower(def, powers), extra = 0;
+        for (const c of this.knownAllies(attacker, defender)) {
+            if (def.has(c) || c === attacker || this.atWar(c, attacker)) continue;
+            if (c === this.player) { total += powers[c] / 2; continue; }
+            const p = this.allyOdds(c, attacker, defender, powers, extra, sides);
+            if (p >= 1) { total += powers[c]; extra += powers[c]; }
+            else if (p > 0) total += powers[c] / 2;
+        }
+        return total;
     }
     // ¿Acepta `ai` entrar en `bloc` (o fundar uno con `inviter` si bloc es null)?
     acceptsBloc(ai, bloc, inviter) {
@@ -8679,7 +8954,7 @@ class GameEngine {
     callToWarOdds(ally, target) {
         const p = this.player;
         if (!this.nations[ally].alive || !this.allied(ally, p) || this.nations[ally].overlord >= 0 || this.atWar(ally, target)
-            || !this.atWar(p, target) || this.turn < this.rel(ally, target).truceUntil) return 0;
+            || !this.atWar(p, target) || this.turn < this.rel(ally, target).truceUntil || this.turn < this.rel(ally, target).noWarUntil) return 0;
         const powers = this.powers();
         const side = id => powers[id] + this.knownAllies(ally, id).filter(x => x !== ally && x !== p).reduce((s, x) => s + powers[x], 0);
         let odds = 0.3;
@@ -8699,7 +8974,7 @@ class GameEngine {
             return false;
         }
         this.log(`${this.nm(ally)} acepta entrar en la guerra a tu lado contra ${this.nm(target)}.`);
-        return this.declareWar(ally, target);
+        return this.declareWar(ally, target, { kind: 'alianza', provinces: [], for: this.player });
     }
     playerAnnexProvince(pid) {
         const p = PROVINCES[pid], sat = this.owner[p.city], me = this.player;
@@ -8730,7 +9005,7 @@ class GameEngine {
         this.nations[me].gold += s.gold;
         s.alive = false;
         s.overlord = -1;
-        for (const o of this.nations) if (o.id !== sat) Object.assign(this.rel(sat, o.id), { state: 'paz' });
+        for (const o of this.nations) if (o.id !== sat) Object.assign(this.rel(sat, o.id), { state: 'paz', war: null });
         this.warVersion++;
         this.blocsChanged();
         this.armyVersion++;
@@ -8778,8 +9053,7 @@ class GameEngine {
         if (pr.kind === 'llamada') {
             if (accept && !this.atWar(p, pr.against)) {
                 for (const bl of this.sharedBlocs(p, pr.against)) this.leaveBloc(bl, p, ` para defender a ${this.nm(pr.from)}`);
-                Object.assign(this.rel(p, pr.against), { state: 'guerra', since: this.turn });
-                this.warVersion++;
+                this.startWar(p, pr.against, p, { kind: 'alianza', provinces: [], for: pr.from });
                 this.log(`Acudes en defensa de ${this.nm(pr.from)}: guerra contra ${this.nm(pr.against)}.`);
             } else if (!accept) {
                 this.log(`${verb} la llamada de ${this.nm(pr.from)}.`);
@@ -8814,19 +9088,32 @@ class GameEngine {
     aiDiplomacy(id, powers) {
         const S = this.ai;
         if (this.nations[id].overlord >= 0) return;   // un satélite sigue la política de su señor
+        // La paz, solo si las dos partes la quieren (peaceWish); al jugador se le propone y decide él.
         for (const e of this.enemiesOf(id)) {
-            if (this.nations[e].overlord >= 0 || !this.atWar(id, e) || !this.wantsPeace(id, e, powers)) continue;   // con un satélite se negocia a través de su señor
-            if (e === this.player) { if (!this.proposals.some(p => p.kind === 'paz' && p.from === id)) this.proposals.push({ kind: 'paz', from: id }); }
-            else if (this.wantsPeace(e, id, powers) || this.rng() < 0.3) this.settlePeace(id, e, { mode: 'annex' });
+            if (this.nations[e].overlord >= 0 || !this.atWar(id, e)) continue;   // con un satélite se negocia a través de su señor
+            const wish = this.peaceWish(id, e, powers), w = this.rel(id, e).war;
+            if (!wish.wants) { if (w) w.told = null; continue; }
+            if (e === this.player) {
+                if (this.proposals.some(p => p.kind === 'paz' && p.from === id)) continue;
+                this.proposals.push({ kind: 'paz', from: id, why: wish.why });
+                // En el registro, la primera vez y luego cada PEACE_LOG_TURNS mientras siga en pie (la propuesta, cada turno).
+                if (!w?.told || this.turn - w.told[0] >= CONFIG.PEACE_LOG_TURNS) {
+                    if (w) w.told = [this.turn, wish.why];
+                    this.log(`${this.nm(id)} propone la paz: ${PEACE_WHY_TEXT[wish.why]}.`);
+                }
+            } else if (this.peaceWish(e, id, powers).wants) this.settlePeace(id, e, { mode: 'annex' });
         }
         const enemies = this.enemiesOf(id);
         if (enemies.length <= S.maxWars && this.turn >= S.warFrom && this.rng() < S.warChance) {
-            const side = t => powers[t] + this.knownAllies(id, t).filter(x => x !== id).reduce((s, x) => s + powers[x], 0);
+            // Declara contando con los aliados del otro que acudirían (los seguros enteros, los dudosos a medias) y
+            // con sus propios satélites, que entran siempre. Tras una paz, no vuelve a por el mismo país hasta noWarUntil.
+            const own = powers[id] + this.satellitesOf(id).reduce((s, x) => s + powers[x], 0), expected = new Map();
+            const side = t => { if (!expected.has(t)) expected.set(t, this.expectedDefense(id, t, powers)); return expected.get(t); };
             const target = [...this.borderSets()[id]]
-                .filter(b => this.nations[b].alive && !this.atWar(id, b) && this.turn >= this.rel(id, b).truceUntil
+                .filter(b => this.nations[b].alive && !this.atWar(id, b) && this.turn >= this.rel(id, b).truceUntil && this.turn >= this.rel(id, b).noWarUntil
                     && (!this.allied(id, b) || this.rng() < S.betrayChance))
                 .sort((x, y) => side(x) - side(y))[0];
-            if (target !== undefined && powers[id] > S.warRatio * side(target)) this.declareWar(id, target);
+            if (target !== undefined && own > S.warRatio * side(target)) this.declareWar(id, target);
         }
         if (enemies.length && this.rng() < S.blocChance) {
             const partner = this.nations.find(n => n.alive && n.id !== id && !this.allied(id, n.id) && !this.atWar(id, n.id)
@@ -13764,7 +14051,7 @@ class GameUI {
             ${f.action ? `<div class="row"><button class="btn" data-action="${f.action}"${f.data ? ` data-id="${f.data}"` : ''}>${f.label}</button></div>` : ''}</div>`).join('') + g.proposals.map((pr, i) => {
             const who = `<b>${g.nm(pr.from)}</b>`;
             let text, yes = 'Aceptar', no = 'Rechazar';
-            if (pr.kind === 'paz') text = `${who} te propone la paz.`;
+            if (pr.kind === 'paz') text = `${who} te propone la paz${PEACE_WHY_TEXT[pr.why] ? `: ${PEACE_WHY_TEXT[pr.why]}` : ''}.`;
             else if (pr.kind === 'bloque') text = `${who} te invita a ${pr.blocId && g.bloc(pr.blocId) ? `unirte a ${esc(g.bloc(pr.blocId).name)}` : 'formar una alianza'}.`;
             else { text = `${who}, tu aliado, ha sido atacado por <b>${g.nm(pr.against)}</b>. Si no acudes, saldrás de vuestras alianzas.`; yes = 'Ir a la guerra'; no = 'No intervenir'; }
             const yesAction = pr.kind === 'paz' ? `data-action="peace-open" data-target="${pr.from}"` : `data-action="accept" data-index="${i}"`;
@@ -13918,12 +14205,27 @@ class GameUI {
                     ${t === g.player ? this.economyFacts(t) : ''}
                     <button class="btn" style="margin-top:10px" data-action="goto" data-cell="${n.capitalCell}" ${n.alive ? '' : 'disabled'}>Ver en el mapa</button>
                 </div>
+                ${n.alive && t !== g.player && g.atWar(g.player, t) ? `<div class="pick" style="margin-top:12px"><h3>La guerra</h3>${this.warBox(t)}</div>` : ''}
                 ${n.alive && t !== g.player ? `<div style="margin-top:12px">${this.diplomacyActions(t)}</div>` : ''}`;
             return;
         }
         body.innerHTML = `<input type="search" id="nation-search" placeholder="Buscar país" value="${esc(this.filter)}" aria-label="Buscar país">
             <div id="nation-list"></div>`;
         this.renderNationList();
+    }
+
+    // La guerra del jugador con `t`: quién la empezó y para qué, turnos, fuerza de cada bando, casillas ocupadas y qué
+    // haría aceptar la paz al otro.
+    warBox(t) {
+        const b = this.game.warBrief(t);
+        return `<p>${esc(b.origin)}</p>
+            <dl class="facts" style="margin:6px 0">
+                <dt>Turnos</dt><dd>${plural(b.turns, 'turno', 'turnos')} de guerra</dd>
+                <dt>Tu bando</dt><dd>fuerza ${b.power}</dd>
+                <dt>Su bando</dt><dd>${b.enemyPower === null ? 'fuerza ?' : `fuerza ${b.enemyPower}`}</dd>
+                <dt>Ocupado</dt><dd>tú, ${plural(b.mine, 'casilla', 'casillas')}; él, ${plural(b.theirs, 'casilla', 'casillas')}</dd>
+            </dl>
+            <p class="small ${b.wants ? 'ok-text' : 'warn-text'}">${esc(b.accept)}</p>`;
     }
 
     // Con niebla de guerra solo se conoce la fuerza propia y la de los aliados.
@@ -14497,7 +14799,7 @@ class GameUI {
     renderPeaceDialog() {
         const g = this.game, s = this.peace, t = s.target, me = g.player;
         const occ = g.occupation(t), sats = g.satellitesOf(me);
-        const offered = g.proposals.some(p => p.kind === 'paz' && p.from === t);
+        const offered = g.proposals.find(p => p.kind === 'paz' && p.from === t);
         const crushed = g.isCrushed(t);
         if (s.mode === 'satellite' && !crushed) s.mode = 'annex';
         const opt = (mode, title, desc, enabled = true) => `<button class="peace-opt ${s.mode === mode ? 'on' : ''}" data-action="peace-mode" data-mode="${mode}" ${enabled ? '' : 'disabled'}><b>${title}</b><span>${desc}</span></button>`;
@@ -14519,7 +14821,8 @@ class GameUI {
         const asked = !offered && g.proposedThisTurn.has(`paz${t}`);
         $('#peace-body').innerHTML = `
             <div class="row" style="justify-content:space-between"><h2>Paz con ${g.nm(t)}</h2><button class="btn ghost" data-action="peace-close" aria-label="Cerrar">✕</button></div>
-            <p class="note" style="margin-bottom:10px">${offered ? `${g.nm(t)} te ha propuesto la paz: aceptará anexionar lo ocupado o una paz blanca.` : `Elige las condiciones. ${g.nm(t)} puede rechazarlas, y solo puedes proponerle la paz una vez por turno.`}</p>
+            <p class="note" style="margin-bottom:10px">${offered ? `${g.nm(t)} te ha propuesto la paz: aceptará anexionar lo ocupado${g.acceptsPeace(t, { mode: 'white' }, true) ? ' o una paz blanca' : '; una paz blanca no, porque quiere quedarse lo que ocupa'}.` : `Elige las condiciones. ${g.nm(t)} puede rechazarlas, y solo puedes proponerle la paz una vez por turno.`}</p>
+            <div class="pick" style="margin-bottom:12px">${this.warBox(t)}</div>
             <dl class="facts" style="margin-bottom:12px">
                 <dt>Has ocupado</dt><dd>${plural(occ.mine, 'casilla', 'casillas')} en ${plural(occ.provinces, 'provincia', 'provincias')}${occ.sats ? `, y tus satélites ${occ.sats} más` : ''}</dd>
                 <dt>Te ha ocupado</dt><dd>${plural(occ.theirs, 'casilla', 'casillas')} tuyas o de tus satélites</dd>
@@ -14528,7 +14831,7 @@ class GameUI {
                 ${opt('annex', 'Anexionar lo ocupado', 'Cada bando se queda lo que ocupa: deja de estar en disputa y pasa a ser territorio propio, con toda su renta.')}
                 ${opt('satellite', `Convertir a ${g.nm(t)} en tu satélite`, crushed
                     ? `Conserva su país, te paga el ${CONFIG.TRIBUTE * 100} % de sus ingresos, entra en tus guerras y nunca te ataca. Lo que te ocupó vuelve a ti.`
-                    : 'Solo si le has vencido claramente: ocupas su capital o el 40 % de su territorio, o tiene menos de un tercio de tu fuerza.', crushed)}
+                    : 'Solo si su bando está vencido: el tuyo (tú, tus satélites y tus aliados en esta guerra) ocupa su capital o el 40 % de su territorio, o el suyo no llega a un tercio de la fuerza del tuyo.', crushed)}
                 ${opt('white', 'Paz blanca', 'Cada uno recupera lo suyo; las casillas ocupadas vuelven a su dueño.')}
             </div>
             ${extra}
@@ -14587,7 +14890,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.26-185908';
+const APP_VERSION = '2026.10.26-193013';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
