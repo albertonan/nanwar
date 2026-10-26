@@ -999,6 +999,63 @@ const CHECKS = [
         T.eq(g.motion.filter(e => e.kind === 'battle' && !seen.has(e)).length, 0, 'pero no ataca lo que no puede');
         return true;
     }],
+    ['A5 · la IA sale con OP_MIN_ARMIES en la zona o a los 3 turnos, sin esperar a la formación', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), is = T.nation('is');
+        g.start(is); g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 10);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O], { auto: 'auto' });
+        const xs = T.cellsAt(g, es, S, [0, 1, 1]).map(c => T.army(g, es, c, 0, 3, 0));
+        const far = T.army(g, es, T.farCell(g, es, S, 10, 16), 3);
+        for (const a of [...xs, far]) g.assignArmy(a, op.id);
+        op.form = { name: 'Formación', units: { infantry: 10, tank: 0, artillery: 0, antiair: 0 }, zone: S, recruited: { infantry: 0, tank: 0, artillery: 0, antiair: 0 }, pending: [] };
+        let st = g.opReady(op);
+        T.ok(st.missing.length === 1 && st.forming && st.waited === 0, `uno lejos y formación en curso (${JSON.stringify(st)})`);
+        T.ok(st.ready, `con ${OP_MIN_ARMIES} en la zona sale ya`);
+        // Con uno solo en la zona, espera a los demás OP_GATHER_TURNS turnos desde que se creó.
+        g.assignArmy(xs[1], 0); g.assignArmy(xs[2], 0);
+        T.ok(!g.opReady(op).ready, 'uno en la zona y otro lejos: espera');
+        g.turn += OP_GATHER_TURNS - 1;
+        T.ok(!g.opReady(op).ready, 'aún espera');
+        g.turn += 1;
+        T.ok(g.opReady(op).ready, `a los ${OP_GATHER_TURNS} turnos sale sin él`);
+        return true;
+    }],
+    ['A5 · «cuando esté lista» espera a la formación como mucho 3 turnos', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 8);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O]);
+        for (const c of T.cellsAt(g, es, S, [0, 1])) g.assignArmy(T.army(g, es, c, 0, 6, 0), op.id);
+        op.form = { name: 'Formación', units: { infantry: 10, tank: 0, artillery: 0, antiair: 0 }, zone: S, recruited: { infantry: 0, tank: 0, artillery: 0, antiair: 0 }, pending: [] };
+        let st = g.opReady(op);
+        T.ok(st.strong && !st.missing.length && st.formHold && !st.ready, 'todos y con fuerza, espera a la formación');
+        ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        const txt = () => $('#drawer-body').textContent;
+        T.ok(txt().includes(`como mucho ${OP_FORM_WAIT} turnos`), `la ficha lo dice: ${txt().slice(0, 300)}`);
+        g.turn += OP_FORM_WAIT;
+        st = g.opReady(op);
+        T.ok(st.forming && !st.formHold && st.ready, `a los ${OP_FORM_WAIT} turnos sale sin ella`);
+        ui.render();
+        T.ok(txt().includes('sale al terminar el turno') && !txt().includes('esperando a que termine la formación'), 'y la ficha ya no espera');
+        return true;
+    }],
+    ['A5 · la ofensiva de la IA termina si su objetivo pasa a un aliado', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), it = T.nation('it'), is = T.nation('is');
+        g.start(is); g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 8);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O], { auto: 'auto' });
+        op.front = fr;
+        g.aiCommand(es);
+        T.ok(g.ops.has(op.id), 'con el objetivo en manos enemigas sigue');
+        g.owner[O] = it; g.legal[O] = it; g.version++;   // Italia, en paz con España, lo toma
+        T.ok(!g.atWar(es, it), 'Italia no está en guerra con España');
+        g.aiCommand(es);
+        T.ok(!g.ops.has(op.id), 'termina: objetivo en manos amigas');
+        return true;
+    }],
     ['A5 · en el avance ocupa casillas enemigas vacías del pasillo', () => {
         const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
         g.start(es); g.declareWar(es, fr);
@@ -1260,6 +1317,34 @@ const CHECKS = [
         btn.click();
         T.eq(op.phase, 'avance', 'sale');
         T.ok(/Avance/.test(card()) && !document.querySelector('[data-action="op-launch"]'), 'en avance: sin botón Lanzar');
+        return true;
+    }],
+    ['A5 · en manual la ficha dice que sale con Lanzar; en asistida se mueve al ejecutar', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 8);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O], { auto: 'manual' });
+        const xs = T.cellsAt(g, es, S, [0, 1]).map(c => T.army(g, es, c, 0, 6, 0));
+        for (const a of xs) g.assignArmy(a, op.id);
+        T.ok(g.opReady(op).ready, 'todos en la zona y con fuerza');
+        ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        const card = () => document.querySelector('.op-detail').textContent;
+        T.ok(!card().includes('al terminar el turno') && card().includes('sale con «Lanzar la ofensiva»'), `manual: ${card().slice(0, 300)}`);
+        const cells = xs.map(a => a.cell);
+        T.turns(g, es, 2);
+        T.eq([op.phase, xs.map(a => a.cell)], ['reunion', cells], 'en manual no sale sola ni mueve');
+        document.querySelector('[data-action="op-launch"]').click();
+        T.eq(op.phase, 'avance', 'Lanzar la pone en avance');
+        T.ok(card().includes('En manual no los mueve'), `en avance lo dice: ${card().slice(0, 300)}`);
+        T.turns(g, es, 1);
+        T.eq(xs.map(a => a.cell), cells, 'y sigue sin moverlos');
+        // En asistida, «Ejecutar órdenes» (o confirmar la propuesta) la mueve.
+        document.querySelector('[data-action="op-set"][data-key="auto"][data-value="asistida"]').click();
+        T.eq(op.auto, 'asistida', 'asistida');
+        T.ok(card().includes('con «Ejecutar órdenes»'), 'la ficha lo dice');
+        g.executeOrders(es, { assisted: true });
+        T.ok(!g.ops.has(op.id) || xs.some((a, i) => a.cell !== cells[i]), 'al ejecutarla, avanzan');
         return true;
     }],
     ['A5 · la ficha explica que «lista» espera la ventaja', () => {

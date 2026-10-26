@@ -780,6 +780,7 @@ const LINE_MAX_TURNS = 4;    // y, sumando todos, no se aleja más de la línea 
 const OP_MIN_ARMIES = 3;     // ejércitos que pide una ofensiva para empezar
 // Ofensivas por fases (A5): reunión en la salida de la flecha, avance juntos por su pasillo y asalto conjunto.
 const OP_WAIT = 8;           // turnos que la reunión espera a un ejército que no llega; luego sale sin él
+const OP_FORM_WAIT = 3;      // turnos de reunión que el «Cuando esté lista» del jugador espera, como mucho, a una formación de refuerzo
 const OP_STALL = 2;          // turnos que un ejército del grueso puede seguir sin moverse (sin que nada lo frene) antes de dejar de marcar el paso
 const OP_LANE = 3;           // pasillo de la ofensiva: casillas a esta distancia o menos del trazado de la flecha
 const OP_LEAD = 2;           // ningún ejército termina el turno más adelantado que esto (a lo largo de la flecha) del más atrasado
@@ -4104,12 +4105,14 @@ class GameEngine {
         return { zone, R, cells };
     }
     // ¿Está lista para salir? { ready, members, inZone, present: [ids en la zona], missing: [ids], forming, ratio, need,
-    // waited, strong }. Con «Cuando esté lista»: todos en la zona, sin formación de refuerzo en curso y con la fuerza
-    // reunida a `op.ratio` o más contra la defensa conocida del primer tramo: la del ejército enemigo más fuerte de los
-    // vistos en su pasillo, lo primero con lo que topará (no la suma: el asalto conjunto ya solo ataca con ventaja, uno a
-    // uno; sin enemigos, ratio null y vale). La de la IA sale en cuanto está reunida, sin mirar la fuerza: el asalto
-    // conjunto ya espera ante lo que no puede. Tras OP_WAIT turnos de reunión sale sin los que faltan. Con «Cuando yo lo
-    // diga», solo cuando el jugador la lanza (go).
+    // waited, strong, formHold }. Con «Cuando esté lista»: todos en la zona, sin formación de refuerzo en curso (a la que
+    // espera como mucho OP_FORM_WAIT turnos de reunión: formHold) y con la fuerza reunida a `op.ratio` o más contra la
+    // defensa conocida del primer tramo: la del ejército enemigo más fuerte de los vistos en su pasillo, lo primero con lo
+    // que topará (no la suma: el asalto conjunto ya solo ataca con ventaja, uno a uno; sin enemigos, ratio null y vale).
+    // Tras OP_WAIT turnos de reunión sale sin los que faltan. La de la IA sale sin mirar la fuerza (el asalto conjunto ya
+    // espera ante lo que no puede) ni la formación (llega luego como rezagada), en cuanto están todos, o OP_MIN_ARMIES, en
+    // la zona, o a los OP_GATHER_TURNS turnos: sus ejércitos se eligieron a esa marcha o menos. Con «Cuando yo lo diga»,
+    // solo cuando el jugador la lanza (go).
     opReady(op, members = this.opMembers(op)) {
         const id = op.owner, rules = this.rules(id), { zone, R } = this.opZone(op, members);
         const present = [], missing = [];
@@ -4122,9 +4125,11 @@ class GameEngine {
             dfn = Math.max(dfn, this.combatFactors(id, { infantry: 1, tank: 0, artillery: 0 }, c, seen, c).dfn);
         }
         const ratio = dfn > 0 ? atk / dfn : null, waited = this.turn - (op.gatherSince ?? this.turn), forming = !!op.form;
-        const strong = ratio === null || ratio >= op.ratio;
-        const ready = !!op.go || (op.launch !== 'orden' && present.length > 0 && (strong || op.owner !== this.player) && ((!missing.length && !forming) || waited >= OP_WAIT));
-        return { ready, members: members.length, inZone: present.length, present, missing, forming, ratio, need: op.ratio, waited, strong };
+        const strong = ratio === null || ratio >= op.ratio, ai = op.owner !== this.player;
+        const formHold = !ai && forming && waited < OP_FORM_WAIT;
+        const gathered = ai ? !missing.length || present.length >= OP_MIN_ARMIES || waited >= OP_GATHER_TURNS : (!missing.length && !formHold) || waited >= OP_WAIT;
+        const ready = !!op.go || (op.launch !== 'orden' && present.length > 0 && (strong || ai) && gathered);
+        return { ready, members: members.length, inZone: present.length, present, missing, forming, formHold, ratio, need: op.ratio, waited, strong };
     }
     // Sale la ofensiva: el grueso son los que están en la zona (o todos, si no hay nadie); los demás la alcanzarán.
     opLaunch(op, st = this.opReady(op), tally = null) {
@@ -4214,7 +4219,7 @@ class GameEngine {
         }
         // Lo que pide para salir: los que esperan ventaja (para que la reserva y el reparto le manden más).
         op.waiting = st.present.length && !st.strong ? Math.max(1, Math.min(st.present.length, Math.ceil(st.present.length * (op.ratio / Math.max(st.ratio, 0.05) - 1)))) : 0;
-        const why = op.launch === 'orden' ? '; espera la orden de lanzarla' : st.forming ? '; esperando a los refuerzos' : st.missing.length ? '' : !st.strong ? '; le falta fuerza' : '';
+        const why = op.launch === 'orden' ? '; espera la orden de lanzarla' : st.formHold ? '; esperando a los refuerzos' : st.missing.length ? '' : !st.strong ? '; le falta fuerza' : '';
         const note = `Reunión: ${st.inZone} de ${st.members} en la zona, ${st.ratio === null ? 'sin enemigos a la vista' : `fuerza ${decimal(st.ratio)} a 1 de ${decimal(op.ratio)}`}${why}`;
         if (note !== op.note) { op.note = note; tally.notes.push(note); }
     }
@@ -7163,6 +7168,10 @@ class GameEngine {
     aiCommand(id, powers = this.powers()) {
         const enemies = this.enemiesOf(id);
         for (const op of this.opsOf(id)) if (!enemies.includes(this.opFront(op))) this.endOp(op);
+        for (const op of this.opsOf(id)) {   // una ofensiva cuyo objetivo ha tomado un aliado (o alguien en paz con ella) termina
+            const o = op.kind === 'ofensiva' ? this.owner[op.cells[op.cells.length - 1]] : id;
+            if (o !== id && !this.atWar(id, o)) this.endOp(op, 'objetivo en manos amigas');
+        }
         if (!enemies.length) return;
         const ratio = { pacifica: 1.8, normal: 1.3, agresiva: 1.3, caos: 1 }[this.settings.aggression] ?? 1.3;
         const cap = this.commandCap(id), income = Math.max(0, this.income(id));
@@ -11258,7 +11267,9 @@ class GameUI {
         const zoneTxt = `Los refuerzos se reúnen en ${esc(g.placeName(zone))}${zone === op.cells[0] ? ', la salida de la flecha' : `, que no es la salida de la flecha (${esc(g.placeName(op.cells[0]))})`}.`;
         if (op.phase === 'avance') {
             const last = op.cells.length - 1, wp = Math.min(Math.max(1, op.wp ?? 1), last);
-            return `<p class="small">Avance: ${wp >= last ? 'hacia el objetivo' : `hacia el punto ${wp} de ${last} de la flecha`}, con ${plural(op.body ? op.body.filter(id => g.armies.get(id)?.op === op.id).length : members.length, 'ejército', 'ejércitos')} en el grueso. Van juntos y atacan a la vez cuando la ventaja conjunta llega a ${decimal(op.ratio)} a 1.</p>
+            const how = op.auto === 'manual' ? 'En manual no los mueve: muévelos tú; la flecha y su pasillo te guían.'
+                : `Van juntos y atacan a la vez cuando la ventaja conjunta llega a ${decimal(op.ratio)} a 1${op.auto === 'asistida' ? ', cuando confirmas su propuesta o con «Ejecutar órdenes»' : ''}.`;
+            return `<p class="small">Avance: ${wp >= last ? 'hacia el objetivo' : `hacia el punto ${wp} de ${last} de la flecha`}, con ${plural(op.body ? op.body.filter(id => g.armies.get(id)?.op === op.id).length : members.length, 'ejército', 'ejércitos')} en el grueso. ${how}</p>
                 <p class="small">${zoneTxt} Moverla ahora solo cambia adónde van los refuerzos que lleguen tarde.</p>
                 <div class="row" style="margin-top:6px">${zoneBtn}</div>`;
         }
@@ -11267,12 +11278,13 @@ class GameUI {
             const names = st.missing.slice(0, 2).map(id => esc(g.placeName(g.armies.get(id).cell)));
             waits.push(`esperando a ${plural(st.missing.length, 'ejército', 'ejércitos')} (${names.join(', ')}${st.missing.length > 2 ? ` y ${st.missing.length - 2} más` : ''}); a los ${OP_WAIT} turnos sale sin ellos (lleva ${st.waited})`);
         }
-        if (st.forming) waits.push('esperando a que termine la formación de refuerzo');
+        if (st.formHold) waits.push(`esperando a que termine la formación de refuerzo (como mucho ${OP_FORM_WAIT} turnos; lleva ${st.waited})`);
         const power = st.ratio === null ? ', sin enemigos conocidos en el primer tramo' : `, fuerza ${decimal(st.ratio)} de ${decimal(st.need)} a 1`;
         let why;
         if (op.launch === 'orden') why = 'espera tu orden de lanzamiento';
         else if (!st.members) why = 'sin ejércitos: asígnale alguno';
-        else if (st.ready) why = 'sale al terminar el turno';
+        else if (op.auto === 'manual') why = 'en manual no sale sola: sale con «Lanzar la ofensiva» y sus ejércitos los mueves tú';
+        else if (st.ready) why = op.auto === 'asistida' ? 'sale al terminar el turno si confirmas la propuesta, o con «Ejecutar órdenes»' : 'sale al terminar el turno';
         else if (!st.strong && !waits.length) why = `esperando a tener ${decimal(st.need)} a 1 contra lo conocido del primer tramo; puedes lanzarla ya`;
         else why = waits.join('; ') + (!st.strong ? `; además, esperando a tener ${decimal(st.need)} a 1 contra lo conocido del primer tramo` : '');
         const out = st.present.length ? `Saldría con ${plural(st.present.length, 'ejército', 'ejércitos')}${st.missing.length ? `, sin ${plural(st.missing.length, 'ejército que no ha llegado', 'ejércitos que no han llegado')}` : ''}${st.ratio === null ? '' : `, a ${decimal(st.ratio)} a 1 contra lo conocido`}.`
