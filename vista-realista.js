@@ -788,11 +788,25 @@ class RealisticMap {
             ctx.translate(x, y + roll * U * 0.05); ctx.rotate(roll * 0.04 * facing); ctx.translate(-x, -y);
             this.drawHull(ctx, o, U);
         } else this.drawBase(ctx, o, U);
-        // banderín
+        // banderín: del país; de una agrupación propia (o.group: { num, color }), un guion de dos puntas de su color con
+        // su número
         const fx = x - facing * U * 0.8, wave = moving ? Math.sin(now / 120) * 1.4 : 0;
         ctx.strokeStyle = '#3a3222'; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(fx, y + U * 0.15); ctx.lineTo(fx, y - U * 1.45); ctx.stroke();
-        ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(fx, y - U * 1.45); ctx.lineTo(fx - facing * U * 0.75, y - U * 1.25 + wave); ctx.lineTo(fx, y - U * 1.02); ctx.closePath(); ctx.fill();
-        ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 0.8; ctx.stroke();
+        if (o.group) {
+            const top = y - U * 1.45, H = Math.max(5, U * 0.55), W = Math.max(8, U * 0.95);
+            ctx.fillStyle = o.group.color; ctx.beginPath(); ctx.moveTo(fx, top); ctx.lineTo(fx - facing * W, top + wave);
+            ctx.lineTo(fx - facing * W * 0.8, top + H / 2 + wave); ctx.lineTo(fx - facing * W, top + H + wave); ctx.lineTo(fx, top + H); ctx.closePath(); ctx.fill();
+            ctx.strokeStyle = INK; ctx.lineWidth = 0.9; ctx.stroke();
+            if (U >= 10) {
+                ctx.save(); ctx.fillStyle = INK; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                ctx.font = `700 ${Math.round(H * 0.82)}px 'Barlow Semi Condensed', Bahnschrift, 'Arial Narrow', sans-serif`;
+                ctx.fillText(String(o.group.num), fx - facing * W * 0.42, top + H / 2 + wave * 0.5 + 0.5);
+                ctx.restore();
+            }
+        } else {
+            ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(fx, y - U * 1.45); ctx.lineTo(fx - facing * U * 0.75, y - U * 1.25 + wave); ctx.lineTo(fx, y - U * 1.02); ctx.closePath(); ctx.fill();
+            ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 0.8; ctx.stroke();
+        }
         ctx.translate(x, y + U * 0.22); ctx.scale(k * facing, k);
         if (type === 'tank') miniTank(ctx, now, moving, color);
         else if (type === 'artillery') miniGun(ctx, now, moving);

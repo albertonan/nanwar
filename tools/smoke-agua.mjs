@@ -337,6 +337,7 @@ const CHECKS = [
     const a = T.embark(g, es, s, 3), b = T.embark(g, es, far, 3);
     const op = g.createOp(es, 'ofensiva', [g.nations[es].capitalCell, c], { noCap: true });
     a.op = b.op = op.id;
+    op.phase = 'avance';   // ya lanzada: una ofensiva nueva primero se reúne en la salida de la flecha (A5)
     g.setOrder(b, { kind: 'hold' });   // el otro se queda donde está: la ofensiva no lo mueve
     const cells = [];
     for (let t = 0; t < 3; t++) { g.executeOp(op); cells.push(g.armies.get(a.id)?.cell); g.turn++; g.beginNationTurn(es); }
