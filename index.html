@@ -187,6 +187,10 @@
         .air-task { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center; margin-top: 5px; font-size: 13.5px; }
         .air-task select { min-width: 0; }
         .air-sat { display: flex; gap: 7px; align-items: center; margin-top: 5px; }
+        /* Herramienta Ataque a distancia: cada arma del arsenal (un clic la elige) con su compra debajo */
+        .strike-w { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 6px; align-items: center; margin-top: 8px; }
+        .strike-w .air-sq .nato { width: 24px; height: 15px; }
+        .strike-w > p { grid-column: 1 / -1; margin: 0 2px; }
         .air-sat svg { width: 20px; height: 20px; flex: none; color: var(--signal); }
         /* Escolta de un ejército o una agrupación: cada pieza con su estado y «Quitar», y encargar otra */
         .esc-row { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: 7px; align-items: center; margin-top: 6px; font: 600 13px var(--font); }
@@ -3545,14 +3549,21 @@ class GameEngine {
     launchers(id, key, cell) {
         const w = WEAPONS[key];
         if (!w || !Number.isInteger(cell) || cell < 0 || cell >= G.N) return [];
-        const R = kmCells(w.km), out = new Set();
+        const R = kmCells(w.km);
+        return this.launchSites(id, key).filter(c => hexDist(c, cell) <= R).sort((a, b) => hexDist(a, cell) - hexDist(b, cell) || a - b);
+    }
+    // Todas las casillas desde las que `id` puede lanzar `key` ahora, sin mirar el blanco (la herramienta dibuja su
+    // alcance): primero los ejércitos, después las ciudades, sin repetir.
+    launchSites(id, key) {
+        const w = WEAPONS[key], out = new Set();
+        if (!w) return [];
         if (w.from !== 'city') for (const a of this.armies.values()) {
-            if (a.owner === id && this.armyAt[a.cell] === a.id && isLand(a.cell) && a.rocketTurn !== this.turn && hexDist(a.cell, cell) <= R) out.add(a.cell);
+            if (a.owner === id && this.armyAt[a.cell] === a.id && isLand(a.cell) && a.rocketTurn !== this.turn) out.add(a.cell);
         }
         if (w.from !== 'army') for (const p of PROVINCES) {
-            if (this.owner[p.city] === id && this.legal[p.city] === id && hexDist(p.city, cell) <= R) out.add(p.city);
+            if (this.owner[p.city] === id && this.legal[p.city] === id) out.add(p.city);
         }
-        return [...out].sort((a, b) => hexDist(a, cell) - hexDist(b, cell) || a - b);
+        return [...out];
     }
     // ¿Sale de una ciudad la salva de `key` que `id` lanza desde `from`? Si no, sale del ejército que hay allí.
     strikeFromCity(id, key, from) {
@@ -10391,7 +10402,9 @@ const ICONS = {
     // Marco de unidad con el icono APP-6 de aviación de ala fija: la hélice de dos palas en horizontal.
     plane: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="1"/><path stroke-width="1.6" d="${propellerPath(12, 12, 7.2)}"/></svg>`,
     // El mismo marco con el símbolo de UAV: un enjambre de drones.
-    uav: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"><rect x="2" y="5" width="20" height="14" rx="1"/><path stroke-width="1.7" d="${uavPath(12, 11.4, 7.4)}"/></svg>`
+    uav: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"><rect x="2" y="5" width="20" height="14" rx="1"/><path stroke-width="1.7" d="${uavPath(12, 11.4, 7.4)}"/></svg>`,
+    // El mismo marco con el símbolo APP-6 de misil de superficie a superficie: la herramienta Ataque a distancia.
+    missile: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"><rect x="2" y="5" width="20" height="14" rx="1"/><path fill="currentColor" stroke-width="1" d="M12 6l1.4 2v5.6l1.9 2.2H8.7l1.9-2.2V8z"/></svg>'
 };
 // Selector de mapa: un mapa plegado para Europa y el globo para el mundo.
 const MAP_ICON = {
@@ -10451,8 +10464,21 @@ const TOOLS = [
     { id: 'fort', label: 'Fortificar', key: '3', icon: ICONS.fort, title: r => `Fortificar casillas (${r.fortCost} de oro cada una, ${r.fortTurns} turnos)` },
     { id: 'cities', label: 'Ciudades', key: '4', icon: ICONS.cities, title: 'Seleccionar varias ciudades para reclutar o fortificar en todas a la vez' },
     { id: 'op', label: 'Operación', key: '5', icon: ICONS.op, title: 'Dibujar una operación: flecha de ofensiva, línea de defensa o zona de reserva' },
-    { id: 'air', label: 'Aviación', key: '6', icon: ICONS.plane, title: 'Aeródromos, escuadrones, antiaéreo y misiones aéreas' }
+    { id: 'air', label: 'Aviación', key: '6', icon: ICONS.plane, title: 'Aeródromos, escuadrones, antiaéreo y misiones aéreas' },
+    { id: 'strike', label: 'Misiles', key: '7', icon: ICONS.missile, title: 'Ataque a distancia: cohetes, misiles y bombas de tu arsenal' }
 ];
+// Blancos del Ataque a distancia (STRIKE_FX.kinds), como se nombran en su ficha.
+const STRIKE_KINDS = { army: 'Ejército', roads: 'Carreteras', fort: 'Fortificación', aa: 'Antiaéreo', battery: 'Batería', airfield: 'Aeródromo', area: 'Zona' };
+// Símbolo de cada arma para el panel (el mapa dibuja los arcos en canvas): marco de unidad con el lanzacohetes múltiple
+// de APP-6 (la rampa con tres cohetes, como en Cohetería) para los cohetes y el misil de superficie a superficie (cuerpo
+// con ojiva y aletas) para los misiles; la bomba, con el marcado CBRN de la OTAN de zona nuclear: el triángulo blanco con
+// la punta abajo y «ATOM» en negro (el mismo que señala en el mapa la zona contaminada).
+const CBRN_MARK = '<path d="M2 1.5h22L13 15.2z" fill="#fff" stroke="#151a12" stroke-width="1.3" stroke-linejoin="round"/><text x="13" y="7.1" font-size="5.4" font-weight="700" text-anchor="middle" fill="#151a12" font-family="Arial, sans-serif">ATOM</text>';
+const weaponIcon = (key, color) => key === 'nuclear' ? `<svg class="nato" viewBox="0 0 26 16" aria-hidden="true">${CBRN_MARK}</svg>`
+    : `<svg class="nato" viewBox="0 0 26 16" aria-hidden="true"><rect x="1" y="1" width="24" height="14" fill="${color}" stroke="#151a12" stroke-width="1.5"/>`
+    + (WEAPONS[key].cls === 'rocket' || WEAPONS[key].cls === 'heavyRocket'
+        ? '<path d="M6.5 11.8l3.6-6.6M11.2 11.8l3.6-6.6M15.9 11.8l3.6-6.6M5.5 12.3h15" fill="none" stroke="#151a12" stroke-width="1.4" stroke-linecap="round"/>'
+        : '<path d="M13 2.2l1.3 1.9v6.2l1.7 2.1h-6l1.7-2.1V4.1z" fill="#151a12"/>') + '</svg>';
 // Curva suave (Catmull-Rom) por los puntos dados, en píxeles de pantalla.
 function smoothLine(pts, n = 8) {
     if (pts.length < 2) return pts;
@@ -10615,6 +10641,7 @@ class MapView {
         this.instantMotion = false;      // la IA juega «directo»: sin animaciones
         this.airMarks = [];              // aeródromos, antiaéreos, escuadrones y patrullas que ve el jugador (buildAir)
         this.airPick = null;             // la herramienta Aviación: base, alcance, blanco y antiaéreo conocido
+        this.strikePick = null;          // la herramienta Ataque a distancia: alcance de los lanzadores, lanzador y blanco
         this.frameReq = 0;
         this.buildStatic();
         this.resize();
@@ -10973,7 +11000,9 @@ class MapView {
             }
         }
 
+        this.drawFallout(ctx, s);
         if (this.airPick) this.drawAirPick(ctx, s);
+        if (this.strikePick) this.drawStrikePick(ctx, s);
         this.drawSatAreas(ctx, s);
         this.drawReconAreas(ctx, s);
 
@@ -11218,7 +11247,9 @@ class MapView {
         if (!far) this.drawAir(air, hexPx, font, real, visible, true);   // las patrullas vuelan por encima
         if (!far && g.player !== null) this.drawEscorts(air, tokens, hexPx, font, real);
         this.drawSats(hexPx, font, visible);   // encima de todo y también de lejos: el círculo que vigila es grande
+        this.drawFalloutMarks(hexPx, font, visible);
         drawAirTrails(ctx, this, now);
+        drawStrikeTrails(ctx, this, now);
         this.motion.effects(now);
         this.motion.drawParticles(ctx, this, now);
 
@@ -11746,6 +11777,124 @@ class MapView {
         }
         ctx.setLineDash([]);
     }
+    // Casillas a `R` o menos de alguna de `sites`: una búsqueda en anchura desde todas a la vez, que cuesta lo mismo con
+    // un lanzador que con cien.
+    cellsNear(sites, R) {
+        const dist = new Int32Array(G.N).fill(-1), list = [];
+        for (const c of sites) if (dist[c] < 0) { dist[c] = 0; list.push(c); }
+        for (let k = 0; k < list.length; k++) {
+            const u = list[k];
+            if (dist[u] >= R) continue;
+            for (let d = 0; d < 6; d++) { const j = G.nb[u * 6 + d]; if (j >= 0 && dist[j] < 0) { dist[j] = dist[u] + 1; list.push(j); } }
+        }
+        return new Set(list);
+    }
+    // La herramienta Ataque a distancia (en coordenadas del mapa): el alcance del arma desde todos sus lanzadores, con
+    // el contorno discontinuo de la aviación (si llega a todo el mapa, no hay contorno); las casillas de las defensas que
+    // conoces y dispararían, en rojo; el blanco, y el arco a trazos del lanzador que saldría hasta él.
+    drawStrikePick(ctx, s) {
+        const P = this.strikePick;
+        if (!P.all) {
+            if (this.strikeRangeCache?.key !== P.key) this.strikeRangeCache = { key: P.key, edge: this.outline(P.reach) };
+            ctx.setLineDash([5 / s, 3.5 / s]);
+            ctx.strokeStyle = INK; ctx.lineWidth = 3.2 / s; ctx.stroke(this.strikeRangeCache.edge);
+            ctx.strokeStyle = 'rgba(255,250,232,0.95)'; ctx.lineWidth = 1.6 / s; ctx.stroke(this.strikeRangeCache.edge);
+            ctx.setLineDash([]);
+        }
+        if (P.sources.length) {
+            const p = new Path2D();
+            for (const c of P.sources) this.hexPath(p, c);
+            ctx.fillStyle = 'rgba(224,90,71,0.25)'; ctx.fill(p);
+            ctx.strokeStyle = '#e05a47'; ctx.lineWidth = 1.6 / s; ctx.stroke(p);
+        }
+        if (P.target < 0) return;
+        const t = new Path2D(); this.hexPath(t, P.target);
+        ctx.strokeStyle = INK; ctx.lineWidth = 4.4 / s; ctx.stroke(t);
+        ctx.strokeStyle = '#ff9f7a'; ctx.lineWidth = 2.2 / s; ctx.stroke(t);
+        if (P.from < 0) return;
+        const arc = new Path2D(), a = { dx: 0, dy: 0, lift: 0.17 }, at = { from: P.from, cell: P.target };
+        for (let k = 0; k <= 24; k++) { const [x, y] = strikePoint(at, a, k / 24); if (k) arc.lineTo(x, y); else arc.moveTo(x, y); }
+        ctx.lineCap = 'round'; ctx.setLineDash([5 / s, 3.5 / s]);
+        ctx.strokeStyle = INK; ctx.lineWidth = 4.2 / s; ctx.stroke(arc);
+        ctx.strokeStyle = '#ff9f7a'; ctx.lineWidth = 2.2 / s; ctx.stroke(arc);
+        ctx.setLineDash([]); ctx.lineCap = 'butt';
+    }
+    // Zonas contaminadas por armas nucleares (C4): las casillas contaminadas unidas por vecindad, cada una con su casilla
+    // central (la más cercana a su centro), su fin (el de la casilla que más dura) y los turnos que le quedan (`left`).
+    // Todo el mundo las ve: la bomba sale en el parte de todos. Se guardan, con su relleno y su contorno, hasta que
+    // cambia la contaminación o el turno.
+    falloutZones() {
+        const g = this.game, key = `${g.falloutVersion}:${g.turn}`;
+        if (this.falloutCache?.game === g && this.falloutCache.key === key) return this.falloutCache.zones;
+        const hot = new Set([...g.fallout.keys()].filter(c => g.contaminated(c))), zones = [], seen = new Set(), fill = new Path2D();
+        for (const c0 of hot) {
+            if (seen.has(c0)) continue;
+            const cells = new Set([c0]), list = [c0];
+            seen.add(c0);
+            for (let k = 0; k < list.length; k++) for (let d = 0; d < 6; d++) {
+                const j = G.nb[list[k] * 6 + d];
+                if (j >= 0 && hot.has(j) && !seen.has(j)) { seen.add(j); cells.add(j); list.push(j); }
+            }
+            const mx = list.reduce((t, c) => t + G.cx[c], 0) / list.length, my = list.reduce((t, c) => t + G.cy[c], 0) / list.length;
+            const center = list.reduce((b, c) => (Math.hypot(G.cx[c] - mx, G.cy[c] - my) < Math.hypot(G.cx[b] - mx, G.cy[b] - my) ? c : b));
+            const end = Math.max(...list.map(c => g.fallout.get(c)));
+            zones.push({ cells, center, end, left: end - g.turn });
+        }
+        for (const c of hot) this.hexPath(fill, c);
+        this.falloutCache = { game: g, key, zones, fill, edge: this.outline(hot) };
+        return zones;
+    }
+    // Rayas de la zona contaminada: blancas sobre un filete oscuro, en la diagonal contraria a la de la ocupación, para
+    // que no se confundan; del mismo grosor a cualquier zoom.
+    falloutPattern(s) {
+        if (!this.falloutTile) {
+            const c = document.createElement('canvas');
+            c.width = c.height = 12;
+            const x = c.getContext('2d');
+            x.fillStyle = 'rgba(21,26,18,0.18)'; x.fillRect(0, 0, 12, 12);
+            for (const [w, style] of [[4.4, 'rgba(21,26,18,0.5)'], [2.2, 'rgba(250,250,240,0.85)']]) {
+                x.strokeStyle = style; x.lineWidth = w; x.beginPath();
+                for (const o of [-12, 0, 12]) { x.moveTo(o - 1, -1); x.lineTo(o + 13, 13); }
+                x.stroke();
+            }
+            this.falloutTile = c;
+        }
+        const p = this.ctx.createPattern(this.falloutTile, 'repeat');
+        p.setTransform(new DOMMatrix().scale(1 / s));
+        return p;
+    }
+    // La contaminación, en coordenadas del mapa: las casillas rayadas y el contorno discontinuo de cada zona.
+    drawFallout(ctx, s) {
+        if (!this.game.fallout.size || !this.falloutZones().length) return;
+        const F = this.falloutCache;
+        ctx.fillStyle = this.falloutPattern(s); ctx.fill(F.fill);
+        ctx.setLineDash([6 / s, 3.5 / s]);
+        ctx.strokeStyle = INK; ctx.lineWidth = 3.2 / s; ctx.stroke(F.edge);
+        ctx.strokeStyle = '#f6f4ea'; ctx.lineWidth = 1.5 / s; ctx.stroke(F.edge);
+        ctx.setLineDash([]);
+    }
+    // En píxeles de pantalla, en el centro de cada zona contaminada: el marcado CBRN de la OTAN de contaminación nuclear
+    // (el triángulo blanco con la punta abajo y «ATOM» en negro, como las señales que se clavan en el terreno) y a su
+    // derecha los turnos que le quedan. También de lejos: una zona así se ve desde cualquier escala.
+    drawFalloutMarks(hexPx, font, visible) {
+        if (!this.game.fallout.size) return;
+        const ctx = this.ctx, w = Math.max(24, Math.min(38, hexPx * 2.4)), h = w * 0.62;
+        for (const z of this.falloutZones()) {
+            const [x, y0] = this.toScreen(G.cx[z.center], G.cy[z.center]), y = y0 - h * 0.35;
+            if (!visible(x, y)) continue;
+            ctx.save();
+            ctx.beginPath(); ctx.moveTo(x - w / 2, y - h / 2); ctx.lineTo(x + w / 2, y - h / 2); ctx.lineTo(x, y + h / 2); ctx.closePath();
+            ctx.fillStyle = '#fff'; ctx.fill();
+            ctx.lineJoin = 'round'; ctx.lineWidth = 1.6; ctx.strokeStyle = INK; ctx.stroke();
+            ctx.font = font(Math.round(w * 0.26), 700); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillStyle = INK; ctx.fillText('ATOM', x, y - h * 0.2);
+            const label = plural(z.left, 'turno', 'turnos');
+            ctx.font = font(12, 700); ctx.textAlign = 'left';
+            ctx.lineWidth = 3; ctx.strokeStyle = INK; ctx.fillStyle = '#f6f4ea';
+            ctx.strokeText(label, x + w / 2 + 4, y - h * 0.15); ctx.fillText(label, x + w / 2 + 4, y - h * 0.15);
+            ctx.restore();
+        }
+    }
     // Los satélites del jugador (en coordenadas del mapa): el contorno discontinuo del círculo que vigila cada uno. El
     // contorno se guarda por centros y radio, que solo cambian al lanzar uno, al acabarse o con Óptica de alta resolución.
     drawSatAreas(ctx, s) {
@@ -12044,6 +12193,7 @@ class GameUI {
         this.jointCache = new Map(); // participantes de cada ataque conjunto bajo el ratón, hasta el próximo render
         this.opDraft = null;         // { kind, cells, redraw }: operación que se está dibujando con la herramienta Operación
         this.air = this.noAir();     // herramienta Aviación: aeródromo elegido, sus escuadrones elegidos y el blanco
+        this.strike = this.noStrike();   // herramienta Ataque a distancia: arma, salva, blanco y confirmación
         this.focusOp = null;         // operación abierta en la pestaña Mando
         this.obFilter = 'todas';     // pestaña Orden de batalla: 'todas', 'pantalla' u 'op:<id>'
         this.obBy = 'provincia';     // cómo se agrupan los sueltos: 'provincia' u 'operacion'
@@ -12159,6 +12309,7 @@ class GameUI {
         this.repair = this.fortRepair = null;
         this.tool = 'command';
         this.air = this.noAir();
+        this.strike = this.noStrike();
         this.anchor = -1;
         this.sel = new Set(); this.boxMode = false; this.view.box = null;
         this.choice = g.player;
@@ -12356,7 +12507,7 @@ class GameUI {
 
     planTo(cell) {
         const g = this.game;
-        if (this.tool === 'command' || this.tool === 'cities' || this.tool === 'air' || this.anchor < 0 || cell < 0 || !isLand(cell) || g.owner[cell] !== g.player) return null;
+        if (this.tool === 'command' || this.tool === 'cities' || this.tool === 'air' || this.tool === 'strike' || this.anchor < 0 || cell < 0 || !isLand(cell) || g.owner[cell] !== g.player) return null;
         if (this.tool === 'fort') return g.planFort(g.player, this.anchor, cell);
         if (cell === this.anchor) return null;
         return g.planRoad(g.player, this.anchor, c => c === cell, this.highway ? 2 : 1);
@@ -12403,6 +12554,7 @@ class GameUI {
             }
         }
         else if (g.fortWork.has(cell)) lines.push(`Fortificando: ${plural(g.fortWork.get(cell).left, 'turno', 'turnos')}`);
+        if (!sea && g.contaminated(cell)) lines.push(`<span class="warn-text">Contaminada por un ataque nuclear: quedan ${plural(g.fallout.get(cell) - g.turn, 'turno', 'turnos')}. No da renta, y el ejército que termina su turno en ella pierde el ${Math.round(NUKE.FALLOUT_LOSS * 100)} % de sus unidades</span>`);
         if (!sea) lines.push(...this.airLines(cell));
         if (g.player === null) { /* antes de elegir país no se enseñan las fuerzas de nadie */ }
         else if (!g.sees(g.player, cell)) lines.push('<span class="muted">Niebla de guerra: no sabes qué tropas hay</span>');
@@ -12453,6 +12605,10 @@ class GameUI {
             if (eyes) lines.push(seenBy);
         } else if (this.reachInfo?.attacks.has(cell)) lines.push('<b style="color:#ff8a78">Clic para atacar</b>');
         else if (this.reachInfo?.moves.has(cell)) lines.push(`<b style="color:#a8e38a">${afloat(cell) && isLand(this.selectedArmy()?.cell ?? -1) ? 'Clic para embarcar' : 'Clic para mover aquí'}</b>`);
+        else if (this.tool === 'strike' && this.view.strikePick && cell !== this.strike.target) {
+            const P = this.view.strikePick;
+            lines.push(P.all || P.reach.has(cell) ? '<b style="color:#ffb38a">Clic para apuntar aquí</b>' : '<span class="muted">Fuera del alcance de tus lanzadores</span>');
+        }
         const prev = this.view.preview;
         if (prev && cell === this.view.hoverCell) {
             const what = prev.cls === 'fort' ? `Fortificar ${plural(prev.cells.length, 'casilla', 'casillas')}` : `${plural(prev.path.length - 1, 'tramo', 'tramos')} de ${prev.cls === 2 ? 'autopista' : 'carretera'}`;
@@ -12470,16 +12626,17 @@ class GameUI {
         const g = this.game;
         if (this.replaying) return;
         if (this.ordering) { this.pickOrderTarget(cell); return; }
-        // En el mar solo hacen algo la herramienta de mando (elegir un barco propio, moverlo o darle una orden) y la de
-        // aviación (proteger la casilla o elegirla de blanco).
+        // En el mar solo hacen algo la herramienta de mando (elegir un barco propio, moverlo o darle una orden), la de
+        // aviación (proteger la casilla o elegirla de blanco) y la de ataque a distancia (un barco enemigo de blanco).
         const sea = cell >= 0 && afloat(cell);
-        if (cell < 0 || (sea && (g.player === null || g.over || (this.tool !== 'command' && this.tool !== 'air')))) { if (this.tool === 'command') this.select(-1); return; }
+        if (cell < 0 || (sea && (g.player === null || g.over || (this.tool !== 'command' && this.tool !== 'air' && this.tool !== 'strike')))) { if (this.tool === 'command') this.select(-1); return; }
         if (g.player === null) { this.choice = g.owner[cell]; this.render(); return; }
         if (g.over) return;
         if (this.proposal) { this.toggleProposal(cell); return; }
         if (this.tool === 'cities') { this.toggleCity(cell); return; }
         if (this.tool === 'op') { this.opClick(cell); return; }
         if (this.tool === 'air') { this.airClick(cell); return; }
+        if (this.tool === 'strike') { this.strikeClick(cell); return; }
         if (this.tool !== 'command') { this.buildClick(cell); return; }
         // Ctrl/⌘ + clic: añade o quita un ejército tuyo de la selección; en otra casilla no hace nada.
         if (ctrl) { const t = g.armyOn(cell); if (t && t.owner === g.player) this.toggleSel(t.id); return; }
@@ -13167,6 +13324,147 @@ class GameUI {
             <p class="note">El aeródromo, solo en una ciudad tuya; el antiaéreo, en cualquier casilla tuya, uno por casilla. Cubre ${plural(g.aaRadius(p0), 'casilla', 'casillas')} y dispara a las misiones enemigas que pasan por encima.${L ? ` La batería automática, también una por casilla: dispara sola contra ${L.p.missile ? 'drones, cohetes y misiles' : 'drones y cohetes'} que van a ${plural(kmCells(L.km), 'casilla', 'casillas')} o menos, hasta ${L.cap} por ronda; lo que pasa de ahí, llega.` : ''}</p></section>`;
     }
 
+    // --- Herramienta Ataque a distancia (parte C) ---
+    // weapon: el arma elegida (null: ninguna); n: la salva; target: el blanco (−1: ninguno); kind: lo que se ataca en él
+    // (STRIKE_KINDS); confirm: la bomba espera a que confirmes sus consecuencias.
+    noStrike() { return { weapon: null, n: 1, target: -1, kind: null, confirm: false }; }
+    // Las armas de la ficha: las seis, salvo la bomba con las nucleares prohibidas (Armas estratégicas 3 no existe).
+    strikeWeapons() { return WEAPON_KEYS.filter(k => k !== 'nuclear' || this.game.settings.nukes); }
+    // Lo elegido, al día: sin arma, la primera que tengas; la salva, entre 1 y lo que tienes; lo que se ataca, uno que el
+    // arma admita en el blanco (el elegido si sigue valiendo).
+    strikeTidy() {
+        const g = this.game, S = this.strike, have = k => g.nations[g.player].arsenal[k];
+        if (S.weapon && !this.strikeWeapons().includes(S.weapon)) Object.assign(S, { weapon: null, kind: null, confirm: false });
+        S.weapon ??= this.strikeWeapons().find(k => have(k) > 0) ?? null;
+        S.n = Math.max(1, Math.min(S.n, S.weapon ? have(S.weapon) : 1));
+        if (!S.weapon || S.target < 0) { S.kind = null; S.confirm = false; return; }
+        const ok = this.strikeOptions().filter(o => !o.why).map(o => o.kind);
+        if (!ok.includes(S.kind)) { S.kind = ok[0] ?? null; S.confirm = false; }
+    }
+    // Cada blanco que admite el arma elegida en la casilla elegida, con su motivo si no se puede ('' si se puede).
+    strikeOptions() {
+        const g = this.game, S = this.strike;
+        return STRIKE_FX[S.weapon].kinds.map(kind => ({ kind, why: g.strikeCheck(g.player, S.weapon, S.n, kind, S.target) }));
+    }
+    // Un clic con la herramienta: esa casilla es el blanco (también el mar, por un barco enemigo).
+    strikeClick(cell) {
+        const S = this.strike;
+        if (!S.weapon) { this.flash('Compra antes alguna arma en la ficha del arsenal.'); return; }
+        Object.assign(S, { target: cell, kind: null, confirm: false });
+        this.selected = cell;
+        if (isMobile()) this.view.centerOn(cell, 5, 0.27);   // que el blanco quede a la vista encima de la hoja
+        this.render();
+    }
+    // Lo que dibuja el mapa: el alcance del arma desde todos sus lanzadores (launchSites), el lanzador que saldría
+    // contra el blanco, el blanco y las casillas de las defensas que conoces y dispararían (las de la previsión).
+    strikePick() {
+        const g = this.game, p0 = g.player, S = this.strike;
+        if (p0 === null || !S.weapon) return null;
+        const sites = g.launchSites(p0, S.weapon), R = kmCells(WEAPONS[S.weapon].km), key = `${S.weapon}:${R}:${sites.join(',')}`;
+        if (this.strikeReach?.key !== key) this.strikeReach = { key, reach: this.view.cellsNear(sites, R) };
+        const reach = this.strikeReach.reach, t = S.target;
+        const o = t >= 0 && S.kind ? g.strikeOdds(p0, S.weapon, S.n, S.kind, t) : null;
+        return { key, reach, all: reach.size >= G.N, from: t >= 0 ? g.launchers(p0, S.weapon, t)[0] ?? -1 : -1, target: t, sources: o && !o.why ? o.sources : [] };
+    }
+    // Lanzadores del arma `key` que tiene el jugador ahora, en pocas palabras: «3 ejércitos y 12 ciudades».
+    strikeSitesText(key) {
+        const g = this.game, sites = g.launchSites(g.player, key), cities = sites.filter(c => g.strikeFromCity(g.player, key, c)).length, armies = sites.length - cities;
+        const from = WEAPONS[key].from, parts = [from !== 'city' ? plural(armies, 'ejército', 'ejércitos') : '', from !== 'army' ? plural(cities, 'ciudad', 'ciudades') : ''].filter(Boolean);
+        return parts.join(' y ');
+    }
+    // Existencias del arsenal de `id`: «2 cohetes y 1 misil» (o «vacío»).
+    arsenalText(id) {
+        const g = this.game, xs = WEAPON_KEYS.filter(k => g.nations[id].arsenal[k] > 0).map(k => plural(g.nations[id].arsenal[k], g.weaponWord(k, 1), WEAPONS[k].many));
+        return xs.length > 1 ? `${xs.slice(0, -1).join(', ')} y ${xs[xs.length - 1]}` : xs[0] ?? 'vacío';
+    }
+    renderStrikeCard() {
+        const g = this.game, el = $('#card'), p0 = g.player, S = this.strike;
+        const target = S.weapon && S.target >= 0 ? this.strikeTargetSection() : '', arsenal = this.strikeArsenalSection(), salvo = this.strikeSalvoSection();
+        // En el móvil, el blanco va primero: es lo que se ve en la hoja a media altura.
+        const sections = isMobile() && target ? [target, salvo, arsenal] : [arsenal, salvo, target];
+        el.hidden = false;
+        el.style.setProperty('--owner', g.nations[p0].color);
+        el.innerHTML = `
+            <header class="card-head">
+                <div><h2>Ataque a distancia</h2>
+                <p class="small muted">Cohetes, misiles${g.settings.nukes ? ' y bombas' : ''} de tu arsenal. Elige el arma y la salva y ${this.touch ? 'toca' : 'haz clic en'} el blanco: lanza el lanzador más cercano que llegue. Cada ejército lanza una salva por turno; las ciudades, las que quieras.</p></div>
+                <button class="btn ghost" data-action="tool" data-tool="command" aria-label="Cerrar" title="Cerrar (Esc)">✕</button>
+            </header>${sections.filter(Boolean).join('')}`;
+    }
+    // «Arsenal»: cada arma con sus existencias, su alcance y desde dónde sale (un clic la elige), y su compra con el
+    // precio en turnos de renta y el mantenimiento; la que falta por investigar dice qué. Al final, lo que cuesta al turno.
+    strikeArsenalSection() {
+        const g = this.game, p0 = g.player, S = this.strike, r = g.rules(p0), ars = g.nations[p0].arsenal, up = g.arsenalUpkeep(p0), color = g.nations[p0].color;
+        const from = { army: 'desde un ejército', armyOrCity: 'desde un ejército o una ciudad', city: 'desde una ciudad' };
+        const rows = this.strikeWeapons().map(k => {
+            const w = WEAPONS[k], have = ars[k], on = S.weapon === k, why = g.canBuyWeapon(p0, k), price = g.weaponPrice(p0, k);
+            const cost = w.needs && !r[w.needs] ? `Hace falta investigar ${g.weaponTech(w.needs)}.`
+                : `${price} de oro (${plural(w.turns, 'turno', 'turnos')} de renta, ${w.min} como mínimo) y ${w.upkeep} por turno de mantenimiento.`;
+            return `<div class="strike-w">
+                <button class="air-sq ${on ? 'on' : ''}" data-action="strike-weapon" data-weapon="${k}" aria-pressed="${on}" ${have || on ? '' : 'disabled'}>
+                    <span class="box">${on ? uiIcon('check', 11) : ''}</span>${weaponIcon(k, color)}<span>${w.name}<small>${have} en el arsenal · ${w.km} km ${from[w.from]}</small></span></button>
+                <button class="btn" data-action="strike-buy" data-weapon="${k}" ${why ? 'disabled' : ''} title="${esc(why || `Comprar ${w.fem ? 'una' : 'uno'} por ${price} de oro`)}">Comprar</button>
+                <p class="small muted">${cost}</p></div>`;
+        }).join('');
+        return `<section class="sec"><h3>Arsenal</h3>${rows}
+            <p class="note">Mantenimiento del arsenal: ${up ? `−${up} de oro por turno; tu renta queda en ${g.income(p0)}` : 'nada mientras esté vacío'}. Si al cobrar no te llega, se desmantelan armas, primero las de más mantenimiento.</p></section>`;
+    }
+    // «Salva»: cuántas armas de la elegida se lanzan juntas, su alcance y sus lanzadores.
+    strikeSalvoSection() {
+        const g = this.game, p0 = g.player, S = this.strike;
+        if (!S.weapon) return '';
+        const w = WEAPONS[S.weapon], have = g.nations[p0].arsenal[S.weapon], all = this.view.strikePick?.all;
+        const stepper = `<div class="stepper"><button data-action="strike-n" data-delta="-1" ${S.n > 1 ? '' : 'disabled'} aria-label="Una menos">−</button>
+            <output>${S.n} de ${have}</output><button data-action="strike-n" data-delta="1" ${S.n < have ? '' : 'disabled'} aria-label="Una más">+</button></div>`;
+        return `<section class="sec"><h3>Salva de ${w.many}</h3>
+            ${have ? `<div class="row" style="align-items:center;gap:10px">${stepper}<span class="small muted">se lanzan juntas: cada una pasa las defensas por su cuenta</span></div>`
+                : `<p class="small muted">No te queda ${w.fem ? 'ninguna' : 'ninguno'}: compra más arriba.</p>`}
+            <p class="note">Alcance: ${w.km} km (${plural(kmCells(w.km), 'casilla', 'casillas')})${all ? ', todo el mapa' : ''}. Pueden lanzar ${this.strikeSitesText(S.weapon)}.${S.target < 0 && have ? ` ${this.touch ? 'Toca' : 'Haz clic en'} el blanco.` : ''}</p></section>`;
+    }
+    // «Blanco: X»: qué atacar en él, la previsión con lo que sabes (desde dónde sale, las defensas que conoces, cuántas
+    // se espera que lleguen y el efecto) y sus avisos, y el botón de lanzar. La bomba pide antes que confirmes sus
+    // consecuencias.
+    strikeTargetSection() {
+        const g = this.game, p0 = g.player, S = this.strike, c = S.target, w = WEAPONS[S.weapon], fx = STRIKE_FX[S.weapon];
+        const head = `<section class="sec"><h3>Blanco: ${esc(afloat(c) ? `el mar junto a ${PROVINCES[SEA_PROV[c]].name}` : g.placeName(c))}</h3>`;
+        const opts = this.strikeOptions(), ok = opts.filter(o => !o.why);
+        if (!ok.length) {
+            const why = new Set(opts.map(o => o.why)).size === 1 ? opts[0].why
+                : isLand(c) && g.owner[c] !== p0 && !g.atWar(p0, g.owner[c]) ? 'Solo contra un país con el que estás en guerra.'
+                : `No hay nada que conozcas aquí contra lo que sirva ${w.fem ? 'la' : 'el'} ${w.name.toLowerCase()}.`;
+            return `${head}<p class="note warn">${esc(why)}</p></section>`;
+        }
+        const kinds = ok.length > 1 ? `<div class="seg" role="group" aria-label="Qué atacar">${ok.map(o => `<button data-action="strike-kind" data-kind="${o.kind}" class="${S.kind === o.kind ? 'on' : ''}" aria-pressed="${S.kind === o.kind}">${STRIKE_KINDS[o.kind]}</button>`).join('')}</div>`
+            : `<p class="small">Contra: ${STRIKE_KINDS[S.kind].toLowerCase()}</p>`;
+        const o = g.strikeOdds(p0, S.weapon, S.n, S.kind, c), from = g.launchers(p0, S.weapon, c)[0], one = x => decimal(Math.round(x * 10) / 10);
+        const salvo = S.n === 1 ? `${w.fem ? 'una' : 'un'} ${w.name.toLowerCase()}` : `${S.n} ${w.many}`;
+        const where = g.strikeFromCity(p0, S.weapon, from) ? `la ciudad de ${g.placeName(from)}` : `tu ejército en ${g.placeName(from)}`;
+        const stop = S.n - o.through, layers = [['drones', 'drones'], ['batteries', 'baterías'], ['aa', 'antiaéreo']].filter(([k]) => o.stopped[k] >= 0.05).map(([k, nm]) => `${nm} ${one(o.stopped[k])}`);
+        const facts = `<dl class="facts" style="margin-top:8px">
+            <dt>Lanza</dt><dd>Desde ${esc(where)}, a ${hexDist(from, c) * MAP.cellKm} km: ${salvo}</dd>
+            <dt>Defensas</dt><dd>${o.sources.length ? `las que conoces pararían unas ${one(stop)} (${layers.join(', ') || 'casi ninguna'})` : 'no conoces ninguna que cubra el blanco'}</dd>
+            <dt>Llegan</dt><dd>se espera que lleguen unas ${one(o.through)} de ${S.n}${o.hit < 1 ? `; a ciegas acierta${S.n === 1 ? '' : 'n'} la mitad` : ''}</dd>
+            <dt>Efecto</dt><dd>${esc(o.effect.charAt(0).toUpperCase() + o.effect.slice(1))}</dd></dl>`;
+        const warn = [];
+        if (o.hit < 1) warn.push('A ciegas rinde la mitad: con la casilla a la vista (Reconocimiento 2, un satélite, drones o un espía) rendiría entero. El misil guiado rinde entero siempre.');
+        if (o.warn) warn.push(`${o.warn} Lo aclaran ver la zona (Reconocimiento 2, un satélite o un reconocimiento con drones) y espiar su investigación.`);
+        const notes = warn.map(x => `<p class="note warn">${x}</p>`).join('');
+        let act;
+        if (!fx.nuke) act = `<div class="row" style="margin-top:10px"><button class="btn primary" data-action="strike-launch">Lanzar ${salvo}</button></div>`;
+        else if (!S.confirm) act = `<div class="row" style="margin-top:10px"><button class="btn war" data-action="strike-launch">Lanzar ${salvo}…</button></div>`;
+        else {
+            const zone = hexDisc(c, kmCells(NUKE.KM)), own = zone.filter(x => g.armyOn(x)?.owner === p0).length;
+            act = `<div class="alert" style="margin-top:10px"><p><b>¿Lanzar ${salvo} sobre ${esc(g.placeName(c))}?</b> No tiene vuelta atrás:</p>
+                <ul class="small" style="margin:6px 0 8px;padding-left:18px">
+                    <li>Quedas paria ${NUKE.PARIAH_TURNS} turnos, aunque te la intercepten: ningún país de la IA firmará la paz ni alianzas contigo, te declararán la guerra con mucha menos ventaja y cada aliado tuyo de la IA puede dejar su bloque.</li>
+                    <li>Arrasa ${NUKE.KM} km a la redonda (${plural(zone.length, 'casilla', 'casillas')}): destruye lo que hay en la casilla y quita la mitad de sus unidades a todos los ejércitos del radio, también a los tuyos${own ? ` (aquí, ${plural(own, 'ejército tuyo', 'ejércitos tuyos')})` : ''}; destruye fortificaciones, antiaéreo, baterías, aeródromos y enjambres y rompe las carreteras.</li>
+                    <li>La zona queda contaminada ${NUKE.FALLOUT_TURNS} turnos: no da renta y el ejército que termina su turno en ella pierde el ${Math.round(NUKE.FALLOUT_LOSS * 100)} % de sus unidades. El desarrollo de la provincia cae a 0.</li>
+                </ul>
+                <div class="row"><button class="btn war" data-action="strike-nuke">Lanzar la bomba</button><button class="btn ghost" data-action="strike-cancel">Cancelar</button></div></div>`;
+        }
+        return `${head}${kinds}${facts}${notes}${act}</section>`;
+    }
+
     flash(msg) { this.game.log(msg); this.hintOverride = msg; this.render(); }
 
     setTool(id, draft = null) {
@@ -13177,6 +13475,7 @@ class GameUI {
         this.stretch = this.view.stretch = this.repair = this.fortRepair = null;
         this.opDraft = id === 'op' ? draft ?? { kind: this.opDraft?.kind ?? 'ofensiva', cells: [], redraw: null } : null;
         this.air = this.noAir();
+        this.strike = this.noStrike();
         this.anchor = -1;
         this.pending = null;
         this.view.preview = null;
@@ -13209,6 +13508,14 @@ class GameUI {
             else if (A.mode === 'sat') A.mode = null;
             else if (A.target >= 0) { A.target = -1; this.selected = A.base >= 0 ? A.base : A.nest; }
             else if (A.base >= 0 || A.nest >= 0 || A.wing || this.selected >= 0) { this.air = this.noAir(); this.selected = -1; }
+            else { this.setTool('command'); return; }
+            this.render();
+            return;
+        }
+        if (this.tool === 'strike') {   // primero la confirmación de la bomba, después el blanco y al final la herramienta
+            const S = this.strike;
+            if (S.confirm) S.confirm = false;
+            else if (S.target >= 0) { Object.assign(S, { target: -1, kind: null }); this.selected = -1; }
             else { this.setTool('command'); return; }
             this.render();
             return;
@@ -13364,6 +13671,8 @@ class GameUI {
         this.view.multi = this.tool === 'cities' ? new Set([...this.multi].map(pid => PROVINCES[pid].city)) : null;
         if (this.tool === 'air') this.airTidy();
         this.view.airPick = this.tool === 'air' ? this.airPick() : null;
+        if (this.tool === 'strike' && g.player !== null && !g.over) this.strikeTidy();
+        this.view.strikePick = this.tool === 'strike' && g.player !== null && !g.over ? this.strikePick() : null;
     }
 
     // --- Entrada ---
@@ -13646,6 +13955,18 @@ class GameUI {
                 if (isMobile()) $('#card').scrollTop = 0;
                 return;
             case 'sat-cancel': this.air.mode = null; break;
+            case 'strike-weapon': Object.assign(this.strike, { weapon: d.weapon, kind: null, confirm: false }); break;
+            case 'strike-buy': if (g.playerBuyWeapon(d.weapon)) Object.assign(this.strike, { weapon: d.weapon, kind: null, confirm: false }); break;
+            case 'strike-n': this.strike.n += +d.delta; break;   // strikeTidy la deja entre 1 y lo que tienes
+            case 'strike-kind': Object.assign(this.strike, { kind: d.kind, confirm: false }); break;
+            case 'strike-launch': {   // la bomba, antes, sus consecuencias
+                const S = this.strike;
+                if (STRIKE_FX[S.weapon]?.nuke) { S.confirm = true; break; }
+                g.playerStrike(S.weapon, S.n, S.kind, S.target);
+                break;
+            }
+            case 'strike-nuke': { const S = this.strike; if (S.confirm) g.playerStrike(S.weapon, S.n, S.kind, S.target); S.confirm = false; break; }
+            case 'strike-cancel': this.strike.confirm = false; break;
             case 'cancel-build': this.cancel(); return;
             case 'stop-build': this.setTool('command'); return;
             case 'highway': this.toggleHighway(); return;
@@ -14082,7 +14403,8 @@ class GameUI {
         const n = g.nations[p0];
         $('#nation-name').textContent = n.name;
         $('#flag').style.background = n.color;
-        $('#gold').innerHTML = `${n.gold}<small>+${g.income(p0)}</small>`;
+        const inc = g.income(p0);   // con el mantenimiento del arsenal puede quedar en negativo
+        $('#gold').innerHTML = `${n.gold}<small${inc < 0 ? ' style="color:var(--war)"' : ''}>${inc < 0 ? '−' : '+'}${Math.abs(inc)}</small>`;
     }
 
     renderTools() {
@@ -14143,10 +14465,11 @@ class GameUI {
 
     renderCard() {
         const g = this.game, cell = this.selected, p0 = g.player, el = $('#card');
-        el.classList.toggle('air-card', this.tool === 'air' && p0 !== null && !g.over);
+        el.classList.toggle('air-card', (this.tool === 'air' || this.tool === 'strike') && p0 !== null && !g.over);
         if (this.tool === 'cities' && p0 !== null && !g.over) { this.renderMultiCard(); return; }
         if (this.tool === 'op' && p0 !== null && !g.over) { this.renderOpDraftCard(); return; }
         if (this.tool === 'air' && p0 !== null && !g.over) { this.renderAirCard(); return; }
+        if (this.tool === 'strike' && p0 !== null && !g.over) { this.renderStrikeCard(); return; }
         if (this.tool === 'command' && p0 !== null && !g.over && this.sel.size > 1) { this.renderSelCard(); return; }
         // En el mar solo hay ficha para un barco propio con la herramienta de mando: no hay provincia, dueño ni reclutas.
         const sea = cell >= 0 && afloat(cell), a = cell >= 0 ? g.armyOn(cell) : null;
@@ -14765,6 +15088,9 @@ class GameUI {
         else if (this.tool === 'air' && this.air.mode === 'sat') text = `Satélite: ${this.touch ? 'toca' : 'haz clic en'} el centro de la región que quieres vigilar.${this.touch ? '' : ' Esc para cancelar.'}`;
         else if (this.tool === 'air' && this.air.mode === 'zone') text = `Orden de zona: ${this.touch ? 'toca' : 'haz clic en'} el centro de la zona del escuadrón ${this.air.zoneSq}.${this.touch ? '' : ' Esc para cancelar.'}`;
         else if (this.tool === 'air') text = 'Aviación: elige un aeródromo, una ciudad con drones o un ala y luego un blanco a su alcance. En tu territorio, construye aeródromos, antiaéreo y baterías.';
+        else if (this.tool === 'strike' && this.strike.confirm) text = 'Ataque nuclear: lee sus consecuencias en la ficha y confirma o cancela.';
+        else if (this.tool === 'strike') text = this.strike.weapon ? `Ataque a distancia: ${this.touch ? 'toca' : 'haz clic en'} el blanco, dentro de la línea discontinua; la ficha te enseña la previsión antes de lanzar.`
+            : 'Ataque a distancia: compra cohetes o misiles en la ficha para tener algo que lanzar.';
         else if (this.boxMode) text = `Seleccionar zona: ${this.touch ? 'arrastra el dedo' : 'arrastra'} sobre el mapa para elegir tus ejércitos de dentro del rectángulo.${this.touch ? '' : ' Esc para cancelar.'}`;
         else if (this.ordering?.kind?.startsWith('group-')) text = `${{ 'group-march': 'Marchar: haz clic en el destino; cada uno irá a una casilla libre a su alrededor',
             'group-gather': 'Reunir: haz clic en la casilla donde juntarlos en un solo ejército (o en uno de ellos para que vayan a él)',
@@ -14819,6 +15145,8 @@ class GameUI {
                         ${n.overlord >= 0 ? `<dt>Señor</dt><dd>${g.nm(n.overlord)}</dd>` : ''}
                         ${n.overlord === g.player ? `<dt>Tributo</dt><dd>${Math.round(g.economy(t).total * CONFIG.TRIBUTE)} de oro por turno</dd>` : ''}
                         ${g.satellitesOf(t).length ? `<dt>Satélites</dt><dd>${g.satellitesOf(t).map(x => g.nm(x)).join(', ')}</dd>` : ''}
+                        ${g.isPariah(t) ? `<dt>Paria nuclear</dt><dd class="warn-text">hasta el turno ${n.pariahUntil - 1}: ningún país de la IA firma la paz ni alianzas ${t === g.player ? 'contigo' : 'con él'}</dd>` : ''}
+                        ${t === g.player ? `<dt>Arsenal</dt><dd>${this.arsenalText(t)} <button class="link" data-action="tool" data-tool="strike">Ataque a distancia</button></dd>` : ''}
                     </dl>
                     ${t === g.player ? this.economyFacts(t) : ''}
                     <button class="btn" style="margin-top:10px" data-action="goto" data-cell="${n.capitalCell}" ${n.alive ? '' : 'disabled'}>Ver en el mapa</button>
@@ -14891,7 +15219,7 @@ class GameUI {
             const rows = g.nations.filter(n => test(n) && (!q || n.name.toLowerCase().includes(q)))
                 .sort((a, b) => (g.settings.fog ? lands[b.id] - lands[a.id] : powers[b.id] - powers[a.id]))
                 .map(n => `<button class="nation-row" data-action="nation" data-id="${n.id}">
-                    <span class="sw" style="background:${n.color}"></span><span>${n.name}</span>
+                    <span class="sw" style="background:${n.color}"></span><span>${n.name}${g.isPariah(n.id) ? ' <span class="chip guerra" title="Paria nuclear: nadie de la IA firma la paz ni alianzas con él">paria</span>' : ''}</span>
                     <span class="num" title="Parte ${MAP.of}">${(100 * lands[n.id] / G.land.length).toFixed(1)} %</span>
                     <span class="num" title="Fuerza militar">${this.powerText(n.id, powers)}</span></button>`).join('');
             return rows ? `<p class="group-title">${title}</p>${rows}` : '';

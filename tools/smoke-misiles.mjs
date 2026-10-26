@@ -757,6 +757,131 @@ const CHECKS = [
         T.eq([...b.fallout], [[G.land[2], 1e6]], 'solo lo válido');
         T.eq(b.nations[es].pariahUntil, 0, 'paria no válido');
         return true;
+    }],
+    ['C7 · tecla 7 abre la herramienta y lista el arsenal', () => {
+        const g = T.uiStart('es'), es = g.player;
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: '7' }));
+        T.eq(ui.tool, 'strike', 'herramienta');
+        T.ok(document.querySelector('#tools [data-tool="strike"] svg'), 'botón con su símbolo');
+        const card = document.querySelector('#card'), text = () => card.textContent;
+        T.ok(!card.hidden && /Ataque a distancia/.test(text()) && /Arsenal/.test(text()), 'ficha con el arsenal');
+        for (const k of WEAPON_KEYS) T.ok(card.querySelector(`[data-weapon="${k}"]`), `fila de ${k}`);
+        // Precio, mantenimiento y alcance de cada una; las que faltan por investigar lo dicen.
+        T.ok(text().includes(`${g.weaponPrice(es, 'rocket')} de oro`) && /5 por turno/.test(text()) && /80 km/.test(text()), 'precio, mantenimiento y alcance');
+        T.ok(!card.querySelector('[data-action="strike-buy"][data-weapon="rocket"]').disabled, 'el cohete se puede comprar');
+        T.ok(card.querySelector('[data-action="strike-buy"][data-weapon="missile"]').disabled && /Misiles balísticos tácticos/.test(text()), 'el misil pide su investigación');
+        // Sin armas, nada que lanzar; con alguna, se elige sola.
+        T.eq(ui.strike.weapon, null, 'nada elegido');
+        g.nations[es].arsenal.rocket = 2; ui.render();
+        T.ok(/2 en el arsenal|× ?2/.test(card.querySelector('[data-weapon="rocket"]').closest('.strike-w').textContent), 'existencias');
+        // Con las nucleares prohibidas, la bomba no sale.
+        g.settings.nukes = false; ui.render();
+        T.ok(!card.querySelector('[data-weapon="nuclear"]'), 'prohibidas: sin bomba');
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+        T.eq(ui.tool, 'command', 'Esc la cierra');
+        return true;
+    }],
+    ['C7 · comprar y lanzar con clic, con previsión', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr); T.bare(g); T.noIntegrated(g); T.noArmies(g, es);
+        g.nations[es].gold = 1e5;
+        const target = T.clear(g, fr, 6), foe = T.army(g, fr, target, 20);
+        const near = T.army(g, es, hexDisc(target, 3).find(c => hexDist(c, target) === 3 && isLand(c) && !g.armyAt[c] && CITY_OF[c] < 0), 3);
+        ui.setTool('strike');
+        const $c = sel => document.querySelector(`#card ${sel}`), price = g.weaponPrice(es, 'rocket'), gold = g.nations[es].gold;
+        for (let i = 0; i < 3; i++) $c('[data-action="strike-buy"][data-weapon="rocket"]').click();
+        T.eq([g.nations[es].arsenal.rocket, g.nations[es].gold], [3, gold - 3 * price], 'compra tres');
+        T.ok(g.logs.some(l => /Compras cohete/.test(l.msg)), 'en el parte');
+        T.eq(ui.strike.weapon, 'rocket', 'elegido al comprarlo');
+        $c('[data-action="strike-n"][data-delta="1"]').click();
+        T.eq(ui.strike.n, 2, 'salva de dos');
+        // El mapa enseña el alcance desde los lanzadores.
+        const pick = ui.view.strikePick;
+        T.ok(pick && pick.reach.has(target) && pick.reach.has(near.cell) && !pick.reach.has(T.clear(g, T.nation('de'), 0)), 'alcance desde el ejército');
+        // Fuera de alcance: lo dice, sin lanzar.
+        ui.clickCell(PROVINCES.find(p => g.owner[p.city] === fr && hexDist(p.city, near.cell) > 10).city);
+        T.ok(/Fuera de alcance/.test($c('').textContent) && !$c('[data-action="strike-launch"]'), 'fuera de alcance');
+        // Clic en el blanco: previsión y confirmar.
+        ui.clickCell(target);
+        const t = document.querySelector('#card').textContent;
+        T.ok(/Desde tu ejército en/.test(t) && /lleguen/.test(t) && /bajas|unidades/.test(t), `previsión: ${t}`);
+        T.eq([ui.view.strikePick.from, ui.view.strikePick.target], [near.cell, target], 'el mapa: del lanzador al blanco');
+        T.eq(g.nations[es].arsenal.rocket, 3, 'aún no lanza');
+        T.luck(g, 0.5);
+        $c('[data-action="strike-launch"]').click();
+        T.ok(countUnits(foe.units) < 20 && g.nations[es].arsenal.rocket === 1, 'lanzado');
+        T.ok(g.logs.some(l => /Lanzas 2 cohetes/.test(l.msg)), 'en el parte');
+        T.eq(ui.view.motion.strikes.length, 1, 'se anima');
+        // El ejército ya ha lanzado su salva: la ficha lo dice.
+        T.ok(/ya han lanzado/.test(document.querySelector('#card').textContent), 'una salva por turno');
+        return true;
+    }],
+    ['C7 · la bomba pide confirmación con sus consecuencias', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr); T.bare(g); T.noIntegrated(g); T.learn(g, es, 'estrategicas3');
+        g.nations[es].arsenal.nuclear = 1;
+        const cell = T.clear(g, fr, 3), mine = T.army(g, es, hexDisc(cell, 1).find(c => c !== cell && isLand(c) && !g.armyAt[c]), 4);
+        ui.setTool('strike');
+        document.querySelector('#card [data-action="strike-weapon"][data-weapon="nuclear"]').click();
+        ui.clickCell(cell);
+        document.querySelector('#card [data-action="strike-launch"]').click();
+        const t = document.querySelector('#card').textContent;
+        T.eq(g.nations[es].arsenal.nuclear, 1, 'aún no');
+        T.ok(/paria 30 turnos/.test(t) && /contaminada 15 turnos/.test(t) && /1 ejército tuyo/.test(t), `consecuencias: ${t}`);
+        document.querySelector('#card [data-action="strike-nuke"]').click();
+        T.eq([g.nations[es].arsenal.nuclear, g.isPariah(es), countUnits(mine.units)], [0, true, 2], 'lanzada');
+        T.ok(g.fallout.size > 0 && ui.view.falloutZones().length === 1, 'zona contaminada');
+        return true;
+    }],
+    ['C7 · el desglose de la renta muestra el mantenimiento', () => {
+        const g = T.uiStart('es'), es = g.player;
+        Object.assign(g.nations[es].arsenal, { rocket: 2, missile: 1 });
+        ui.tab = 'paises'; ui.focusNation = es; ui.drawerOpen = true; ui.render();
+        const t = document.querySelector('#drawer-body').textContent;
+        T.ok(/Mantenimiento del arsenal\s*−30/.test(t), `mantenimiento: ${t}`);
+        T.ok(/Arsenal\s*2 cohetes y 1 misil/.test(t), 'existencias en el resumen');
+        T.ok(new RegExp(`Total\\s*${g.income(es)} de oro`).test(t), 'total neto');
+        return true;
+    }],
+    ['C7 · Países enseña al paria y la tarjeta, la contaminación', () => {
+        const g = T.uiStart('es'), fr = T.nation('fr');
+        g.nations[fr].pariahUntil = g.turn + 6;
+        ui.tab = 'paises'; ui.focusNation = null; ui.drawerOpen = true; ui.render();
+        const row = document.querySelector(`#nation-list [data-action="nation"][data-id="${fr}"]`);
+        T.ok(/paria/.test(row.textContent), 'en la lista');
+        ui.focusNation = fr; ui.render();
+        T.ok(new RegExp(`Paria nuclear\\s*hasta el turno ${g.turn + 5}`).test(document.querySelector('#drawer-body').textContent), 'en su resumen');
+        const c = T.clear(g, fr, 2);
+        g.fallout.set(c, g.turn + 7); g.falloutVersion++;
+        T.ok(/Contaminada.*7 turnos/.test(T.hover(c)), `tarjeta: ${T.hover(c)}`);
+        return true;
+    }],
+    ['C7 · el mapa anima la salva con sus intercepciones y dibuja la zona contaminada', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        const [mine, theirs] = T.pair(g, es, fr);
+        // Un lanzamiento de la IA (en la repetición): seis misiles, cuatro interceptados.
+        ui.view.motion.clear();
+        g.note({ kind: 'strike', owner: fr, from: theirs, cell: mine, weapon: 'missile', n: 6, through: 2 });
+        ui.view.draw();
+        const s = ui.view.motion.strikes.at(-1);
+        T.ok(s, 'se anima');
+        T.eq([s.arcs.length, s.arcs.filter(a => a.cut).length, s.cell, s.from], [6, 4, mine, theirs], 'arcos e interceptados');
+        T.ok(ui.view.motion.pendingMs() > 0, 'la repetición espera a que acabe');
+        // Una salva enorme se dibuja con unos pocos arcos, en proporción.
+        g.note({ kind: 'strike', owner: fr, from: theirs, cell: mine, weapon: 'rocket', n: 40, through: 30 });
+        ui.view.draw();
+        const big = ui.view.motion.strikes.at(-1);
+        T.ok(big.arcs.length <= 8 && big.arcs.some(a => a.cut) && big.arcs.some(a => !a.cut), 'en proporción');
+        // La zona contaminada: una por zona, con los turnos que quedan.
+        const c = T.clear(g, fr, 3);
+        for (const j of hexDisc(c, 2)) if (isLand(j)) g.fallout.set(j, g.turn + 12);
+        g.falloutVersion++;
+        const z = ui.view.falloutZones();
+        T.eq([z.length, z[0].left, z[0].cells.size], [1, 12, hexDisc(c, 2).filter(isLand).length], 'zona');
+        g.turn += 12;
+        T.eq(ui.view.falloutZones().length, 0, 'se acaba');
+        return true;
     }]
 ];
 
@@ -812,6 +937,91 @@ try {
         }
         if (errors.length) { failed++; console.log(`FALLA ${SHOTS}\n      ${errors.join('\n      ')}`); }
         else console.log(`ok    ${SHOTS} (${join(out, 'misiles-investigacion.png')}, misiles-investigacion-movil.png)`);
+    }
+    // Capturas de una salva de misiles con intercepciones junto a una zona contaminada, en las dos vistas, y de la ficha
+    // de la herramienta en el escritorio y en el móvil (para revisarlas a ojo).
+    const SHOTS7 = 'C7 · capturas de la salva, la zona contaminada y la ficha';
+    if (!filter || SHOTS7.includes(filter)) {
+        ran++;
+        const out = join(root, 'tools/cache/smoke'), errors = [];
+        mkdirSync(out, { recursive: true });
+        const page = await browser.newPage({ viewport: { width: 1200, height: 800 }, deviceScaleFactor: 2 });
+        page.on('pageerror', e => errors.push(e.message));
+        await page.goto(`http://localhost:${port}/?seed=7&mapa=europa`);
+        await page.waitForFunction(() => typeof GameEngine === 'function' && typeof ui === 'object');
+        await page.evaluate(setup);
+        await page.evaluate(() => {
+            const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+            g.declareWar(es, fr); T.bare(g); T.noIntegrated(g);
+            T.learn(g, es, 'cohete1', 'cohete2'); T.learn(g, fr, 'defensa1', 'defensa2');
+            g.nations[es].gold = 1e5; Object.assign(g.nations[es].arsenal, { rocket: 4, heavyRocket: 2, missile: 8 });
+            // El blanco: un ejército francés a 5 casillas o más de una ciudad española cercana, con una batería y un
+            // antiaéreo franceses al lado que conoces.
+            const [mine] = T.pair(g, es, fr);
+            const target = G.land.filter(c => g.owner[c] === fr && T.free(g, c) && hexDist(c, mine) >= 5 && CELL_TERRAIN[c] !== 'lake')
+                .sort((a, b) => hexDist(a, mine) - hexDist(b, mine) || a - b)[0];
+            T.army(g, fr, target, 30, 6, 4);
+            const nbs = hexDisc(target, 1).filter(c => c !== target && isLand(c) && g.owner[c] === fr && CITY_OF[c] < 0);
+            T.battery(g, fr, nbs[0]).known.add(es); T.site(g, fr, nbs[1]).known.add(es);
+            // Y una zona contaminada a unas casillas, al otro lado del blanco.
+            const zone = G.land.filter(c => g.owner[c] === fr && hexDist(c, target) === 6 && hexDist(c, mine) > hexDist(target, mine) + 3)[0];
+            for (const j of hexDisc(zone, 2)) if (isLand(j)) g.fallout.set(j, g.turn + 12);
+            g.falloutVersion++;
+            const mid = G.cellAt((G.cx[mine] + G.cx[zone]) / 2, (G.cy[mine] + G.cy[zone]) / 2);
+            window.SHOT = { mine, target, zone, mid };
+            ui.view.setMode('sencilla');
+            ui.setTool('strike');
+            document.querySelector('#card [data-action="strike-weapon"][data-weapon="missile"]').click();
+            ui.strike.n = 8; ui.clickCell(target);
+        });
+        await page.waitForFunction(() => ui.view.realistic.state === 'ready' || ui.view.realistic.state === 'failed', null, { timeout: 60000 });
+        const card = async name => {
+            await page.evaluate(() => new Promise(r => {
+                ui.view.centerOn(SHOT.target, 12); ui.render();
+                document.querySelector('#card [data-action="strike-launch"]')?.scrollIntoView({ block: 'center' });
+                requestAnimationFrame(() => requestAnimationFrame(r));
+            }));
+            await page.waitForTimeout(300);
+            const m = await page.evaluate(() => { const c = document.querySelector('#card'); return { over: c.scrollWidth - c.clientWidth, launch: !!c.querySelector('[data-action="strike-launch"]'), warn: /defensas que no conoces|pararían/.test(c.textContent) }; });
+            if (m.over > 2 || !m.launch || !m.warn) errors.push(`${name}: ${JSON.stringify(m)}`);
+            await page.screenshot({ path: join(out, `${name}.png`) });
+        };
+        await card('misiles-ficha');
+        // Lanza la salva con la repetición muy lenta y la deja en el momento en que ya han caído o las han parado todas.
+        const fired = await page.evaluate(() => {
+            ui.view.motion.speed = 40;
+            document.querySelector('#card [data-action="strike-launch"]').click();
+            ui.view.motion.speed = 1;
+            const t = ui.view.motion.strikes.at(-1);
+            if (!t) return null;
+            const dt = t.end - performance.now() + 200;
+            for (const a of t.arcs) { a.start -= dt; a.end -= dt; }
+            t.end -= dt;
+            return { n: t.n, through: t.through, cut: t.arcs.filter(a => a.cut).length };
+        });
+        if (!fired || !fired.cut || fired.through === 0) errors.push(`la salva no tiene intercepciones y llegadas: ${JSON.stringify(fired)}`);
+        const shot = async (name, mode) => {
+            await page.evaluate(m => new Promise(r => {
+                ui.setTool('command'); ui.select(-1); ui.view.setMode(m); ui.view.scale = 1; ui.view.centerOn(SHOT.mid, 24);
+                ui.render(); ui.view.draw(); requestAnimationFrame(() => requestAnimationFrame(r));
+            }), mode);
+            await page.waitForTimeout(900);
+            await page.screenshot({ path: join(out, `${name}.png`) });
+        };
+        await shot('misiles-sencilla', 'sencilla');
+        await shot('misiles-realista', 'realista');
+        // La ficha en el móvil, con el blanco elegido.
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.evaluate(() => {
+            ui.game.nations[ui.game.player].arsenal.missile = 8;
+            ui.view.setMode('sencilla'); ui.drawerOpen = false; ui.setSheet('media'); ui.setTool('strike');
+            document.querySelector('#card [data-action="strike-weapon"][data-weapon="missile"]').click();
+            ui.strike.n = 4; ui.clickCell(SHOT.target);
+        });
+        await card('misiles-ficha-movil');
+        await page.close();
+        if (errors.length) { failed++; console.log(`FALLA ${SHOTS7}\n      ${errors.join('\n      ')}`); }
+        else console.log(`ok    ${SHOTS7} (${join(out, 'misiles-sencilla.png')}, misiles-realista.png, misiles-ficha.png, misiles-ficha-movil.png; salva ${JSON.stringify(fired)})`);
     }
     for (const page of pages.values()) if (page.errors.length) { failed++; console.log(`FALLA errores en la página:\n      ${page.errors.join('\n      ')}`); }
 } finally {
