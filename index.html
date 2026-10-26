@@ -681,6 +681,10 @@ const CONFIG = {
         POWER: 10, AA_COST: 60, AA_TURNS: 2, INTEGRATED: 2, AA_CAP: 4, KNOWN_TARGET: 0.75, KNOWN_PATH: 0.5, FAIL_K: 1.7,
         STRIKE: 0.10, STRIKE_RAND: 0.05, SEA_STRIKE: 2, DISORG: 0.8, DISORG_TURNS: 2, AA_HITS: 2, MOBILE_HIT: 0.25, MOBILE: 0.5,
         DOG_DOWN: 0.4, DOG_DAMAGED: 0.4, DOG_WINNER: 0.1 },
+    // Drones (rama Drones): precio de un enjambre, cuántos caben en una ciudad, radio de su reconocimiento, cuánto más
+    // los derriba el antiaéreo, fuerza de los cazas que protegen una casilla contra ellos, enjambres juntos que saturan
+    // el antiaéreo (con Enjambres autónomos) y lo que cuenta entonces, y su fuerza frente a la de un escuadrón.
+    DRONE: { COST: 120, PER_CITY: 4, RECON_KM: 60, AA_DOWN: 1.5, PATROL_KILL: 2, SATURATE: 3, SAT_AA: 0.5, POWER: 0.5 },
     // Terreno de cada casilla, sacado de datos reales (relieve, bosques, humedales y lagos): coste de entrar y defensa.
     TERRAIN: {
         plain:    { name: "Llanura", cost: 1, def: 1 },
@@ -1301,6 +1305,11 @@ class GameEngine {
         this.airHits = new Map();     // casilla × 8 + misión → turno: el blanco ya ha recibido su acierto de ese turno
         this.airSeen = new Map();     // país × casillas + casilla → turno: una misión suya la ha desvelado ese turno
         this.sats = [];               // { owner, cell, left }: satélites en órbita sobre `cell`; left, turnos de su dueño
+        // Drones: enjambres con base en una ciudad (4 como mucho en cada una); nadie empieza con ellos.
+        this.swarms = new Map();      // id → { id, owner, base, ready, flown, patrol, op, task, damaged }, como un escuadrón
+        this.nextSwarmId = 1;
+        this.droneHits = new Map();   // casilla × 8 + misión → turno: el acierto de drones del blanco ese turno (aparte del aéreo)
+        this.droneSeen = new Map();   // país × casillas + casilla → turno hasta el que lo desvela su reconocimiento con drones
         this.seedAir();
         this.configure({ aggression: 'normal', alliances: 'reales', victory: 0.5, fog: true });
         for (const nat of this.nations) nat.gold = this.income(nat.id) * CONFIG.START_GOLD_TURNS;
@@ -1376,7 +1385,10 @@ class GameEngine {
                 aa: [...this.aaSites].map(([c, s]) => [c, s.owner, s.left, s.hits, [...s.known]]),
                 hits: [...this.airHits].filter(([, t]) => t === this.turn).map(([k]) => k),
                 seen: [...this.airSeen].filter(([, t]) => t === this.turn).map(([k]) => k),
-                sats: this.sats.map(s => [s.owner, s.cell, s.left]) }
+                sats: this.sats.map(s => [s.owner, s.cell, s.left]) },
+            drones: { sw: [...this.swarms.values()].map(q => [q.id, q.owner, q.base, q.ready, q.flown, q.patrol, q.op, q.damaged ? 1 : 0]), next: this.nextSwarmId,
+                hits: [...this.droneHits].filter(([, t]) => t === this.turn).map(([k]) => k),
+                seen: [...this.droneSeen].filter(([, t]) => t >= this.turn) }
         };
     }
 
@@ -1676,6 +1688,25 @@ class GameEngine {
                 if (c >= 0 && g.nations[owner].alive) g.sats.push({ owner, cell: c, left: int(x?.[2], 1, g.rules(owner).satTurns, 1) });   // los de un país eliminado, no
             }
         } else g.seedAir();
+        // Drones: enjambres con id único en una ciudad (4 como mucho en cada una), en una operación solo si es suya; los
+        // aciertos de este turno y lo desvelado que dura hasta este turno o el siguiente. Las partidas de antes, sin nada.
+        g.swarms = new Map(); g.nextSwarmId = 1; g.droneHits = new Map(); g.droneSeen = new Map();
+        if (data.drones) {
+            const based = new Map();   // enjambres por ciudad
+            for (const x of list(data.drones.sw)) {
+                const id = int(x?.[0], 1, 1e9, 0), owner = nat(x?.[1]), base = int(x?.[2], -1, G.N - 1, -1), op = g.ops.get(int(x?.[6], 0, 1e6, 0));
+                if (!id || g.swarms.has(id) || base < 0 || CITY_OF[base] < 0 || (based.get(base) ?? 0) >= CONFIG.DRONE.PER_CITY) continue;
+                based.set(base, (based.get(base) ?? 0) + 1);
+                g.swarms.set(id, { id, owner, base, ready: int(x?.[3], 0, 1e6, 0), flown: int(x?.[4], 0, 1e6, 0), patrol: int(x?.[5], -1, G.N - 1, -1),
+                    op: op && op.owner === owner ? op.id : 0, task: null, damaged: x?.[7] === 1 });
+            }
+            g.nextSwarmId = Math.max(int(data.drones.next, 1, 1e9, 1), ...[...g.swarms.keys()].map(x => x + 1), 1);
+            for (const k of list(data.drones.hits)) if (Number.isInteger(k) && k >= 0 && k < G.N * 8) g.droneHits.set(k, g.turn);
+            for (const x of list(data.drones.seen)) {
+                const k = x?.[0];
+                if (Number.isInteger(k) && k >= 0 && k < NN * G.N) g.droneSeen.set(k, int(x?.[1], g.turn, g.turn + 1, g.turn));
+            }
+        }
         g.airVersion++;
         // Quién ya ha empezado este turno: el jugador, que es quien guarda; los demás juegan después.
         for (const n of g.nations) n.lastTurn = n.id === g.player ? g.turn : g.turn - 1;
@@ -2253,10 +2284,11 @@ class GameEngine {
                 lost ? `${lost === 1 ? 'uno se pierde' : `${lost} se pierden`} por no tener dónde ir` : ''].filter(Boolean);
             this.log(`Pierdes el aeródromo de ${this.placeName(c)}${parts.length ? `: ${parts.join(' y ')}` : ''}.`);
         }
+        this.droneSweep();
     }
-    // Al empezar el turno de `id`: avanzan sus obras de aeródromo y de antiaéreo, sus escuadrones dejan de patrullar (y los
-    // dañados que ya pueden volar dejan de contar como dañados) y sus satélites gastan un turno. Se olvidan los aciertos y
-    // lo desvelado de turnos pasados.
+    // Al empezar el turno de `id`: avanzan sus obras de aeródromo y de antiaéreo, sus escuadrones y enjambres dejan de
+    // patrullar (y los dañados que ya pueden volar dejan de contar como dañados) y sus satélites gastan un turno. Se
+    // olvidan los aciertos y lo desvelado de turnos pasados.
     airTurn(id) {
         for (const [c, f] of this.airfields) {
             if (f.owner !== id || f.left <= 0) continue;
@@ -2273,6 +2305,11 @@ class GameEngine {
             if (q.patrol >= 0) { q.patrol = -1; this.airVersion++; }
             if (q.damaged && this.turn >= q.ready) { q.damaged = false; this.airVersion++; }   // reparado
         }
+        for (const q of this.swarms.values()) {   // sus enjambres, igual
+            if (q.owner !== id) continue;
+            if (q.patrol >= 0) { q.patrol = -1; this.airVersion++; }
+            if (q.damaged && this.turn >= q.ready) { q.damaged = false; this.airVersion++; }
+        }
         // Sus satélites gastan un turno; el que llega a 0 deja de transmitir.
         for (const s of this.sats) {
             if (s.owner !== id) continue;
@@ -2281,7 +2318,8 @@ class GameEngine {
             if (!s.left && id === this.player) this.log(`Tu satélite sobre ${this.placeName(s.cell)} deja de transmitir.`);
         }
         if (this.sats.some(s => !s.left)) this.sats = this.sats.filter(s => s.left > 0);
-        for (const m of [this.airHits, this.airSeen]) for (const [k, t] of m) if (t < this.turn) m.delete(k);   // de turnos pasados
+        // De turnos pasados (lo desvelado por drones guarda el último turno en que vale).
+        for (const m of [this.airHits, this.airSeen, this.droneHits, this.droneSeen]) for (const [k, t] of m) if (t < this.turn) m.delete(k);
     }
     playerBuySquadron(cell) {
         if (this.over) return null;
@@ -2340,12 +2378,12 @@ class GameEngine {
         return list;
     }
     // ¿Ve `viewer` el antiaéreo que pueda haber en `cell`? Sin niebla, y el propio y el de los aliados, siempre; si no,
-    // con un espía en la provincia, con un satélite suyo encima o con Reconocimiento 2 (el jugador, además, con la casilla
-    // a la vista).
+    // con un espía en la provincia, con un satélite suyo encima, con su reconocimiento de drones o con Reconocimiento 2 (el
+    // jugador, además, con la casilla a la vista).
     aaVisible(viewer, cell) {
         const o = this.owner[cell];
         if (!this.settings.fog || viewer === null || o < 0 || o === viewer || this.allied(viewer, o)) return true;
-        if (this.satCovers(viewer, cell)) return true;
+        if (this.satCovers(viewer, cell) || this.droneRevealed(viewer, cell)) return true;
         if (viewer === this.player && this.spiedProvinces().has(SEA_PROV[cell])) return true;
         return this.rules(viewer).intelExact && (viewer !== this.player || this.sees(viewer, cell));
     }
@@ -2502,10 +2540,10 @@ class GameEngine {
         return (viewer !== this.player || this.sees(viewer, cell)) && this.intel(viewer, o, cell).exact;
     }
     // Los escuadrones de `owner` que vuelan contra `cell`: los listos que no han volado este turno, con su aeródromo en
-    // servicio y el blanco a su alcance; por id, que es el orden de sus tiradas.
-    fliers(owner, sqs, cell) {
-        const R = this.airRange(owner);
-        return sqs.filter(q => q && q.owner === owner && this.canFly(q) && hexDist(q.base, cell) <= R).sort((a, b) => a.id - b.id);
+    // servicio y el blanco a su alcance; por id, que es el orden de sus tiradas. Con `drone`, los enjambres.
+    fliers(owner, sqs, cell, drone = false) {
+        const R = drone ? this.droneRange(owner) : this.airRange(owner), can = drone ? q => this.canFlySwarm(q) : q => this.canFly(q);
+        return sqs.filter(q => q && q.owner === owner && can(q) && hexDist(q.base, cell) <= R).sort((a, b) => a.id - b.id);
     }
     // El antiaéreo de `cell` que `viewer` conoce y que `owner` puede atacar: un sitio fijo; si no hay, las antiaéreas del
     // ejército que haya; y si tampoco, el integrado.
@@ -2528,6 +2566,17 @@ class GameEngine {
         }
         return out.sort((a, b) => a.id - b.id);
     }
+    // Motivo por el que `owner` no puede proteger `cell` ('' si puede): solo la suya, la de un aliado o el mar.
+    patrolWhy(owner, cell) {
+        const o = this.owner[cell];
+        return afloat(cell) || o === owner || this.allied(owner, o) ? '' : 'Solo se protege una casilla tuya, de un aliado o de mar.';
+    }
+    // Motivo por el que `owner` no puede atacar el ejército de `cell` ('' si puede): uno enemigo que `viewer` vea, en guerra.
+    armyWhy(owner, cell, viewer = owner) {
+        const a = this.armyOn(cell);
+        if (!a || a.owner === owner || this.allied(owner, a.owner) || (viewer === this.player && !this.sees(viewer, cell))) return 'No ves ningún ejército enemigo ahí.';
+        return this.atWar(owner, a.owner) ? '' : 'Solo contra un país con el que estás en guerra.';
+    }
     // ¿Puede `owner` mandar esos escuadrones a esa misión contra `cell`? '' si puede; si no, el motivo. Solo cuenta lo que
     // `viewer` sabe: el ejército que ve y el antiaéreo que conoce.
     missionCheck(owner, sqs, kind, cell, viewer = owner) {
@@ -2537,14 +2586,10 @@ class GameEngine {
         const war = 'Solo contra un país con el que estás en guerra.';
         let key = this.hitKey(kind, cell);
         switch (kind) {
-            case 'patrol': {   // proteger no es un acierto: se puede repetir
-                const o = this.owner[cell];
-                return afloat(cell) || o === owner || this.allied(owner, o) ? '' : 'Solo se protege una casilla tuya, de un aliado o de mar.';
-            }
+            case 'patrol': return this.patrolWhy(owner, cell);   // proteger no es un acierto: se puede repetir
             case 'army': {
-                const a = this.armyOn(cell);
-                if (!a || a.owner === owner || this.allied(owner, a.owner) || (viewer === this.player && !this.sees(viewer, cell))) return 'No ves ningún ejército enemigo ahí.';
-                if (!this.atWar(owner, a.owner)) return war;
+                const why = this.armyWhy(owner, cell, viewer);
+                if (why) return why;
                 break;
             }
             case 'roads':
@@ -2586,8 +2631,8 @@ class GameEngine {
         return { why, hit: (1 - o.fail) * (known ? 1 : this.rules(owner).blindHit), down: o.down, damaged: o.damaged, known, get unknown() { return c.unknown; },
             fire: c.seen.fire, loss: c.seen.loss, power, patrol };
     }
-    // Un escuadrón vuelve dañado: no vuela hasta pasado el próximo turno de su dueño, y deja de proteger su casilla. Queda
-    // marcado como dañado hasta que vuelve a estar listo (en airTurn).
+    // Un escuadrón (o un enjambre) vuelve dañado: no vuela hasta pasado el próximo turno de su dueño, y deja de proteger
+    // su casilla. Queda marcado como dañado hasta que vuelve a estar listo (en airTurn).
     damageSquadron(q) {
         q.damaged = true;
         q.ready = Math.max(q.ready, this.nextOwnTurn(q.owner) + 1);
@@ -2597,16 +2642,17 @@ class GameEngine {
     squadronDown(q) { this.squadrons.delete(q.id); this.airVersion++; }
     // Combate aéreo: fuerza contra fuerza, con la tirada de `battle`; el empate lo gana el que defiende. Después cada
     // escuadrón tira una vez, por id: del bando que pierde, cae o vuelve dañado; del que gana, alguno vuelve dañado.
-    // Devuelve si gana el que ataca.
-    dogfight(attackers, defenders) {
+    // Devuelve si gana el que ataca. `atkF` y `dfnF` multiplican la fuerza de cada bando: contra enjambres (que valen
+    // DRONE.POWER de un escuadrón), los cazas que protegen la casilla pelean a DRONE.PATROL_KILL. Un enjambre no esquiva.
+    dogfight(attackers, defenders, atkF = 1, dfnF = 1) {
         const A = CONFIG.AIR, roll = () => 0.8 + this.rng() * 0.4;
         const force = qs => qs.reduce((s, q) => s + this.airPower(q.owner), 0);
-        const atk = force(attackers) * roll(), dfn = force(defenders) * roll(), won = atk > dfn;
+        const atk = force(attackers) * atkF * roll(), dfn = force(defenders) * dfnF * roll(), won = atk > dfn;
         const losers = new Set(won ? defenders : attackers);
         for (const q of [...attackers, ...defenders].sort((a, b) => a.id - b.id)) {
-            const r = this.rng();
+            const r = this.rng(), drone = this.swarms.get(q.id) === q;
             if (!losers.has(q)) { if (r < A.DOG_WINNER) this.damageSquadron(q); }
-            else if (r < A.DOG_DOWN * this.rules(q.owner).airEvade) this.squadronDown(q);
+            else if (r < A.DOG_DOWN * (drone ? 1 : this.rules(q.owner).airEvade)) { if (drone) this.swarmDown(q); else this.squadronDown(q); }
             else if (r < A.DOG_DOWN + A.DOG_DAMAGED) this.damageSquadron(q);
         }
         return won;
@@ -2624,18 +2670,21 @@ class GameEngine {
         const A = CONFIG.AIR, n = countUnits(a.units);
         return Math.min(n, Math.max(1, Math.round(n * (A.STRIKE + A.STRIKE_RAND * rand) * this.rules(owner).airDamage * (afloat(a.cell) ? A.SEA_STRIKE : 1))));
     }
+    // Quita `k` unidades al ejército `a` desde el aire: primero tanques, luego artillería, antiaéreas e infantería.
+    takeUnits(a, k) {
+        for (const t of ['tank', 'artillery', 'antiair', 'infantry']) {
+            if (!a.units[t]) continue;
+            const x = Math.min(k, a.units[t]);
+            a.units[t] -= x; k -= x;
+        }
+    }
     // Lo que hace un acierto de `owner` en `cell`; devuelve cómo lo cuenta el parte.
     airEffect(owner, kind, cell, src) {
         const A = CONFIG.AIR;
         switch (kind) {
             case 'army': {   // primero caen tanques, artillería y antiaéreas; el doble a un ejército embarcado
                 const a = this.armyOn(cell), lost = this.strikeLoss(owner, a, this.rng());
-                let k = lost;
-                for (const t of ['tank', 'artillery', 'antiair', 'infantry']) {
-                    if (!a.units[t]) continue;
-                    const x = Math.min(k, a.units[t]);
-                    a.units[t] -= x; k -= x;
-                }
+                this.takeUnits(a, lost);
                 a.disorgUntil = this.nextOwnTurn(a.owner) + A.DISORG_TURNS - 1;
                 this.armyVersion++;
                 if (countUnits(a.units) > 0) return `pierde ${plural(lost, 'unidad', 'unidades')} y queda desorganizado`;
@@ -2715,16 +2764,16 @@ class GameEngine {
         return { result, down, damaged, text };
     }
     // Lo que vuelve de una misión, contado al que la manda: «Vuelven todos.», «Derriban 1 y otro vuelve dañado.»...
-    // Con `subj`, con el sujeto delante («Tus 2 escuadrones vuelven todos.»).
-    airFate(n, down, damaged, subj = false) {
-        if (n === 1) return down ? (subj ? 'A tu escuadrón lo derriban.' : 'Lo derriban.') : `${subj ? 'Tu escuadrón vuelve' : 'Vuelve'} ${damaged ? 'dañado' : 'sin daños'}.`;
-        if (down === n) return subj ? `Derriban tus ${n} escuadrones.` : 'Los derriban a todos.';
+    // Con `subj`, con el sujeto delante («Tus 2 escuadrones vuelven todos.»); `one` y `many`, el nombre (los enjambres).
+    airFate(n, down, damaged, subj = false, one = 'escuadrón', many = 'escuadrones') {
+        if (n === 1) return down ? (subj ? `A tu ${one} lo derriban.` : 'Lo derriban.') : `${subj ? `Tu ${one} vuelve` : 'Vuelve'} ${damaged ? 'dañado' : 'sin daños'}.`;
+        if (down === n) return subj ? `Derriban tus ${n} ${many}.` : 'Los derriban a todos.';
         const parts = [];
         if (down) parts.push(`derriban ${down}`);
         if (damaged) parts.push(damaged === 1 ? `${down ? 'otro' : 'uno'} vuelve dañado` : `${damaged} vuelven dañados`);
-        if (!parts.length) return subj ? `Tus ${n} escuadrones vuelven todos.` : 'Vuelven todos.';
+        if (!parts.length) return subj ? `Tus ${n} ${many} vuelven todos.` : 'Vuelven todos.';
         const s = parts.join(' y ');
-        return subj ? `De tus ${n} escuadrones, ${s}.` : `${s[0].toUpperCase()}${s.slice(1)}.`;
+        return subj ? `De tus ${n} ${many}, ${s}.` : `${s[0].toUpperCase()}${s.slice(1)}.`;
     }
     // Parte de una misión para quien la manda.
     airReport(owner, victim, kind, cell, n, result, effect, down, damaged, guards) {
@@ -2754,6 +2803,226 @@ class GameEngine {
     playerAirMission(ids, kind, cell) {
         if (this.over || this.player === null) return null;
         const res = this.airMission(this.player, ids, kind, cell);
+        if (res.result === 'invalid' || res.result === 'blocked') this.log(res.text);
+        return res;
+    }
+
+    // --- Drones (rama Drones): enjambres con base en cualquier ciudad propia, sin aeródromo ---
+    // Un enjambre es una pieza como el escuadrón (base, listo, volado, patrulla, operación, encargo y dañado), con la mitad
+    // de su fuerza, su propio alcance y su propia cuenta de aciertos por blanco y turno (droneHits), aparte de la aérea.
+    // Radio de acción de los enjambres de `id`, en casillas: 150 km, y 300 km con Municiones merodeadoras.
+    droneRange(id) { return kmCells(this.rules(id).droneRangeKm); }
+    // Fuerza de un enjambre de `id`: la mitad de la de un escuadrón suyo.
+    dronePower(id) { return this.airPower(id) * CONFIG.DRONE.POWER; }
+    newSwarm(owner, base, ready = 0) {
+        const sw = { id: this.nextSwarmId++, owner, base, ready, flown: 0, patrol: -1, op: 0, task: null, damaged: false };
+        this.swarms.set(sw.id, sw);
+        this.airVersion++;
+        return sw;
+    }
+    swarmsAt(cell) { const out = []; for (const q of this.swarms.values()) if (q.base === cell) out.push(q); return out; }
+    // Un enjambre vuela una vez por turno, si ya está listo y su ciudad sigue siendo de su dueño.
+    canFlySwarm(sw) { return this.turn >= sw.ready && sw.flown !== this.turn && this.owner[sw.base] === sw.owner; }
+    // Ciudad de `id` con sitio para otro enjambre.
+    droneNest(id, cell) {
+        return cell >= 0 && CITY_OF[cell] >= 0 && this.owner[cell] === id && this.swarmsAt(cell).length < CONFIG.DRONE.PER_CITY;
+    }
+    // Comprar un enjambre en una ciudad propia (con Drones tácticos): vuela a partir del turno siguiente.
+    buySwarm(id, cell) {
+        const n = this.nations[id];
+        if (this.rules(id).drones < 1 || !this.droneNest(id, cell) || n.gold < CONFIG.DRONE.COST) return null;
+        n.gold -= CONFIG.DRONE.COST;
+        return this.newSwarm(id, cell, this.turn + 1);
+    }
+    playerBuySwarm(cell) {
+        if (this.over || this.player === null) return null;
+        const p = this.player, cost = CONFIG.DRONE.COST, per = CONFIG.DRONE.PER_CITY;
+        if (this.rules(p).drones < 1) { this.log('Para comprar enjambres hace falta investigar Drones tácticos (Drones 1).'); return null; }
+        if (cell < 0 || CITY_OF[cell] < 0 || this.owner[cell] !== p) { this.log('Solo se compran enjambres en una ciudad tuya.'); return null; }
+        if (this.swarmsAt(cell).length >= per) { this.log(`${this.placeName(cell)} ya tiene ${per} enjambres.`); return null; }
+        if (this.nations[p].gold < cost) { this.log(`Fondos insuficientes: el enjambre cuesta ${cost}g.`); return null; }
+        const sw = this.buySwarm(p, cell);
+        if (sw) this.log(`Compras un enjambre de drones en ${this.placeName(cell)} por ${cost} de oro: listo para volar el turno que viene.`);
+        return sw;
+    }
+    swarmDown(sw) { this.swarms.delete(sw.id); this.airVersion++; }
+    // La ciudad `cell` ha cambiado de manos en combate: sus enjambres de otro dueño se pierden.
+    loseSwarms(cell) {
+        const lost = this.swarmsAt(cell).filter(q => q.owner !== this.owner[cell]);
+        if (!lost.length) return;
+        for (const q of lost) this.swarms.delete(q.id);
+        this.airVersion++;
+        const mine = lost.filter(q => q.owner === this.player).length;
+        if (mine) this.log(`Pierdes ${mine === 1 ? 'el enjambre' : `los ${mine} enjambres`} de ${this.placeName(cell)}.`);
+    }
+    // Enjambres en una ciudad que ya no es de su dueño sin combate (un tratado, una provincia que cae entera...): vuelan a
+    // la ciudad propia más cercana con sitio (la de casilla menor si empatan) y, si no hay ninguna, se pierden. Como airSweep.
+    droneSweep() {
+        let moved = 0, lost = 0;
+        for (const q of [...this.swarms.values()]) {
+            if (this.owner[q.base] === q.owner) continue;
+            let best = -1, bd = Infinity;
+            for (const p of PROVINCES) {
+                const d = hexDist(q.base, p.city);
+                if ((d < bd || (d === bd && p.city < best)) && this.droneNest(q.owner, p.city)) { best = p.city; bd = d; }
+            }
+            if (best >= 0) q.base = best; else this.swarms.delete(q.id);
+            this.airVersion++;
+            if (q.owner === this.player) { if (best >= 0) moved++; else lost++; }
+        }
+        const parts = [moved ? `${moved === 1 ? 'un enjambre vuela' : `${moved} enjambres vuelan`} a otra ciudad tuya` : '',
+            lost ? `${lost === 1 ? 'uno se pierde' : `${lost} se pierden`} por no tener dónde ir` : ''].filter(Boolean);
+        if (parts.length) this.log(`Pierdes ciudades con drones: ${parts.join(' y ')}.`);
+    }
+    // ¿Sigue desvelada `cell` para `viewer` por un reconocimiento de sus drones? Dura ese turno y el siguiente.
+    droneRevealed(viewer, cell) {
+        return viewer !== null && this.droneSeen.size > 0 && (this.droneSeen.get(viewer * G.N + cell) ?? -1) >= this.turn;
+    }
+    // Lo que cuenta el antiaéreo contra una misión de `n` enjambres de `owner`: con Enjambres autónomos y 3 o más juntos,
+    // la mitad (saturación).
+    droneSaturation(owner, n) { return this.rules(owner).droneSwarm && n >= CONFIG.DRONE.SATURATE ? CONFIG.DRONE.SAT_AA : 1; }
+    // Capas de defensa contra `n` armas de la clase `cls` ('drone', cohetes, misiles...) de `owner` que llegan a `cell`:
+    // drones que patrullan, baterías automáticas y antiaéreo. Devuelve cuántas pasan (`through`), cuántas para cada capa,
+    // las casillas que disparan y si puede haber defensa que `viewer` no conoce; con `simulate`, la media, sin tirar dados
+    // ni gastar capacidad. Por ahora no hay capas: todo pasa.
+    incomingDefense(owner, cls, cell, n, { viewer = owner, simulate = false } = {}) {
+        return { through: n, stopped: { drones: 0, batteries: 0, aa: 0 }, sources: [], unknown: false };
+    }
+    // ¿Puede `owner` mandar esos enjambres a esa misión contra `cell`? '' si puede; si no, el motivo. Misiones: 'recon'
+    // (reconocer: el mar, o la tierra o el ejército de un país en guerra), 'army' (atacar ejército: un acierto de drones
+    // por blanco y turno) y 'patrol' (patrullar una casilla propia, de un aliado o de mar). Solo cuenta lo que `viewer` ve.
+    droneCheck(owner, sws, kind, cell, viewer = owner) {
+        const ready = sws.filter(q => q && q.owner === owner && this.canFlySwarm(q));
+        if (!ready.length) return 'Ningún enjambre listo.';
+        if (!ready.some(q => hexDist(q.base, cell) <= this.droneRange(owner))) return 'Fuera de alcance.';
+        switch (kind) {
+            case 'patrol': return this.patrolWhy(owner, cell);
+            case 'recon': {
+                const a = this.armyOn(cell);
+                return afloat(cell) || this.atWar(owner, this.owner[cell]) || (a && this.atWar(owner, a.owner)) ? '' : 'Solo se reconoce el mar o lo de un país con el que estás en guerra.';
+            }
+            case 'army': {
+                const why = this.armyWhy(owner, cell, viewer);
+                if (why) return why;
+                break;
+            }
+            default: return 'Esa misión no existe.';
+        }
+        return this.droneHits.get(this.hitKey('army', cell)) === this.turn ? AIR_BLOCKED : '';
+    }
+    // Previsión de una misión de enjambres con lo que `viewer` conoce, como missionOdds: el antiaéreo (con el derribo ×1,5
+    // y la saturación ya aplicados a `fire` y `loss`), las capas de defensa que conoce, la precisión (reconocer no va a
+    // ciegas) y los cazas que la esperan, a fuerza doble.
+    droneOdds(owner, sws, kind, cell, viewer = owner) {
+        const D = CONFIG.DRONE, why = this.droneCheck(owner, sws, kind, cell, viewer), fly = this.fliers(owner, sws, cell, true), power = fly.length * this.dronePower(owner);
+        const out = { why, hit: 0, down: 0, damaged: 0, known: false, unknown: false, fire: 0, loss: 0, power, patrol: 0, through: fly.length };
+        if (why) return out;
+        if (kind === 'patrol') return { ...out, hit: 1, known: true };
+        const c = this.aaCover(owner, [...new Set(fly.map(q => q.base))], cell, { viewer, range: this.droneRange(owner) }), k = this.droneSaturation(owner, fly.length);
+        const o = this.airOdds(c.seen.fire * k / power, c.seen.loss * k / power, D.AA_DOWN);
+        const def = this.incomingDefense(owner, 'drone', cell, fly.length, { viewer, simulate: true });
+        const sees = this.knownCell(viewer, cell), known = kind === 'recon' || sees;
+        const patrol = sees ? this.interceptors(owner, 'drone', cell).reduce((s, q) => s + this.airPower(q.owner) * D.PATROL_KILL, 0) : 0;
+        return { why, hit: (1 - o.fail) * (known ? 1 : this.rules(owner).blindHit) * def.through / fly.length, down: o.down, damaged: o.damaged, known,
+            get unknown() { return def.unknown || c.unknown; }, fire: c.seen.fire * k, loss: c.seen.loss * k, power, patrol, through: def.through };
+    }
+    // Lo que hace un acierto de drones de `owner` en `cell`; devuelve cómo lo cuenta el parte a quien lo manda.
+    // - recon: desvela a `owner` las casillas a RECON_KM (tipo y número; con Drones 3, también niveles) este turno y el
+    //   siguiente, y le deja conocidos los antiaéreos fijos de la zona.
+    // - army: le quita droneHit (base y azar) de sus unidades, al menos una, primero tanques y artillería; con Drones 3,
+    //   además lo desorganiza hasta su próximo turno.
+    droneEffect(owner, kind, cell) {
+        const r = this.rules(owner);
+        if (kind === 'recon') {
+            const R = kmCells(CONFIG.DRONE.RECON_KM), until = this.turn + 1;
+            for (const c of hexDisc(cell, R)) { const k = owner * G.N + c; if (!(this.droneSeen.get(k) >= until)) this.droneSeen.set(k, until); }
+            for (const [c, s] of this.aaSites) if (s.owner !== owner && hexDist(c, cell) <= R) s.known.add(owner);
+            this.airVersion++;
+            return `ves lo que hay a ${plural(R, 'casilla', 'casillas')} a la redonda hasta el final de tu próximo turno`;
+        }
+        const a = this.armyOn(cell), n = countUnits(a.units), [base, rand] = r.droneHit;
+        const lost = Math.min(n, Math.max(1, Math.round(n * (base + rand * this.rng()))));
+        this.takeUnits(a, lost);
+        if (r.droneSwarm) a.disorgUntil = Math.max(a.disorgUntil || 0, this.nextOwnTurn(a.owner));
+        this.droneHits.set(this.hitKey('army', cell), this.turn);
+        this.armyVersion++;
+        if (countUnits(a.units) > 0) return `pierde ${plural(lost, 'unidad', 'unidades')}${r.droneSwarm ? ' y queda desorganizado' : ''}`;
+        this.removeArmy(a);
+        return `pierde ${plural(lost, 'unidad', 'unidades')} y se disuelve`;
+    }
+    // Misión de los enjambres `ids` de `owner` contra `cell`, en este orden: los cazas enemigos que protegen la casilla
+    // (combate aéreo a fuerza doble para ellos), las capas de defensa (drones que patrullan y baterías: lo que paran,
+    // cae), el antiaéreo (una tirada por enjambre, con el derribo ×1,5 y la saturación), el fracaso, la precisión (a
+    // ciegas rinde la mitad; reconocer, no) y el efecto. Sale en el parte como la de los escuadrones.
+    droneMission(owner, ids, kind, cell) {
+        const r = this.rules(owner), D = CONFIG.DRONE, sws = [...new Set(ids)].map(id => this.swarms.get(id));   // cada enjambre, una vez
+        const why = this.droneCheck(owner, sws, kind, cell);
+        if (why) return { result: why === AIR_BLOCKED ? 'blocked' : 'invalid', down: 0, damaged: 0, text: why };
+        const fly = this.fliers(owner, sws, cell, true);
+        const victim = this.armyOn(cell)?.owner ?? this.owner[cell];
+        for (const q of fly) q.flown = this.turn;
+        const ev = { kind: 'air', drone: true, owner, from: [...new Set(fly.map(q => q.base))], cell, mission: kind, result: null };   // la vista lo anima
+        this.note(ev);
+        this.airVersion++;
+        let result = 'hit', effect = '', guards = [];
+        if (kind === 'patrol') for (const q of fly) q.patrol = cell;
+        else {
+            guards = this.interceptors(owner, 'drone', cell);
+            if (guards.length && !this.dogfight(fly, guards, D.POWER, D.PATROL_KILL)) result = 'intercepted';
+            else {
+                const def = this.incomingDefense(owner, 'drone', cell, fly.length), n = Math.max(0, Math.min(fly.length, Math.round(def.through)));
+                const pass = fly.slice(0, n);
+                for (const q of fly.slice(n)) this.swarmDown(q);   // lo interceptado cae
+                if (!pass.length) result = 'intercepted';
+                else {
+                    const c = this.aaCover(owner, [...new Set(pass.map(q => q.base))], cell, { range: this.droneRange(owner) });
+                    const S = pass.length * this.dronePower(owner), k = this.droneSaturation(owner, pass.length);
+                    const o = this.airOdds(c.fire * k / S, c.loss * k / S, D.AA_DOWN);
+                    for (const x of c.sources) { const site = this.aaSites.get(x); if (site && site.left === 0) site.known.add(owner); }   // quien dispara se delata
+                    for (const q of pass) {
+                        const x = this.rng();
+                        if (x < o.down) this.swarmDown(q); else if (x < o.down + o.damaged) this.damageSquadron(q);
+                    }
+                    const known = kind === 'recon' || this.knownCell(owner, cell);
+                    if (this.rng() < o.fail || (!known && this.rng() < 1 - r.blindHit)) result = 'miss';
+                    else effect = this.droneEffect(owner, kind, cell);
+                    this.airSeen.set(owner * G.N + cell, this.turn);
+                }
+            }
+        }
+        ev.result = result;
+        this.airVersion++;
+        const down = fly.filter(q => !this.swarms.has(q.id)).length, damaged = fly.filter(q => this.swarms.has(q.id) && q.ready > this.turn).length;
+        const text = this.droneReport(owner, victim, kind, cell, fly.length, result, effect, down, damaged, guards);
+        if (owner === this.player) this.log(text);
+        else this.droneDefenseReport(owner, victim, kind, cell, result, effect, down, guards);
+        return { result, down, damaged, text };
+    }
+    // Parte de una misión de enjambres para quien la manda.
+    droneReport(owner, victim, kind, cell, n, result, effect, down, damaged, guards) {
+        const X = this.placeName(cell), many = n > 1, subj = many ? `Tus ${n} enjambres` : 'Tu enjambre', v = (one, more) => (many ? more : one);
+        if (kind === 'patrol') return `${subj} ${v('patrulla', 'patrullan')} ${X} hasta tu próximo turno: ${v('sale', 'salen')} al paso de los drones enemigos contra esa casilla y sus vecinas.`;
+        const what = kind === 'recon' ? `${v('reconoce', 'reconocen')} ${X}` : `${v('ataca', 'atacan')} el ejército de ${this.nm(victim)} en ${X}`;
+        const outcome = result === 'hit' ? effect : result === 'miss' ? 'fracasa'
+            : guards.length ? `los cazas de ${this.nm(guards[0].owner)} ${v('lo', 'los')} interceptan` : `las defensas ${v('lo', 'los')} interceptan`;
+        return `${subj} ${what}: ${outcome}. ${this.airFate(n, down, damaged)}`;
+    }
+    // Parte de una misión de enjambres enemiga para el jugador, si va contra lo suyo o sus cazas han salido a pararla.
+    droneDefenseReport(owner, victim, kind, cell, result, effect, down, guards) {
+        const mine = guards.filter(q => q.owner === this.player);
+        if (victim !== this.player && !mine.length) return;
+        const X = this.placeName(cell), by = this.nm(owner), lost = mine.filter(q => !this.squadrons.has(q.id)).length;
+        const tail = (down ? ` ${down === 1 ? 'Cae uno de sus enjambres' : `Caen ${down} de sus enjambres`}.` : '') + (lost ? ` Pierdes ${plural(lost, 'escuadrón', 'escuadrones')} en el combate aéreo.` : '');
+        if (victim !== this.player) { this.log(`Tus cazas salen al paso de los drones de ${by} sobre ${X}: ${result === 'intercepted' ? 'los interceptan' : 'no los paran'}.${tail}`); return; }
+        const what = kind === 'recon' ? `reconocen ${X}` : `atacan tu ejército en ${X}`;
+        const outcome = result === 'hit' ? (kind === 'recon' ? 'ven lo que tienes alrededor' : effect) : result === 'miss' ? 'fracasan'
+            : mine.length ? 'tus cazas los interceptan' : guards.length ? `los interceptan los cazas de ${this.nm(guards[0].owner)}` : 'tus defensas los interceptan';
+        this.log(`Los drones de ${by} ${what}: ${outcome}.${tail}`);
+    }
+    // El jugador manda una misión de enjambres; si no puede despegar, el parte dice por qué.
+    playerDroneMission(ids, kind, cell) {
+        if (this.over || this.player === null) return null;
+        const res = this.droneMission(this.player, ids, kind, cell);
         if (res.result === 'invalid' || res.result === 'blocked') this.log(res.text);
         return res;
     }
@@ -5715,6 +5984,7 @@ class GameEngine {
         this.version++;
         this.loseAirfield(cell);   // antes de que la ciudad quede asediada: el aeródromo cae al entrar
         this.loseAASite(cell);     // y el antiaéreo, igual
+        this.loseSwarms(cell);     // y los enjambres de la ciudad
         this.sieges.delete(cell);
         if (byForce) this.wreck(cell, prev, a);
         const res = RESOURCE_AT.get(cell);
@@ -5816,7 +6086,8 @@ class GameEngine {
     // --- Niebla de guerra y espionaje ---
     // Casillas que ve la nación: su territorio y el de sus aliados con una franja alrededor, el entorno de sus
     // ejércitos y los de sus aliados, las provincias de las que un espía ha informado este turno y los blancos de sus
-    // misiones aéreas de este turno y el círculo de sus satélites. Lanzar uno, o que se acabe, cambia airVersion.
+    // misiones aéreas de este turno, lo que han reconocido sus drones y el círculo de sus satélites. Lanzar uno, o que se
+    // acabe, y reconocer con drones cambian airVersion.
     visibleCells(id) {
         const key = `${id}:${this.version}:${this.armyVersion}:${this.blocVersion}:${this.turn}:${this.spyVersion}:${this.techVersion}:${this.airVersion}`;
         if (this.visCache?.key === key) return this.visCache.map;
@@ -5842,6 +6113,7 @@ class GameEngine {
         for (let i = 0; i < G.N; i++) if (range[i] >= 0) map[i] = 1;
         if (id === this.player) for (const pid of this.spiedProvinces()) for (const c of PROVINCES[pid].cells) map[c] = 1;
         for (const [k, t] of this.airSeen) if (t === this.turn && Math.floor(k / G.N) === id) map[k % G.N] = 1;
+        for (const [k, t] of this.droneSeen) if (t >= this.turn && Math.floor(k / G.N) === id) map[k % G.N] = 1;   // reconocimiento con drones
         for (const s of this.sats) if (s.owner === id) for (const c of hexDisc(s.cell, this.satRadius(id))) map[c] = 1;   // solo los suyos
         this.visCache = { key, map };
         return map;
@@ -5865,13 +6137,15 @@ class GameEngine {
     }
     // Qué sabe `viewer` de las tropas y muros de `owner` en `cell`: tipo y número (exact) y niveles (galones y
     // fortificación). Sin niebla, de lo propio y de los aliados, todo; si no, depende de Reconocimiento, de los espías y
-    // de las misiones aéreas de este turno, que desvelan el tipo y el número de lo que hay en su blanco, y de sus
+    // de las misiones aéreas de este turno, que desvelan el tipo y el número de lo que hay en su blanco, del reconocimiento
+    // con drones, que los desvela en su círculo (y, con Enjambres autónomos, también los niveles), y de sus
     // satélites, que desvelan tipo y número en su círculo y, con Óptica de alta resolución (satLevels), también niveles.
     intel(viewer, owner, cell) {
         if (!this.settings.fog || viewer === null || owner === viewer || owner < 0 || this.allied(viewer, owner)) return { exact: true, levels: true };
         const r = this.rules(viewer), sat = this.sats.length > 0 && this.satCovers(viewer, cell);
         if (viewer === this.player && this.spiedProvinces().has(SEA_PROV[cell])) return { exact: true, levels: r.spyWide || r.intelLevels || (sat && r.satLevels) };
         if (sat) return { exact: true, levels: r.intelLevels || r.satLevels };
+        if (this.droneRevealed(viewer, cell)) return { exact: true, levels: r.intelLevels || r.droneSwarm };   // sus drones; con Drones 3, niveles
         if (this.airSeen.get(viewer * G.N + cell) === this.turn) return { exact: true, levels: r.intelLevels };   // una misión suya, este turno
         return { exact: r.intelExact, levels: r.intelLevels };
     }

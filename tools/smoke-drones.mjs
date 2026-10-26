@@ -96,7 +96,7 @@ const setup = () => {
         },
         // Partida sin aviación: ni escuadrones, ni aeródromos, ni antiaéreo, ni satélites.
         bare(g) {
-            for (const k of ['squadrons', 'airfields', 'aaSites', 'sats']) {
+            for (const k of ['squadrons', 'airfields', 'aaSites', 'sats', 'swarms']) {
                 const x = g[k];
                 if (x instanceof Map || x instanceof Set) x.clear(); else if (Array.isArray(x)) x.length = 0;
             }
@@ -106,6 +106,8 @@ const setup = () => {
         airfield(g, owner, cell) { g.airfields.set(cell, { owner, left: 0, downUntil: 0 }); g.airVersion++; },
         // `n` escuadrones de `owner` en el aeródromo `base`, listos para volar.
         squad(g, owner, base, n = 1) { return Array.from({ length: n }, () => g.newSquadron(owner, base, 0)); },
+        // `n` enjambres de `owner` en la ciudad `base`, listos para volar.
+        swarm(g, owner, base, n = 1) { return Array.from({ length: n }, () => g.newSwarm(owner, base, 0)); },
         // Antiaéreo fijo terminado de `owner` en `cell`, sin daños y sin que nadie lo conozca.
         site(g, owner, cell) { const s = { owner, left: 0, hits: 0, known: new Set() }; g.aaSites.set(cell, s); g.airVersion++; return s; },
         // La pareja más cercana [ciudad de A, ciudad de B] con min ≤ hexDist ≤ max que cumpla `ok(a, b)`.
@@ -182,6 +184,167 @@ const CHECKS = [
     g.techVersion++;
     const pick = g.aiTechChoice(fr);
     T.ok(['drones1', 'defensa1'].includes(pick), `elige ${pick}`);
+    return true;
+}],
+['B2 · comprar en una ciudad sin aeródromo, 4 como mucho, vuela al turno siguiente', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.nations[es].gold = 2000;
+    const city = PROVINCES.find(p => p.country === es && p.city !== g.nations[es].capitalCell).city;
+    T.eq(g.buySwarm(es, city), null, 'sin Drones 1, no');
+    T.learn(g, es, 'drones1');
+    T.ok(!g.airfields.has(city), 'sin aeródromo');
+    const s = g.buySwarm(es, city);
+    T.eq([g.nations[es].gold, s.ready, g.canFlySwarm(s), g.swarmsAt(city).length, s.owner, s.base], [1880, g.turn + 1, false, 1, es, city], 'listo el turno que viene');
+    g.buySwarm(es, city); g.buySwarm(es, city); g.buySwarm(es, city);
+    T.eq([g.buySwarm(es, city), g.swarmsAt(city).length, g.nations[es].gold], [null, 4, 1520], 'no cabe un quinto');
+    const foreign = PROVINCES.find(p => p.country === fr).city, field = G.land.find(c => g.owner[c] === es && CITY_OF[c] < 0);
+    T.eq([g.buySwarm(es, foreign), g.buySwarm(es, field)], [null, null], 'solo en una ciudad propia');
+    g.nations[es].gold = 100;
+    T.eq(g.playerBuySwarm(g.nations[es].capitalCell), null, 'sin oro');
+    T.ok(/120/.test(g.logs[g.logs.length - 1].msg), 'el parte dice el precio');
+    g.turn++;
+    T.ok(g.canFlySwarm(s), 'vuela');
+    T.eq([g.droneRange(es), g.dronePower(es)], [kmCells(150), g.airPower(es) / 2], 'alcance y fuerza');
+    T.learn(g, es, 'drones2'); T.eq(g.droneRange(es), kmCells(300), 'alcance con Drones 2');
+    // Patrullar: cubre su casilla hasta que vuelve su dueño.
+    T.eq([g.droneMission(es, [s.id], 'patrol', city).result, s.patrol], ['hit', city], 'patrulla');
+    T.eq(g.droneMission(es, [s.id], 'patrol', city).result, 'invalid', 'una misión por turno');
+    g.beginNationTurn(es); T.eq(s.patrol, -1, 'acaba en su turno');
+    return true;
+}],
+['B2 · reconocer desvela 60 km y cuenta como conocido para la aviación', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr); T.learn(g, es, 'drones1');
+    const [, c] = T.border(g, es, fr), base = T.baseFor(g, es, c, g.droneRange(es));
+    T.airfield(g, es, base); const sq = T.squad(g, es, base, 1), [sw] = T.swarm(g, es, base);
+    const a = T.army(g, fr, c, 5);
+    // Un ejército y un antiaéreo a 2 casillas, dentro de los 60 km (3 casillas), y otro ejército fuera.
+    const near = G.land.find(x => g.owner[x] === fr && hexDist(x, c) === 2 && T.free(g, x)), far = G.land.find(x => g.owner[x] === fr && hexDist(x, c) === 5 && T.free(g, x));
+    const b = T.army(g, fr, near, 3), d = T.army(g, fr, far, 3), site = T.site(g, fr, near);
+    T.eq([g.missionOdds(es, sq, 'army', c).known, g.armyView(es, b).n, g.aaVisible(es, near), g.droneRevealed(es, near)], [false, null, false, false], 'antes, a ciegas');
+    T.luck(g, 0.99);
+    T.eq(g.droneMission(es, [sw.id], 'recon', c).result, 'hit', 'reconoce');
+    T.eq([g.missionOdds(es, sq, 'army', c).known, g.armyView(es, a).n, g.armyView(es, b).n, g.armyView(es, d).n], [true, 5, 3, null], 'desvelado en 60 km');
+    T.eq([g.droneRevealed(es, near), g.sees(es, near), site.known.has(es), g.aaVisible(es, near), g.armyView(es, b).level], [true, true, true, true, null], 'el antiaéreo, conocido; sin galones');
+    g.turn++; T.eq(g.armyView(es, b).n, 3, 'el turno siguiente');
+    g.beginNationTurn(es); T.eq(g.armyView(es, b).n, 3, 'todo su turno siguiente');
+    g.turn++; g.beginNationTurn(es); T.eq([g.armyView(es, b).n, g.droneSeen.size, site.known.has(es)], [null, 0, true], 'se acaba; el antiaéreo sigue conocido');
+    // Con Drones 3, galones y fortificaciones.
+    T.learn(g, es, 'drones2', 'drones3'); sw.ready = 0;
+    g.droneMission(es, [sw.id], 'recon', c);
+    T.ok(g.armyView(es, b).level !== null && g.fortLevel(es, near) !== null, 'galones con Drones 3');
+    return true;
+}],
+['B2 · atacar ejército quita 4–7 %', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr); T.learn(g, es, 'drones1');
+    const [, c] = T.border(g, es, fr), base = T.baseFor(g, es, c, g.droneRange(es));
+    const sws = T.swarm(g, es, base, 4), a = T.army(g, fr, c, 90, 10);
+    T.luck(g, 0);
+    T.eq(g.droneMission(es, [sws[0].id], 'army', c).result, 'hit', 'acierto');
+    T.eq([a.units.tank, a.units.infantry, a.disorgUntil], [6, 90, 0], '4 %, primero tanques y sin desorganizar');
+    T.eq(g.droneMission(es, [sws[1].id], 'army', c).result, 'blocked', 'un acierto de drones por turno');
+    T.airfield(g, es, base); const [q] = T.squad(g, es, base);
+    T.eq(g.missionCheck(es, [q], 'army', c), '', 'el acierto aéreo es aparte');
+    g.turn++; T.luck(g, 0.999); a.units.tank = 10; a.units.infantry = 90;
+    g.droneMission(es, [sws[1].id], 'army', c);
+    T.eq(a.units.tank, 3, '7 %');
+    g.turn++; T.learn(g, es, 'drones2', 'drones3'); a.units.tank = 10; a.units.infantry = 90;
+    g.droneMission(es, [sws[2].id], 'army', c);
+    T.eq([a.units.tank, a.disorgUntil >= g.turn], [0, true], '10 % y desorganizado con Drones 3');
+    // Un ejército pequeño pierde al menos una unidad.
+    g.turn++; a.units.tank = 0; a.units.infantry = 2; T.luck(g, 0);
+    g.droneMission(es, [sws[3].id], 'army', c);
+    T.eq(countUnits(a.units), 1, 'al menos una');
+    return true;
+}],
+['B2 · el antiaéreo derriba más drones que aviones', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr); T.learn(g, es, 'drones1');
+    const [base, target] = T.pair(g, es, fr, () => true, 3, g.droneRange(es));
+    T.airfield(g, es, base); const sq = T.squad(g, es, base, 1), sws = T.swarm(g, es, base, 2);
+    for (const p of PROVINCES) if (g.fort[p.city] === 4) g.fort[p.city] = 3;   // sin integrado por el camino
+    g.fortVersion++;
+    if (g.armyOn(target)) g.removeArmy(g.armyOn(target));
+    T.army(g, fr, target, 5); T.site(g, fr, target);
+    const air = g.missionOdds(es, sq, 'army', target), dr = g.droneOdds(es, sws, 'army', target);
+    T.eq([dr.why, dr.power, air.power], ['', air.power, air.power], 'misma fuerza');
+    T.ok(air.down > 0 && air.down < 0.4, `derribo de un escuadrón ${air.down}`);
+    T.near(dr.down, 1.5 * air.down, 1e-9, 'drones ×1,5');
+    T.near(dr.fire, air.fire, 1e-9, 'el mismo antiaéreo');
+    return true;
+}],
+['B2 · saturación con 3 enjambres y Drones 3', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr); T.learn(g, es, 'drones1', 'drones2');
+    const [base, target] = T.pair(g, es, fr, () => true, 3, g.droneRange(es));
+    const sws = T.swarm(g, es, base, 3);
+    if (g.armyOn(target)) g.removeArmy(g.armyOn(target));
+    T.army(g, fr, target, 5); T.site(g, fr, target);
+    const three = g.droneOdds(es, sws, 'army', target);
+    T.ok(three.fire > 0, 'hay antiaéreo');
+    T.learn(g, es, 'drones3');
+    const sat = g.droneOdds(es, sws, 'army', target), two = g.droneOdds(es, sws.slice(0, 2), 'army', target);
+    T.near([sat.fire, sat.loss], [three.fire / 2, three.loss / 2], 1e-9, 'tres con Drones 3: la mitad');
+    T.near([two.fire, two.loss], [three.fire, three.loss], 1e-9, 'dos: entero');
+    T.ok(sat.down < three.down && sat.hit > three.hit, 'menos derribo y más acierto');
+    return true;
+}],
+['B2 · un caza que protege la casilla para la misión', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr); T.learn(g, fr, 'drones1');
+    const [c] = T.border(g, es, fr), fb = T.baseFor(g, fr, c, g.droneRange(fr));
+    T.airfield(g, es, T.baseFor(g, es, c)); const [mine] = T.squad(g, es, T.baseFor(g, es, c));
+    const sws = T.swarm(g, fr, fb, 2), army = T.army(g, es, c, 20);
+    T.luck(g, 0.99);
+    T.eq(g.airMission(es, [mine.id], 'patrol', c).result, 'hit', 'protege');
+    T.ok(g.droneOdds(fr, sws, 'army', c).patrol === 2 * g.airPower(es), 'la previsión lo cuenta a fuerza doble');
+    const res = g.droneMission(fr, sws.map(s => s.id), 'army', c);
+    T.eq([res.result, countUnits(army.units), g.squadrons.has(mine.id), mine.ready <= g.turn], ['intercepted', 20, true, true], 'no llega');
+    T.ok(/intercept/.test(g.logs[g.logs.length - 1].msg), 'el parte lo cuenta');
+    // Con mala suerte para los drones, caen.
+    g.turn++; for (const s of sws) s.ready = 0;
+    mine.patrol = c; T.luck(g, 0.1);
+    const r2 = g.droneMission(fr, sws.map(s => s.id), 'army', c);
+    T.eq([r2.result, r2.down, sws.filter(s => g.swarms.has(s.id)).length], ['intercepted', 2, 0], 'derribados');
+    return true;
+}],
+['B2 · ciudad perdida en paz: los enjambres se mudan', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+    g.start(es); T.bare(g);
+    // Sin combate: a la ciudad propia más cercana con sitio.
+    const cities = PROVINCES.filter(p => p.country === es).map(p => p.city), city = cities.find(c => c !== g.nations[es].capitalCell);
+    const order = cities.filter(c => c !== city).sort((a, b) => hexDist(a, city) - hexDist(b, city) || a - b);
+    T.swarm(g, es, order[0], 3);
+    const [s, t] = T.swarm(g, es, city, 2);
+    g.owner[city] = pt; g.version++; g.airSweep();
+    T.eq([s.base, t.base, g.swarmsAt(order[0]).length, g.swarms.has(s.id), g.swarms.has(t.id)], [order[0], order[1], 4, true, true], 'se mudan');
+    // A la fuerza: se pierden.
+    g.declareWar(es, fr);
+    const fc = PROVINCES.find(p => p.country === fr && CAPITAL_OF[p.city] < 0).city, lost = T.swarm(g, fr, fc, 2);
+    if (g.armyOn(fc)) g.removeArmy(g.armyOn(fc));
+    g.capture(fc, es, true);
+    T.eq(lost.map(x => g.swarms.has(x.id)), [false, false], 'perdidos');
+    return true;
+}],
+['B2 · guardar y cargar, y partida vieja sin enjambres', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr); T.learn(g, es, 'drones1');
+    const [, c] = T.border(g, es, fr), base = T.baseFor(g, es, c, g.droneRange(es));
+    const [s, t] = T.swarm(g, es, base, 2); T.army(g, fr, c, 30);
+    T.luck(g, 0.99);
+    g.droneMission(es, [s.id], 'recon', c); g.droneMission(es, [t.id], 'army', c);
+    t.damaged = true; t.patrol = base; t.op = 0;
+    const data = JSON.parse(JSON.stringify(g.serialize())), h = GameEngine.load(data);
+    T.eq([...h.swarms.values()], [...g.swarms.values()], 'enjambres');
+    T.eq([h.nextSwarmId, [...h.droneSeen], [...h.droneHits]], [g.nextSwarmId, [...g.droneSeen], [...g.droneHits]], 'contador, desvelado y aciertos');
+    T.eq(h.droneMission(es, [h.swarms.get(s.id).id], 'army', c).result, 'invalid', 'ya ha volado');
+    // Basura: fuera de una ciudad, dueño imposible, repetido.
+    data.drones.sw.push([99, es, G.land.find(x => CITY_OF[x] < 0), 0, 0, -1, 0, 0], [s.id, es, base, 0, 0, -1, 0, 0], ['x']);
+    T.eq(GameEngine.load(data).swarms.size, 2, 'sin basura');
+    delete data.drones;
+    const old = GameEngine.load(data);
+    T.eq([old.swarms.size, old.nextSwarmId, old.droneSeen.size, old.droneHits.size], [0, 1, 0, 0], 'partida vieja');
     return true;
 }],
 ];
