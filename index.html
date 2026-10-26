@@ -913,19 +913,34 @@ const baseRules = () => ({
 const BASE_RULES = baseRules();
 // Armas nucleares: la investigación que las da y las potencias que ya las tienen al empezar (las que estén en el mapa).
 const NUKE_TECH = 'estrategicas3', NUKE_POWERS = ['us', 'ru', 'cn', 'fr', 'gb', 'in', 'pk', 'il', 'kp'];
-// Arsenal nacional (parte C): las seis armas. `cls`: su clase para las defensas (DEFENSE_CLASSES); `km`: alcance;
-// `from`: desde dónde se lanza ('army' un ejército propio, 'armyOrCity' un ejército o una ciudad, 'city' una ciudad);
-// `turns` y `min`: precio en turnos de renta (sin el mantenimiento del arsenal) y su mínimo; `upkeep`: oro por turno y
-// unidad; `needs`: la regla (baseRules) que la permite, o null si no hace falta investigar.
+// Arsenal nacional (parte C): las seis armas. `many`: el plural (y `fem`, si es femenino); `cls`: su clase para las
+// defensas (DEFENSE_CLASSES); `km`: alcance; `from`: desde dónde se lanza ('army' un ejército propio, 'armyOrCity' un
+// ejército o una ciudad, 'city' una ciudad); `turns` y `min`: precio en turnos de renta (sin el mantenimiento del
+// arsenal) y su mínimo; `upkeep`: oro por turno y unidad; `needs`: la regla (baseRules) que la permite, o null si no
+// hace falta investigar.
 const WEAPONS = {
-    rocket:      { name: 'Cohete',        cls: 'rocket',      km: 80,   from: 'army',       turns: 1,  min: 150,  upkeep: 5,   needs: null },
-    heavyRocket: { name: 'Cohete pesado', cls: 'heavyRocket', km: 300,  from: 'armyOrCity', turns: 2,  min: 300,  upkeep: 10,  needs: 'rocketHeavy' },
-    missile:     { name: 'Misil',         cls: 'missile',     km: 500,  from: 'city',       turns: 4,  min: 600,  upkeep: 20,  needs: 'missile' },
-    heavy:       { name: 'Misil pesado',  cls: 'heavy',       km: 2500, from: 'city',       turns: 8,  min: 1200, upkeep: 40,  needs: 'missileHeavy' },
-    guided:      { name: 'Misil guiado',  cls: 'guided',      km: 1500, from: 'city',       turns: 6,  min: 900,  upkeep: 30,  needs: 'guided' },
-    nuclear:     { name: 'Bomba nuclear', cls: 'nuclear',     km: 8000, from: 'city',       turns: 25, min: 5000, upkeep: 150, needs: 'nuclear' }
+    rocket:      { name: 'Cohete',        many: 'cohetes',           cls: 'rocket',      km: 80,   from: 'army',       turns: 1,  min: 150,  upkeep: 5,   needs: null },
+    heavyRocket: { name: 'Cohete pesado', many: 'cohetes pesados',   cls: 'heavyRocket', km: 300,  from: 'armyOrCity', turns: 2,  min: 300,  upkeep: 10,  needs: 'rocketHeavy' },
+    missile:     { name: 'Misil',         many: 'misiles',           cls: 'missile',     km: 500,  from: 'city',       turns: 4,  min: 600,  upkeep: 20,  needs: 'missile' },
+    heavy:       { name: 'Misil pesado',  many: 'misiles pesados',   cls: 'heavy',       km: 2500, from: 'city',       turns: 8,  min: 1200, upkeep: 40,  needs: 'missileHeavy' },
+    guided:      { name: 'Misil guiado',  many: 'misiles guiados',   cls: 'guided',      km: 1500, from: 'city',       turns: 6,  min: 900,  upkeep: 30,  needs: 'guided' },
+    nuclear:     { name: 'Bomba nuclear', many: 'bombas nucleares', fem: true, cls: 'nuclear',     km: 8000, from: 'city',       turns: 25, min: 5000, upkeep: 150, needs: 'nuclear' }
 };
 const WEAPON_KEYS = Object.keys(WEAPONS);
+// Lo que hace cada arma que llega (C2). `loss`: bajas de un ejército (base y azar: del 6 al 9 %, por ejemplo); `disorg`:
+// lo desorganiza; `kinds`: los blancos que admite; `fort`: niveles de fortificación que quita; `aa`: lo que hace a un
+// antiaéreo ('hit', un acierto como el de la aviación, solo a un sitio fijo; 'kill', lo destruye); `splash`: bajas en
+// los ejércitos de las casillas vecinas; `dev`: lo que deja del desarrollo de la provincia si el blanco es su ciudad;
+// `precise`: rinde entero aunque no se conozca el blanco. La nuclear (C4) tiene su propio efecto.
+const STRIKE_FX = {
+    rocket:      { loss: [0.06, 0.03], kinds: ['army', 'roads'] },
+    heavyRocket: { loss: [0.10, 0.04], kinds: ['army', 'roads', 'aa'], aa: 'hit' },
+    missile:     { loss: [0.15, 0.05], kinds: ['army', 'fort', 'aa', 'battery', 'airfield'], disorg: true, fort: 1, aa: 'kill' },
+    heavy:       { loss: [0.25, 0.05], kinds: ['army', 'fort', 'aa', 'battery', 'airfield'], fort: 2, aa: 'kill', splash: 0.08, dev: 0.75 },
+    guided:      { loss: [0.15, 0.05], kinds: ['army', 'fort', 'aa', 'battery', 'airfield'], fort: 1, aa: 'kill', precise: true }
+};
+// Turnos que queda inservible un aeródromo al que llega un misil, y parte de sus antiaéreas que pierde un ejército.
+const STRIKE_DOWN_TURNS = 3, STRIKE_MOBILE = 0.5;
 const emptyArsenal = () => Object.fromEntries(WEAPON_KEYS.map(k => [k, 0]));
 const RESEARCH_AREAS = ['Militar', 'Estado', 'Terreno', 'Inteligencia'];
 const RESEARCH_BRANCHES = [
@@ -1476,7 +1491,7 @@ class GameEngine {
                 tech: { done: [...n.tech.done], progress: [...n.tech.progress], current: [...n.tech.current], seeded: [...n.tech.seeded] },
                 arsenal: n.arsenal })),
             relations,
-            armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used, a.hunger || 0, a.disorgUntil || 0, a.units.antiair || 0]),
+            armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used, a.hunger || 0, a.disorgUntil || 0, a.units.antiair || 0, a.rocketTurn || 0]),
             nextArmyId: this.nextArmyId,
             ops: [...this.ops.values()].map(o => ({ id: o.id, owner: o.owner, kind: o.kind, name: o.name, cells: o.cells, ratio: o.ratio, auto: o.auto,
                 paused: o.paused, fortify: o.fortify, since: o.since, waiting: o.waiting, front: o.front ?? -1, drawn: o.drawn, state: o.state, rel: o.rel, gold: o.gold, extra: o.extra ?? 0, poolTurn: o.poolTurn ?? 0, template: o.template, pool: o.pool, formed: o.formed, aims: o.aims,
@@ -1683,7 +1698,7 @@ class GameEngine {
         for (const x of list(data.armies)) {
             const id = int(x?.[0], 1, 1e9, 1), cell = x?.[2];
             if (!Number.isInteger(cell) || cell < 0 || cell >= G.N || g.armyAt[cell] || g.armies.has(id)) continue;   // una casilla inválida no se cambia por otra
-            g.armies.set(id, { id, owner: nat(x?.[1]), cell, units: { infantry: int(x?.[3], 0, 1e6, 0), tank: int(x?.[4], 0, 1e6, 0), artillery: int(x?.[5], 0, 1e6, 0), antiair: int(x?.[9], 0, 1e6, 0) }, used: Math.min(999, int(x?.[6], 0, 999, 0) * (x?.[6] >= 999 ? 1 : moveScale)), from: 0, hunger: int(x?.[7], 0, 99, 0), disorgUntil: int(x?.[8], 0, 1e6, 0), group: 0 });
+            g.armies.set(id, { id, owner: nat(x?.[1]), cell, units: { infantry: int(x?.[3], 0, 1e6, 0), tank: int(x?.[4], 0, 1e6, 0), artillery: int(x?.[5], 0, 1e6, 0), antiair: int(x?.[9], 0, 1e6, 0) }, used: Math.min(999, int(x?.[6], 0, 999, 0) * (x?.[6] >= 999 ? 1 : moveScale)), from: 0, hunger: int(x?.[7], 0, 99, 0), disorgUntil: int(x?.[8], 0, 1e6, 0), rocketTurn: int(x?.[10], 0, 1e6, 0), group: 0 });
             g.armyAt[cell] = id;
         }
         g.nextArmyId = Math.max(int(data.nextArmyId, 1, 1e9, 1), ...[...g.armies.keys()].map(x => x + 1), 1);
@@ -2842,16 +2857,22 @@ class GameEngine {
         const R = drone ? this.droneRange(owner) : this.airRange(owner), can = drone ? q => this.canFlySwarm(q) : q => this.canFly(q);
         return sqs.filter(q => q && q.owner === owner && can(q) && hexDist(q.base, cell) <= R).sort((a, b) => a.id - b.id);
     }
-    // El antiaéreo de `cell` que `viewer` conoce y que `owner` puede atacar: un sitio fijo; si no hay, una batería
-    // automática terminada (kind 'battery'; para elegir blancos vale como un sitio de su dueño, aunque no dispara a los
-    // aviones); si tampoco, las antiaéreas del ejército que haya; y si tampoco, el integrado.
-    aaTarget(owner, cell, viewer = owner) {
+    // La fuente de antiaéreo de `cell` que `viewer` conoce y que `owner` puede atacar: un sitio fijo; si no hay, las
+    // antiaéreas del ejército que haya; y si tampoco, el integrado (null si no conoce ninguna).
+    aaAt(owner, cell, viewer = owner) {
         const rank = { site: 3, mobile: 2, integrated: 1 };
         let best = null;
         for (const src of this.aaList()) {
             if (src.cell !== cell || !this.atWar(owner, src.owner) || !this.aaKnown(viewer, src)) continue;
             if (!best || rank[src.kind] > rank[best.kind]) best = src;
         }
+        return best;
+    }
+    // El antiaéreo de `cell` que `viewer` conoce y que `owner` puede atacar: un sitio fijo; si no hay, una batería
+    // automática terminada (kind 'battery'; para elegir blancos vale como un sitio de su dueño, aunque no dispara a los
+    // aviones); si tampoco, las antiaéreas del ejército que haya; y si tampoco, el integrado.
+    aaTarget(owner, cell, viewer = owner) {
+        const best = this.aaAt(owner, cell, viewer);
         if (best?.kind === 'site') return best;
         const b = this.batteries.get(cell);
         if (b && b.left === 0 && this.owner[cell] === b.owner && this.atWar(owner, b.owner) && this.batteryKnown(viewer, cell))
@@ -3454,6 +3475,274 @@ class GameEngine {
         if (this.over || this.player === null) return null;
         const res = this.droneMission(this.player, ids, kind, cell);
         if (res.result === 'invalid' || res.result === 'blocked') this.log(res.text);
+        return res;
+    }
+
+    // --- Ataque a distancia (parte C): cohetes y misiles del arsenal, desde un ejército o una ciudad propia ---
+    // Se resuelve al lanzarlo, como una misión aérea. Cada arma de la salva pasa por las capas de defensa
+    // (incomingDefense) y cada una que llega hace su efecto (STRIKE_FX), una tras otra: las bajas se componen y cada misil
+    // baja la fortificación. No hay tope de aciertos por turno: el tope es el arsenal.
+    // Nombre de `k` armas `key`: «misil», «misiles».
+    weaponWord(key, k) { const w = WEAPONS[key]; return k === 1 ? w.name.toLowerCase() : w.many; }
+    // Desde dónde puede `id` lanzar `key` contra `cell`: sus ejércitos asentados en tierra que no han lanzado su salva
+    // este turno (si el arma sale de un ejército) y sus ciudades propias y legales (si sale de una ciudad), con el blanco
+    // a su alcance. El más cercano primero; a igual distancia, la casilla menor.
+    launchers(id, key, cell) {
+        const w = WEAPONS[key];
+        if (!w || !Number.isInteger(cell) || cell < 0 || cell >= G.N) return [];
+        const R = kmCells(w.km), out = new Set();
+        if (w.from !== 'city') for (const a of this.armies.values()) {
+            if (a.owner === id && this.armyAt[a.cell] === a.id && isLand(a.cell) && a.rocketTurn !== this.turn && hexDist(a.cell, cell) <= R) out.add(a.cell);
+        }
+        if (w.from !== 'army') for (const p of PROVINCES) {
+            if (this.owner[p.city] === id && this.legal[p.city] === id && hexDist(p.city, cell) <= R) out.add(p.city);
+        }
+        return [...out].sort((a, b) => hexDist(a, cell) - hexDist(b, cell) || a - b);
+    }
+    // ¿Sale de una ciudad la salva de `key` que `id` lanza desde `from`? Si no, sale del ejército que hay allí.
+    strikeFromCity(id, key, from) {
+        return WEAPONS[key].from !== 'army' && CITY_OF[from] >= 0 && this.owner[from] === id && this.legal[from] === id;
+    }
+    // ¿Puede `owner` lanzar ahora `n` armas `key` contra lo de `kind` en `cell`? '' si puede; si no, el motivo. Los
+    // blancos, como en la aviación ('army', 'roads', 'fort', 'aa', 'battery', 'airfield'): los que admite cada arma
+    // (STRIKE_FX). Solo cuenta lo que `viewer` sabe: el ejército que ve y el antiaéreo y las baterías que conoce.
+    strikeCheck(owner, key, n, kind, cell, viewer = owner) {
+        const w = WEAPONS[key], fx = STRIKE_FX[key];
+        if (!w) return 'Arma desconocida.';
+        const the = `${w.fem ? 'La' : 'El'} ${w.name.toLowerCase()}`;
+        if (!fx) return `${the} aún no se puede lanzar.`;   // la nuclear llega con su efecto (C4)
+        if (!Number.isInteger(n) || n < 1) return 'Salva no válida: hay que lanzar al menos una.';
+        if (!Number.isInteger(cell) || cell < 0 || cell >= G.N) return 'Blanco no válido.';
+        const target = { army: 'un ejército', roads: 'las carreteras', fort: 'una fortificación', aa: 'un antiaéreo', battery: 'una batería', airfield: 'un aeródromo' }[kind];
+        if (!target) return 'Ese blanco no existe.';
+        if (!fx.kinds.includes(kind)) return `${the} no sirve contra ${target}.`;
+        const have = this.nations[owner].arsenal[key];
+        if (have < n) return have ? `Solo tienes ${plural(have, this.weaponWord(key, 1), w.many)} en el arsenal.` : `No tienes ${w.many} en el arsenal.`;
+        if (!this.launchers(owner, key, cell).length) {
+            const R = kmCells(w.km);
+            if (w.from !== 'city' && [...this.armies.values()].some(a => a.owner === owner && this.armyAt[a.cell] === a.id && isLand(a.cell) && hexDist(a.cell, cell) <= R))
+                return `Tus ejércitos a ${w.km} km o menos ya han lanzado su salva este turno: cada uno lanza una por turno.`;
+            const from = { army: 'un ejército tuyo', armyOrCity: 'un ejército o una ciudad tuya', city: 'una ciudad tuya' }[w.from];
+            return `Fuera de alcance: ${the.toLowerCase()} se lanza desde ${from} a ${w.km} km o menos.`;
+        }
+        const war = 'Solo contra un país con el que estás en guerra.';
+        switch (kind) {
+            case 'army': return this.armyWhy(owner, cell, viewer);
+            case 'roads':
+                if (!this.atWar(owner, this.owner[cell])) return war;
+                return [0, 1, 2, 3, 4, 5].some(d => this.road[cell * 6 + d] > 0) ? '' : 'No hay carreteras intactas en esa casilla.';
+            case 'fort':
+                if (!this.atWar(owner, this.owner[cell])) return war;
+                return this.fort[cell] ? '' : 'No hay fortificación.';
+            case 'aa': {
+                const src = this.aaAt(owner, cell, viewer);
+                if (!src) return isLand(cell) && !this.atWar(owner, this.owner[cell]) ? war : 'No conoces ningún antiaéreo en esa casilla.';
+                return fx.aa === 'hit' && src.kind !== 'site' ? `${the} solo daña un antiaéreo fijo.` : '';
+            }
+            case 'battery': {
+                const b = this.batteries.get(cell);
+                if (!b || b.owner === owner || this.allied(owner, b.owner) || this.owner[cell] !== b.owner || !this.batteryKnown(viewer, cell)) return 'No conoces ninguna batería enemiga en esa casilla.';
+                return this.atWar(owner, b.owner) ? '' : war;
+            }
+            case 'airfield': {
+                const f = this.airfields.get(cell);
+                if (!f || f.owner === owner || this.allied(owner, f.owner) || !this.airfieldUp(cell)) return 'No hay aeródromo enemigo que funcione.';
+                return this.atWar(owner, f.owner) ? '' : war;
+            }
+        }
+        return '';
+    }
+    // Previsión de un lanzamiento con lo que `viewer` conoce: las armas que se espera que pasen las defensas que conoce
+    // (incomingDefense con `simulate`, con lo que les queda de capacidad), las que harían su efecto (`hit`: a ciegas, la
+    // mitad; el guiado, todas) y el efecto esperado (`effect`, en texto). `unknown`, al leerlo: puede haber defensas que
+    // no conoce (`warn`, el aviso).
+    // - army: `loss`, la parte de sus unidades que perdería; `units`, cuántas, si conoce el ejército.
+    // - fort: `levels`, los niveles que bajaría (como mucho los que tiene, si conoce los niveles).
+    // - roads, aa, battery, airfield: `chance`, la probabilidad de que al menos una haga su efecto.
+    strikeOdds(owner, key, n, kind, cell, viewer = owner) {
+        const why = this.strikeCheck(owner, key, n, kind, cell, viewer);
+        const out = { why, n, through: 0, stopped: { drones: 0, batteries: 0, aa: 0 }, sources: [], hit: 0, hits: 0, known: false, unknown: false, warn: '',
+            chance: 0, loss: 0, units: null, levels: 0, effect: '' };
+        if (why) return out;
+        const w = WEAPONS[key], fx = STRIKE_FX[key], def = this.incomingDefense(owner, w.cls, cell, n, { viewer, simulate: true });
+        const known = kind === 'aa' || kind === 'battery' || this.knownCell(viewer, cell), hit = known || fx.precise ? 1 : BASE_RULES.blindHit;
+        const hits = def.through * hit, chance = 1 - (1 - hits / n) ** n, pc = x => `${Math.round(x * 100)} %`;
+        let loss = 0, units = null, levels = 0, effect = '';
+        switch (kind) {
+            case 'army':
+                loss = 1 - (1 - fx.loss[0] - fx.loss[1] / 2) ** hits;   // las bajas se componen
+                if (this.knownCell(viewer, cell)) units = Math.round(countUnits(this.armyOn(cell).units) * loss);
+                effect = `${units !== null ? `unas ${plural(units, 'baja', 'bajas')} (el ${pc(loss)})` : `el ${pc(loss)} de sus unidades`}${fx.disorg ? ' y lo desorganiza' : ''}`
+                    + (fx.splash ? `; cada uno quita el ${pc(fx.splash)} a los ejércitos de al lado, también a los tuyos` : '');
+                break;
+            case 'fort':
+                levels = hits * fx.fort;
+                if (this.fortLevel(viewer, cell) !== null) levels = Math.min(levels, this.fort[cell]);
+                effect = `baja unos ${decimal(levels)} niveles`;
+                break;
+            case 'roads': effect = `corta sus carreteras (${pc(chance)})`; break;
+            case 'aa': effect = `${fx.aa === 'hit' ? 'lo daña' : 'lo destruye'} (${pc(chance)})`; break;
+            case 'battery': effect = `la destruye (${pc(chance)})`; break;
+            case 'airfield': effect = `lo deja inservible ${STRIKE_DOWN_TURNS} turnos (${pc(chance)})`; break;
+        }
+        if (fx.dev && CITY_OF[cell] >= 0) effect += `; el desarrollo de la provincia baja un ${pc(1 - fx.dev)} por cada uno`;
+        return { why, n, through: def.through, stopped: def.stopped, sources: def.sources, hit, hits, known,
+            get unknown() { return def.unknown; }, get warn() { return def.unknown ? 'Puede haber defensas que no conoces.' : ''; },
+            chance, loss, units, levels, effect };
+    }
+    // ¿Queda algo que dar en el blanco? Las armas que llegan cuando ya no queda nada no hacen nada.
+    strikeStands(kind, cell, army, src) {
+        switch (kind) {
+            case 'army': return this.armies.get(army.id) === army;
+            case 'roads': return [0, 1, 2, 3, 4, 5].some(d => this.road[cell * 6 + d] > 0);
+            case 'fort': return this.fort[cell] > 0;
+            case 'aa':
+                if (src.kind === 'site') return this.aaSites.get(cell) === src.site;
+                if (src.kind === 'mobile') return this.armies.get(src.army.id) === src.army && src.army.units.antiair > 0;
+                return this.fort[cell] === 4;   // el integrado, mientras la ciudad tenga casamatas
+            case 'battery': return this.batteries.has(cell);
+            case 'airfield': return this.airfieldUp(cell);
+        }
+        return false;
+    }
+    // Unidades que pierde el ejército `a` con un arma que llega: su parte de bajas (base y azar `rand`), al menos una.
+    strikeUnits(a, [base, more], rand) {
+        const n = countUnits(a.units);
+        return Math.min(n, Math.max(1, Math.round(n * (base + more * rand))));
+    }
+    // Lo que hace un arma `key` de `owner` que llega a `cell` (`army`: el ejército blanco; `src`: el antiaéreo blanco).
+    // Lo apunta en `st` para el parte.
+    strikeEffect(owner, key, kind, cell, army, src, st) {
+        const fx = STRIKE_FX[key];
+        switch (kind) {
+            case 'army': {   // primero caen tanques, artillería y antiaéreas
+                const k = this.strikeUnits(army, fx.loss, this.rng());
+                this.takeUnits(army, k);
+                st.lost += k;
+                if (fx.disorg) { army.disorgUntil = Math.max(army.disorgUntil || 0, this.nextOwnTurn(army.owner) + CONFIG.AIR.DISORG_TURNS - 1); st.disorg = true; }
+                if (fx.splash) for (const c of hexDisc(cell, 1)) {   // la onda no distingue de quién es el ejército
+                    const b = c === cell ? null : this.armyOn(c), m = b ? Math.min(countUnits(b.units), Math.round(countUnits(b.units) * fx.splash)) : 0;
+                    if (!m) continue;
+                    this.takeUnits(b, m);
+                    const e = st.splash.get(b) ?? { lost: 0, gone: false };
+                    e.lost += m;
+                    if (!countUnits(b.units)) { this.removeArmy(b); e.gone = true; }
+                    st.splash.set(b, e);
+                }
+                this.armyVersion++;
+                if (!countUnits(army.units)) { this.removeArmy(army); st.gone = true; }
+                break;
+            }
+            case 'roads': st.roads += this.breakRoads(cell); break;
+            case 'fort': for (let i = 0; i < fx.fort && this.fort[cell]; i++) { this.lowerFort(cell); st.levels++; } break;
+            case 'aa':
+                if (src.kind === 'site') {   // el cohete pesado, como un acierto de la aviación; el misil lo destruye
+                    this.airVersion++;
+                    if (fx.aa === 'hit' && ++src.site.hits < CONFIG.AIR.AA_HITS) { st.aa = 'queda dañado y dispara a media fuerza'; break; }
+                    this.aaSites.delete(cell);
+                    st.aa = 'queda destruido';
+                } else if (src.kind === 'integrated') {   // baja la fortificación y, con ella, las casamatas
+                    let t = '';
+                    for (let i = 0; i < fx.fort && this.fort[cell]; i++) t = this.lowerFort(cell);
+                    st.aa = `la ciudad ${t} y pierde su antiaéreo`;
+                } else {   // las antiaéreas de un ejército: la mitad, al menos una
+                    const a = src.army, m = Math.min(a.units.antiair, Math.max(1, Math.round(a.units.antiair * STRIKE_MOBILE)));
+                    a.units.antiair -= m;
+                    st.aaLost = (st.aaLost || 0) + m;
+                    this.armyVersion++;
+                    st.aa = `el ejército pierde ${plural(st.aaLost, 'antiaérea', 'antiaéreas')}`;
+                    if (!countUnits(a.units)) { this.removeArmy(a); st.aa += ' y se disuelve'; }
+                }
+                break;
+            case 'battery': this.batteries.delete(cell); this.airVersion++; break;
+            case 'airfield': {
+                const f = this.airfields.get(cell);
+                f.downUntil = this.nextOwnTurn(f.owner) + STRIKE_DOWN_TURNS - 1;
+                st.down = f.downUntil;
+                this.airVersion++;
+                break;
+            }
+        }
+        if (fx.dev && CITY_OF[cell] >= 0) {   // el misil pesado sobre una ciudad: el desarrollo de su provincia
+            const p = CITY_OF[cell];
+            st.dev ??= this.dev[p];   // el de antes, para el parte
+            this.dev[p] = Math.floor(this.dev[p] * fx.dev);
+            this.devVersion++;
+        }
+    }
+    // Lanza `n` armas `key` de `owner` contra lo de `kind` en `cell`, desde el lanzador más cercano (launchers). Salen del
+    // arsenal, el ejército que lanza gasta su salva del turno y cada arma pasa por las capas de defensa (las baterías y
+    // los sitios que disparan se delatan). Cada una que llega hace su efecto, en orden; a ciegas, salvo el guiado, acierta
+    // con el blindHit de base (la Munición guiada es de la aviación). Sale en el parte del que lanza y de la víctima, y
+    // queda el evento { kind: 'strike', owner, from, cell, weapon, n, through } para la animación. Devuelve
+    // { result: 'hit' | 'miss' | 'intercepted' | 'invalid', through, stopped: { drones, batteries, aa }, text }.
+    launchStrike(owner, key, n, kind, cell) {
+        const why = this.strikeCheck(owner, key, n, kind, cell);
+        if (why) return { result: 'invalid', through: 0, stopped: { drones: 0, batteries: 0, aa: 0 }, text: why };
+        const w = WEAPONS[key], fx = STRIKE_FX[key], from = this.launchers(owner, key, cell)[0];
+        const src = kind === 'aa' ? this.aaAt(owner, cell) : null, army = kind === 'army' ? this.armyOn(cell) : null;
+        const victim = army ? army.owner : kind === 'airfield' ? this.airfields.get(cell).owner : kind === 'battery' ? this.batteries.get(cell).owner : src ? src.owner : this.owner[cell];
+        this.nations[owner].arsenal[key] -= n;
+        if (!this.strikeFromCity(owner, key, from)) this.armyOn(from).rocketTurn = this.turn;
+        const def = this.incomingDefense(owner, w.cls, cell, n), through = Math.round(def.through);
+        this.note({ kind: 'strike', owner, from, cell, weapon: key, n, through });   // la vista lo anima
+        const known = kind === 'aa' || kind === 'battery' || fx.precise || this.knownCell(owner, cell);
+        const st = { hits: 0, missed: 0, lost: 0, disorg: false, gone: false, splash: new Map(), roads: 0, levels: 0, aa: '', down: 0, dev: null };
+        for (let i = 0; i < through && this.strikeStands(kind, cell, army, src); i++) {
+            if (!known && this.rng() < 1 - BASE_RULES.blindHit) { st.missed++; continue; }
+            st.hits++;
+            this.strikeEffect(owner, key, kind, cell, army, src, st);
+        }
+        this.airVersion++;
+        const result = !through ? 'intercepted' : st.hits ? 'hit' : 'miss';
+        const text = this.strikeReport(owner, victim, key, kind, cell, n, through, st, true);
+        if (owner === this.player) this.log(text);
+        else if (victim === this.player) this.log(this.strikeReport(owner, victim, key, kind, cell, n, through, st, false));
+        if (this.player !== null && owner !== this.player && victim !== this.player) for (const [b, e] of st.splash) {
+            if (b.owner === this.player) this.log(`Un misil pesado de ${this.nm(owner)} contra ${this.placeName(cell)} alcanza tu ejército de al lado, en ${this.placeName(b.cell)}: pierde ${plural(e.lost, 'unidad', 'unidades')}${e.gone ? ' y se disuelve' : ''}.`);
+        }
+        return { result, through, stopped: def.stopped, text };
+    }
+    // Parte de un lanzamiento, para quien lo lanza (`mine`) o para la víctima: «Lanzas 8 misiles contra la fortificación
+    // de X: 3 de 8 misiles interceptados; llegan 5: baja a sacos terreros.»
+    strikeReport(owner, victim, key, kind, cell, n, through, st, mine) {
+        const w = WEAPONS[key], X = this.placeName(cell), many = n > 1, stopped = n - through;
+        const salvo = many ? `${n} ${w.many}` : `${w.fem ? 'una' : 'un'} ${w.name.toLowerCase()}`;
+        const what = mine
+            ? { army: `el ejército de ${this.nm(victim)} en ${X}`, roads: `las carreteras de ${X}`, fort: `la fortificación de ${X}`, aa: `el antiaéreo de ${X}`, battery: `la batería automática de ${X}`, airfield: `el aeródromo de ${X}` }[kind]
+            : { army: `tu ejército en ${X}`, roads: `tus carreteras de ${X}`, fort: `tu fortificación de ${X}`, aa: `tu antiaéreo de ${X}`, battery: `tu batería automática de ${X}`, airfield: `tu aeródromo de ${X}` }[kind];
+        const head = mine ? `Lanzas ${salvo} contra ${what}` : `${this.nm(owner)} lanza ${salvo} contra ${what}`;
+        let effect = '';
+        if (st.hits) switch (kind) {
+            case 'army': {
+                effect = `pierde ${plural(st.lost, 'unidad', 'unidades')}${st.gone ? ' y se disuelve' : st.disorg ? ' y queda desorganizado' : ''}`;
+                const near = [...st.splash.values()].reduce((s, e) => s + e.lost, 0);
+                if (near) effect += `; los ejércitos de al lado pierden ${plural(near, 'unidad', 'unidades')}`;
+                break;
+            }
+            case 'roads': effect = plural(st.roads, 'tramo roto', 'tramos rotos'); break;
+            case 'fort': {   // el nivel al que baja, solo si quien lanza conoce los niveles; que existe es público
+                const levels = !mine || this.intel(owner, this.owner[cell], cell).levels;
+                effect = !this.fort[cell] ? 'desaparece' : levels ? `baja a ${FORT_LEVELS[this.fort[cell] - 1]}` : `baja ${plural(st.levels, 'nivel', 'niveles')}`;
+                break;
+            }
+            case 'aa': effect = st.aa; break;
+            case 'battery': effect = 'queda destruida'; break;
+            case 'airfield': effect = `queda inservible hasta el turno ${st.down + 1}`; break;
+        }
+        if (st.hits && st.dev !== null) effect += `; el desarrollo de la provincia baja de ${st.dev} a ${this.dev[CITY_OF[cell]]}`;
+        const tail = [effect, st.missed ? `${plural(st.missed, 'falla', 'fallan')} a ciegas` : ''].filter(Boolean).join('; ');
+        const parts = [];
+        if (stopped) parts.push(many ? `${stopped} de ${n} ${w.many} ${w.fem ? 'interceptadas' : 'interceptados'}` : `${w.fem ? 'la' : 'lo'} interceptan`);
+        if (through) parts.push(stopped ? `${through === 1 ? (w.fem ? 'llega una' : 'llega uno') : `llegan ${through}`}${tail ? `: ${tail}` : ''}` : tail);
+        const body = parts.filter(Boolean).join('; ');
+        return `${head}${body ? `: ${body}` : ''}.`;
+    }
+    // El jugador lanza; si no puede, el parte dice por qué y no sale nada del arsenal.
+    playerStrike(key, n, kind, cell) {
+        if (this.over || this.player === null) return null;
+        const res = this.launchStrike(this.player, key, n, kind, cell);
+        if (res.result === 'invalid') this.log(res.text);
         return res;
     }
 
@@ -4111,6 +4400,7 @@ class GameEngine {
         o.used = Math.max(o.used, a.used);
         o.hunger = Math.max(o.hunger || 0, a.hunger || 0);
         o.disorgUntil = Math.max(o.disorgUntil || 0, a.disorgUntil || 0);   // desorganizado: el que más dure
+        o.rocketTurn = Math.max(o.rocketTurn || 0, a.rocketTurn || 0);   // si uno ya ha lanzado su salva, el otro no la repite
         if (!o.op && a.op) o.op = a.op;   // quien se une a un ejército sin operación se la lleva
         if (!o.group && a.group) o.group = a.group;   // y lo mismo con la agrupación
         if (!o.reinforce && a.reinforce) o.reinforce = a.reinforce;   // y con su refuerzo (A7)
@@ -4127,6 +4417,7 @@ class GameEngine {
         const b = this.newArmy(a.owner, a.cell, send, a.used);
         this.splitFrom.set(b.id, [a.id, this.turn]);   // la escolta de ataque de `a` apoya a la parte este turno
         b.disorgUntil = a.disorgUntil || 0;
+        b.rocketTurn = a.rocketTurn || 0;
         if (a.op) b.op = a.op;
         b.group = a.group || 0;
         if (a.reinforce && !keep && countUnits(send) > countUnits(a.units)) {

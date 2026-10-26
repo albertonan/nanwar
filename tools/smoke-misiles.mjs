@@ -20,7 +20,7 @@ const port = server.address().port;
 // Cada prueba corre dentro de la página: devuelve true si pasa, o un texto que explica el fallo.
 const setup = () => {
     window.T = {
-        game(seed = 7, fog = false) { const g = new GameEngine(seed); g.configure({ aggression: 'normal', alliances: 'ninguna', victory: 1, fog }); return g; },
+        game(seed = 7, fog = false, nukes = true) { const g = new GameEngine(seed); g.configure({ aggression: 'normal', alliances: 'ninguna', victory: 1, fog, nukes }); return g; },
         nation: key => E.countries.findIndex(c => c.key === key),
         eq(a, b, msg) { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${msg}: ${JSON.stringify(a)} ≠ ${JSON.stringify(b)}`); },
         learn(g, id, ...ids) { for (const t of ids) g.nations[id].tech.done.add(t); g.techVersion++; },
@@ -112,6 +112,12 @@ const setup = () => {
         site(g, owner, cell) { const s = { owner, left: 0, hits: 0, known: new Set() }; g.aaSites.set(cell, s); g.airVersion++; return s; },
         // Batería automática terminada de `owner` en `cell`, sin usar y sin que nadie la conozca.
         battery(g, owner, cell) { const b = { owner, left: 0, known: new Set(), used: 0 }; g.batteries.set(cell, b); g.airVersion++; return b; },
+        // Como `clear`, la primera que cumpla `ok(c)` (p. ej., a alcance de un lanzador).
+        clearWhere(g, owner, R, ok) {
+            for (let k = 0; ; k++) { const c = T.clear(g, owner, R, k); if (ok(c)) return c; }
+        },
+        // Sin ejércitos de `owner`.
+        noArmies(g, owner) { for (const a of [...g.armies.values()]) if (a.owner === owner) g.removeArmy(a); },
         // Sin antiaéreo integrado: las ciudades con casamatas bajan a búnkeres.
         noIntegrated(g) { for (const p of PROVINCES) if (g.fort[p.city] === 4) g.fort[p.city] = 3; g.fortVersion++; },
         // Tierra de `owner` (no lago), sin ciudad, y sin ejércitos ni tierra de otro a `R` casillas o menos: un blanco limpio.
@@ -327,6 +333,198 @@ const CHECKS = [
         const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
         T.eq(h.researchedCount(us), 1, 'tras cargar');
         T.eq(h.researchedCount(es), 0, 'España');
+        return true;
+    }],
+    ['C2 · cohete solo desde un ejército a 80 km y una salva por ejército y turno', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr);
+        T.noArmies(g, es);
+        const target = T.clear(g, fr, 6), foe = T.army(g, fr, target, 20);
+        g.nations[es].arsenal.rocket = 4;
+        T.eq(g.launchers(es, 'rocket', target), [], 'sin ejército, ninguno');
+        T.ok(/ejército/.test(g.strikeCheck(es, 'rocket', 1, 'army', target)), `dice por qué: ${g.strikeCheck(es, 'rocket', 1, 'army', target)}`);
+        // Un ejército a más de 80 km no llega; uno a 80 km, sí. Las ciudades no lanzan cohetes.
+        const R = kmCells(80);
+        T.eq(R, 4, '80 km');
+        const ring = d => hexDisc(target, d).filter(c => hexDist(c, target) === d && isLand(c) && !g.armyAt[c] && CITY_OF[c] < 0);
+        T.army(g, es, ring(R + 1)[0]);
+        const near = T.army(g, es, ring(R)[0], 3);
+        T.eq(g.launchers(es, 'rocket', target), [near.cell], 'solo el que llega');
+        T.eq(g.strikeOdds(es, 'rocket', 2, 'army', target).through, 2, 'sin defensas, pasan todos');
+        T.luck(g, 0.5);
+        const res = g.launchStrike(es, 'rocket', 2, 'army', target);
+        let want = 20;
+        for (let i = 0; i < 2; i++) want -= Math.min(want, Math.max(1, Math.round(want * 0.075)));   // 6–9 %, compuestas
+        T.eq([res.result, res.through, countUnits(foe.units), g.nations[es].arsenal.rocket, near.rocketTurn], ['hit', 2, want, 2, g.turn], `salva: ${res.text}`);
+        T.eq(g.motion[g.motion.length - 1], { kind: 'strike', owner: es, from: near.cell, cell: target, weapon: 'rocket', n: 2, through: 2 }, 'evento para la animación');
+        T.ok(g.logs.some(l => l.msg === res.text), 'parte');
+        // Una salva por ejército y turno.
+        T.eq(g.launchers(es, 'rocket', target), [], 'ya ha disparado');
+        T.ok(/este turno/.test(g.strikeCheck(es, 'rocket', 1, 'army', target)), 'una salva por turno');
+        T.eq([g.launchStrike(es, 'rocket', 1, 'army', target).result, g.nations[es].arsenal.rocket], ['invalid', 2], 'no lanza');
+        // Se guarda: cargar no le da otra salva.
+        T.eq(GameEngine.load(JSON.parse(JSON.stringify(g.serialize()))).launchers(es, 'rocket', target), [], 'tras cargar');
+        // Otro ejército sí puede; al turno siguiente, también el primero.
+        const other = T.army(g, es, ring(R)[0]);
+        T.eq(g.launchers(es, 'rocket', target), [other.cell], 'otro ejército');
+        g.turn++;
+        T.eq(g.launchers(es, 'rocket', target), [near.cell, other.cell].sort((a, b) => a - b), 'turno siguiente');
+        // El cohete pesado sale también de una ciudad, a 300 km.
+        T.learn(g, es, 'cohete1');
+        const [, b] = T.border(g, es, fr), city = T.baseFor(g, es, b, kmCells(300));
+        T.ok(g.launchers(es, 'heavyRocket', b).includes(city) && !g.launchers(es, 'rocket', b).includes(city), 'ciudad: cohete pesado sí, cohete no');
+        return true;
+    }],
+    ['C2 · misil baja un nivel de fortificación por cada uno que llega', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'cohete1', 'cohete2', 'cohete3');
+        const [, cell] = T.border(g, es, fr);
+        if (g.armyOn(cell)) g.removeArmy(g.armyOn(cell));
+        g.fort[cell] = 3; g.fortVersion++;
+        Object.assign(g.nations[es].arsenal, { missile: 3, heavy: 1, rocket: 1 });
+        T.ok(g.launchers(es, 'missile', cell).length > 0, 'una ciudad a alcance');
+        T.ok(/fortificación/.test(g.strikeCheck(es, 'rocket', 1, 'fort', cell)), 'el cohete no baja fortificaciones');
+        T.near(g.strikeOdds(es, 'missile', 2, 'fort', cell).levels, 2, 1e-9, 'previsión: dos niveles');
+        T.luck(g, 0.5);
+        let res = g.launchStrike(es, 'missile', 2, 'fort', cell);
+        T.eq([res.result, res.through, g.fort[cell], g.nations[es].arsenal.missile], ['hit', 2, 1, 1], `dos misiles, dos niveles: ${res.text}`);
+        T.ok(/sacos terreros/.test(res.text), `el parte dice a qué baja: ${res.text}`);
+        res = g.launchStrike(es, 'heavy', 1, 'fort', cell);
+        T.eq([g.fort[cell], g.nations[es].arsenal.heavy], [0, 0], `el pesado quita dos (aquí, el que queda): ${res.text}`);
+        T.eq(g.strikeCheck(es, 'missile', 1, 'fort', cell), 'No hay fortificación.', 'sin fortificación');
+        // Las que llegan cuando ya no queda nada no hacen nada más.
+        g.fort[cell] = 1; g.fortVersion++;
+        res = g.launchStrike(es, 'missile', 1, 'fort', cell);
+        T.eq([g.fort[cell], g.nations[es].arsenal.missile], [0, 0], 'el último');
+        return true;
+    }],
+    ['C2 · el misil pesado alcanza las vecinas al 8 % y baja el desarrollo de una ciudad', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'cohete3');
+        const city = PROVINCES.filter(p => g.owner[p.city] === fr && hexDisc(p.city, 1).every(j => isLand(j))).map(p => p.city)[0];
+        for (const j of hexDisc(city, 1)) if (g.armyOn(j)) g.removeArmy(g.armyOn(j));
+        const nbs = hexDisc(city, 1).filter(j => j !== city);
+        const foe = T.army(g, fr, city, 40), n1 = T.army(g, fr, nbs[0], 25), mine = T.army(g, es, nbs[1], 50);
+        const pid = G.prov[city];
+        g.dev[pid] = 400;
+        g.nations[es].arsenal.heavy = 1;
+        T.luck(g, 0.5);
+        const res = g.launchStrike(es, 'heavy', 1, 'army', city);
+        T.eq([res.result, countUnits(foe.units)], ['hit', 40 - Math.round(40 * 0.275)], `25–30 %: ${res.text}`);
+        T.eq([countUnits(n1.units), countUnits(mine.units)], [25 - 2, 50 - 4], 'vecinas al 8 %, también lo propio');
+        T.eq(g.dev[pid], 300, 'desarrollo −25 %');
+        T.eq(foe.disorgUntil || 0, 0, 'la tabla no lo desorganiza');
+        // El misil sí desorganiza, y no toca las vecinas ni el desarrollo.
+        T.learn(g, es, 'cohete2'); g.nations[es].arsenal.missile = 1;
+        g.launchStrike(es, 'missile', 1, 'army', city);
+        T.ok(foe.disorgUntil >= g.turn, 'desorganizado');
+        T.eq([countUnits(n1.units), g.dev[pid]], [23, 300], 'el misil solo da al blanco');
+        return true;
+    }],
+    ['C2 · a ciegas rinde la mitad salvo el guiado', () => {
+        const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr);
+        T.learn(g, es, 'cohete2', 'estrategicas1', 'aviacion1', 'aviacion2');   // con Munición guiada (es de la aviación)
+        const cell = G.land.find(c => g.owner[c] === fr && CITY_OF[c] < 0 && !g.armyAt[c] && !g.knownCell(es, c) && g.launchers(es, 'missile', c).length);
+        T.ok(cell !== undefined, 'blanco desconocido a alcance');
+        g.fort[cell] = 3; g.fortVersion++;
+        Object.assign(g.nations[es].arsenal, { missile: 4, guided: 2 });
+        const o = g.strikeOdds(es, 'missile', 2, 'fort', cell);
+        T.eq([o.why, o.known, o.hit], ['', false, 0.5], 'a ciegas, la mitad');
+        T.eq(g.strikeOdds(es, 'guided', 2, 'fort', cell).hit, 1, 'el guiado, entero');
+        T.ok(o.unknown && /defensas que no conoces/.test(o.warn), 'avisa de que puede haber defensas');
+        T.luck(g, 0.4);   // por debajo de la mitad, la tirada a ciegas falla
+        let res = g.launchStrike(es, 'missile', 2, 'fort', cell);
+        T.eq([res.result, res.through, g.fort[cell]], ['miss', 2, 3], `fallan: ${res.text}`);
+        T.luck(g, 0.6);
+        g.launchStrike(es, 'missile', 2, 'fort', cell);
+        T.eq(g.fort[cell], 1, 'aciertan');
+        T.luck(g, 0.4);
+        res = g.launchStrike(es, 'guided', 2, 'fort', cell);
+        T.eq([res.result, g.fort[cell]], ['hit', 0], `el guiado no falla a ciegas: ${res.text}`);
+        return true;
+    }],
+    ['C3 · las baterías y el antiaéreo interceptan según la tabla y la capacidad', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, fr, 'defensa1');
+        const cell = T.clear(g, fr, 3), foe = T.army(g, fr, cell, 30), b = T.battery(g, fr, cell);
+        T.army(g, es, hexDisc(cell, 1).find(c => c !== cell && isLand(c)), 2);
+        g.nations[es].arsenal.rocket = 6;
+        // Previsión: la batería (nivel 1: cohetes al 70 %, 4 por ronda) atiende 4 de los 6.
+        T.near(g.strikeOdds(es, 'rocket', 6, 'army', cell).through, 2 + 4 * 0.3, 1e-9, 'previsión');
+        T.eq(b.used, 0, 'la previsión no gasta');
+        T.luck(g, 0);
+        const res = g.launchStrike(es, 'rocket', 6, 'army', cell);
+        T.eq([res.through, res.stopped, b.used, b.known.has(es)], [2, { drones: 0, batteries: 4, aa: 0 }, 4, true], 'para 4 y pasan 2; se delata');
+        T.ok(/4 de 6 cohetes interceptados/.test(res.text), `parte: ${res.text}`);
+        let want = 30;
+        for (let i = 0; i < 2; i++) want -= Math.max(1, Math.round(want * 0.06));
+        T.eq(countUnits(foe.units), want, 'bajas de los que llegan');
+        // Antiaéreo: cuatro sitios con Defensa aérea 2 (S = 64) paran el 55 % de los misiles, 3 armas cada uno por ronda.
+        const h = T.game();
+        h.start(es); T.bare(h); T.noIntegrated(h); h.declareWar(es, fr); T.learn(h, fr, 'antiaerea1', 'antiaerea2'); T.learn(h, es, 'cohete2');
+        const c = T.clearWhere(h, fr, 2, j => h.launchers(es, 'missile', j).length), sites = [c, ...hexDisc(c, 1).filter(j => j !== c && isLand(j))].slice(0, 4);
+        for (const s of sites) T.site(h, fr, s);
+        T.army(h, fr, c, 30);
+        h.nations[es].arsenal.missile = 16;
+        T.ok(h.launchers(es, 'missile', c).length > 0, 'a alcance');
+        T.near(h.strikeOdds(es, 'missile', 1, 'army', c).through, Math.exp(-0.8), 1e-9, 'un misil');
+        const exp = 9 * Math.exp(-0.8) + Math.exp(-0.6) + Math.exp(-0.4) + Math.exp(-0.2) + 1;
+        T.near(h.strikeOdds(es, 'missile', 13, 'army', c).through, exp, 1e-9, 'trece: la capacidad se agota');
+        h.player = fr;   // el parte de la víctima
+        T.luck(h, 0);
+        const r2 = h.launchStrike(es, 'missile', 13, 'army', c);
+        T.eq([r2.through, r2.stopped.aa, h.nations[es].arsenal.missile], [1, 12, 3], 'doce interceptados, la 13.ª pasa');
+        T.ok(sites.every(s => h.aaSites.get(s).known.has(es)), 'los sitios que disparan se delatan');
+        T.ok(h.logs.some(l => l.msg.startsWith(h.nm(es)) && /12 de 13 misiles interceptados/.test(l.msg)), `parte para la víctima: ${h.logs.slice(-2).map(l => l.msg)}`);
+        return true;
+    }],
+    ['C3 · Armas estratégicas 2 rebaja la intercepción ×0,7', () => {
+        const g = T.game(7, false, false), es = T.nation('es'), fr = T.nation('fr');
+        T.eq(g.rules(fr).interceptMult, 1, 'sin nucleares, Francia empieza sin ella');
+        T.eq(T.game(7, false, true).rules(fr).interceptMult, 0.7, 'con nucleares, Francia empieza con ella');
+        g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, fr, 'defensa1', 'defensa2'); T.learn(g, es, 'cohete2');
+        const cell = T.clearWhere(g, fr, 3, j => g.launchers(es, 'missile', j).length);
+        T.army(g, fr, cell, 10);
+        g.nations[es].arsenal.missile = 1;
+        T.battery(g, fr, cell);
+        const pass = () => g.strikeOdds(es, 'missile', 1, 'army', cell).through;
+        T.near(pass(), 0.4, 1e-9, 'batería de nivel 2: el 60 %');
+        T.learn(g, es, 'estrategicas2');
+        T.near(pass(), 1 - 0.6 * 0.7, 1e-9, 'con reentrada maniobrable, ×0,7');
+        T.near(g.incomingDefense(es, 'rocket', cell, 1, { simulate: true }).through, 0.2, 1e-9, 'los cohetes no cambian');
+        // Y el antiaéreo: un sitio sin investigar (S = 10), k = 0,5.
+        g.batteries.delete(cell); T.site(g, fr, cell);
+        T.near(pass(), 1 - 0.7 * (1 - Math.exp(-10 * 0.5 / 40)), 1e-9, 'antiaéreo ×0,7');
+        return true;
+    }],
+    ['C2 · salva mayor que el arsenal o sin lanzador: no lanza y dice por qué', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'cohete2', 'estrategicas3');
+        T.noArmies(g, es);
+        const [, cell] = T.border(g, es, fr);
+        if (!g.armyOn(cell)) T.army(g, fr, cell, 10);
+        const ar = g.nations[es].arsenal;
+        Object.assign(ar, { rocket: 3, missile: 2, nuclear: 1 });
+        // Lo más lejos de las ciudades de España en Francia, fuera del alcance del misil.
+        const cities = PROVINCES.filter(p => g.owner[p.city] === es).map(p => p.city), gap = c => Math.min(...cities.map(x => hexDist(x, c)));
+        const far = G.land.filter(c => g.owner[c] === fr).sort((a, b) => gap(b) - gap(a))[0];
+        T.ok(gap(far) > kmCells(500), 'Francia tiene tierra a más de 500 km');
+        if (!g.armyOn(far)) T.army(g, fr, far, 10);
+        const before = JSON.stringify(ar), moves = g.motion.length, units = countUnits(g.armyOn(cell).units);
+        for (const [key, n, kind, c, why] of [['missile', 3, 'army', cell, /Solo tienes 2 misiles/], ['missile', 1, 'army', far, /alcance/], ['rocket', 1, 'army', cell, /ejército/],
+            ['missile', 0, 'army', cell, /salva/i], ['rocket', 1, 'fort', cell, /fortificación/], ['nuclear', 1, 'army', cell, /nuclear/i], ['guided', 1, 'army', cell, /No tienes/]]) {
+            const res = g.playerStrike(key, n, kind, c);
+            T.eq(res.result, 'invalid', `${key} × ${n}`);
+            T.ok(why.test(res.text), `${key} × ${n}: ${res.text}`);
+            T.eq(g.logs[g.logs.length - 1].msg, res.text, 'el parte dice por qué');
+        }
+        T.eq([JSON.stringify(ar), g.motion.length, countUnits(g.armyOn(cell).units)], [before, moves, units], 'no lanza nada');
+        // La nuclear no se lanza aún: llega con su efecto (C4).
+        T.ok(g.strikeCheck(es, 'nuclear', 1, 'army', cell) !== '', 'nuclear rechazada');
+        // Con lo justo, sí.
+        T.eq(g.playerStrike('missile', 2, 'army', cell).result, 'hit', 'lanza');
+        T.eq(ar.missile, 0, 'gasta');
         return true;
     }]
 ];
