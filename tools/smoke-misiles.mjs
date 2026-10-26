@@ -758,6 +758,247 @@ const CHECKS = [
         T.eq(b.nations[es].pariahUntil, 0, 'paria no válido');
         return true;
     }],
+    ['C6 · la IA rica en guerra compra y lanza contra el antiaéreo de su camino', () => {
+        const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+        g.start(pt); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr);
+        T.learn(g, es, 'cohete2'); T.learn(g, fr, 'defensa1');
+        const n = g.nations[es];
+        n.gold = 1e5;
+        T.ok(g.grossIncome(es) >= 100, `España no es pobre: ${g.grossIncome(es)}`);
+        // Una ofensiva de España con dos escuadrones de un aeródromo propio; su camino pasa por tierra francesa.
+        const [b, t] = T.pair(g, es, fr, (x, y) => flightPath(x, y).filter(c => isLand(c) && g.owner[c] === fr && CITY_OF[c] < 0 && !g.armyAt[c]).length >= 3);
+        T.airfield(g, es, b);
+        const op = g.createOp(es, 'ofensiva', [b, t], { auto: 'auto', noCap: true });
+        for (const q of T.squad(g, es, b, 2)) g.assignSquadron(q, op.id);
+        const lane = flightPath(b, t).filter(c => isLand(c) && g.owner[c] === fr && CITY_OF[c] < 0 && !g.armyAt[c]);
+        // En el camino: un antiaéreo y una batería que conoce, y otro antiaéreo que no conoce.
+        const site = T.site(g, fr, lane[0]), hidden = T.site(g, fr, lane[1]), bat = T.battery(g, fr, lane[2]);
+        site.known.add(es); bat.known.add(es);
+        T.eq(g.aiStrikeTargets(es, ['missile']).filter(x => lane.includes(x.cell)).map(x => [x.kind, x.cell]), [['aa', lane[0]], ['battery', lane[2]]], 'blancos: el antiaéreo y la batería que conoce');
+        const gold = n.gold, price = g.weaponPrice(es, 'missile'), moves = g.motion.length;
+        T.luck(g, 0.99);
+        g.aiStrikes(es);
+        const shots = g.motion.slice(moves).filter(e => e.kind === 'strike');
+        T.eq(shots.map(e => [e.owner, e.weapon, e.cell]), [[es, 'missile', lane[0]], [es, 'missile', lane[2]]], 'lanza contra los dos');
+        T.eq([g.aaSites.has(lane[0]), g.batteries.has(lane[2]), g.aaSites.get(lane[1]) === hidden], [false, false, true], 'destruye lo que conoce');
+        T.eq([n.arsenal.missile, n.gold], [0, gold - 2 * price], 'compra lo justo');
+        T.eq(n.lastStrike, g.turn, 'queda a la vista que ha lanzado');
+        // Sin guerra no lanza.
+        const h = T.game();
+        h.start(pt); T.bare(h); T.learn(h, es, 'cohete2'); h.nations[es].gold = 1e5;
+        T.airfield(h, es, b);
+        const op2 = h.createOp(es, 'ofensiva', [b, t], { auto: 'auto', noCap: true });
+        for (const q of T.squad(h, es, b, 2)) h.assignSquadron(q, op2.id);
+        T.site(h, fr, lane[0]).known.add(es);
+        const m2 = h.motion.length;
+        h.aiStrikes(es);
+        T.eq([h.motion.length, h.nations[es].gold], [m2, 1e5], 'en paz, nada');
+        return true;
+    }],
+    ['C6 · la IA pobre no gasta en arsenal', () => {
+        const g = T.game(), pt = T.nation('pt');
+        g.start(pt); T.bare(g); T.noIntegrated(g);
+        // El país más pobre con vecino por tierra y capital con tierra libre alrededor.
+        const free = c => isLand(c) && !g.armyAt[c] && CITY_OF[c] < 0 && CELL_TERRAIN[c] !== 'lake';
+        const poor = g.nations.filter(x => x.alive && x.id !== pt && g.borderSets()[x.id].size && hexDisc(x.capitalCell, 1).filter(free).length >= 2)
+            .sort((x, y) => g.grossIncome(x.id) - g.grossIncome(y.id))[0].id;
+        const foe = [...g.borderSets()[poor]].find(o => o !== pt);
+        T.ok(g.grossIncome(poor) < 100, `es pobre: ${g.grossIncome(poor)}`);
+        g.declareWar(poor, foe); T.learn(g, poor, 'cohete1', 'cohete2');
+        const n = g.nations[poor];
+        n.gold = 1e6;
+        // Un ejército enemigo enorme junto a su capital y uno suyo al lado, desde el que llegan los cohetes.
+        const [c1, c2] = hexDisc(n.capitalCell, 1).filter(free);
+        T.army(g, foe, c1, 300); T.army(g, poor, c2, 5);
+        const moves = g.motion.length;
+        g.aiStrikes(poor);
+        g.aiRecruit(poor);
+        T.eq([g.motion.slice(moves).filter(e => e.kind === 'strike').length, n.armsFund, WEAPON_KEYS.every(k => !n.arsenal[k])], [0, 0, true], 'ni compra, ni lanza, ni aparta');
+        // Con renta de rico, el mismo blanco sí.
+        g.grossIncome = () => 1000;
+        n.gold = 1e6;
+        g.aiStrikes(poor);
+        T.ok(g.motion.slice(moves).some(e => e.kind === 'strike' && e.owner === poor && e.cell === c1), 'rico, lanza');
+        return true;
+    }],
+    ['C6 · aparta para la salva que no puede pagar y la compra con lo apartado', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+        g.start(pt); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'cohete2');
+        const [b, t] = T.pair(g, es, fr, (x, y) => flightPath(x, y).some(c => isLand(c) && g.owner[c] === fr && CITY_OF[c] < 0 && !g.armyAt[c]));
+        T.airfield(g, es, b);
+        const op = g.createOp(es, 'ofensiva', [b, t], { auto: 'auto', noCap: true });
+        for (const q of T.squad(g, es, b, 2)) g.assignSquadron(q, op.id);
+        const cell = flightPath(b, t).find(c => isLand(c) && g.owner[c] === fr && CITY_OF[c] < 0 && !g.armyAt[c]);
+        T.site(g, fr, cell).known.add(es);
+        const n = g.nations[es], price = g.weaponPrice(es, 'missile'), inc = g.income(es), step = Math.round(AI_ARMS_SHARE * inc);
+        T.luck(g, 0.99);
+        let turns = 0;
+        // Cada turno tiene lo justo para el misil, pero no le sobra: lo aparta de su renta hasta tenerlo.
+        while (g.aaSites.has(cell) && turns < 60) {
+            n.gold = price;
+            g.aiStrikes(es);
+            if (!g.aaSites.has(cell)) break;
+            g.aiRecruit(es);
+            turns++;
+            T.eq(n.armsFund, Math.min(price, turns * step), `apartado tras ${turns} turnos`);
+            T.ok(n.gold >= n.armsFund, 'no recluta con lo apartado');
+        }
+        T.eq(turns, Math.ceil(price / step), 'turnos que tarda');
+        T.eq([g.aaSites.has(cell), n.armsFund, n.arsenal.missile], [false, 0, 0], 'lo compra con lo apartado y lo lanza');
+        // Sin blanco que no pueda pagar, no aparta; lo apartado se guarda AI_ARMS_KEEP turnos sin blanco y luego vuelve a las tropas.
+        g.turn++; g.aiStrikes(es); g.aiRecruit(es);
+        T.eq(n.armsFund, 0, 'sin blanco, nada');
+        n.armsFund = 500; g.armsSave.set(es, { turn: g.turn, cap: price });
+        g.turn += AI_ARMS_KEEP; n.gold = 1e4;
+        g.aiStrikes(es); g.aiRecruit(es);
+        T.eq(n.armsFund, 500, 'guardado');
+        g.turn++; g.aiStrikes(es); g.aiRecruit(es);
+        T.eq(n.armsFund, 0, 'vuelve a las tropas');
+        return true;
+    }],
+    ['C6 · fortificación del objetivo de su ofensiva y ejércitos grandes junto a sus ciudades', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+        g.start(pt); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'cohete2');
+        g.nations[es].gold = 1e6;
+        const [b, t] = T.pair(g, es, fr);
+        const op = g.createOp(es, 'ofensiva', [b, t], { auto: 'auto', noCap: true });
+        g.fort[t] = 2; g.fortVersion++;
+        // Un ejército francés enorme a 2 casillas de una ciudad española, y otro pequeño.
+        const esCities = PROVINCES.filter(p => g.owner[p.city] === es).map(p => p.city);
+        const near = G.land.filter(c => g.owner[c] === fr && T.free(g, c) && CELL_TERRAIN[c] !== 'lake' && esCities.some(x => hexDist(x, c) <= 2));
+        T.ok(near.length >= 2, 'tierra francesa junto a una ciudad española');
+        T.army(g, fr, near[0], 300); T.army(g, fr, near[1], 3);
+        const kinds = () => g.aiStrikeTargets(es, ['missile']).map(x => [x.kind, x.cell]);
+        T.eq(kinds().filter(([k, c]) => c === t || c === near[0] || c === near[1]), [['army', near[0]]], 'la ofensiva aún se reúne: solo el ejército grande');
+        op.phase = 'avance';
+        T.eq(kinds().filter(([k, c]) => c === t || c === near[0] || c === near[1]), [['fort', t], ['army', near[0]]], 'en marcha: primero la fortificación');
+        T.luck(g, 0.99);
+        const moves = g.motion.length, units = countUnits(g.armyOn(near[0]).units);
+        g.aiStrikes(es);
+        const shots = g.motion.slice(moves).filter(e => e.kind === 'strike').map(e => e.cell);
+        T.eq(shots, [t, near[0]], 'lanza contra los dos');
+        T.ok(g.fort[t] < 2 && countUnits(g.armyOn(near[0]).units) < units, 'baja la fortificación y causa bajas');
+        return true;
+    }],
+    ['C6 · aparta para la bomba si es rica y su enemigo más fuerte; nunca prohibidas', () => {
+        const setup = (nukes = true) => {
+            const g = T.game(7, false, nukes), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+            g.start(pt); T.bare(g); g.declareWar(es, fr);
+            T.army(g, es, T.clear(g, es, 0), 9000);   // España, mucho más fuerte
+            return { g, es, fr, n: g.nations[fr] };
+        };
+        const { g, es, fr, n } = setup();
+        T.ok(g.rules(fr).nuclear && g.nukeRich(fr), 'Francia: la bomba y rica');
+        const price = g.weaponPrice(fr, 'nuclear'), inc = g.income(fr);
+        n.gold = 0;
+        g.aiNukes(fr); g.aiRecruit(fr);
+        T.eq(n.nukeFund, Math.round(AI_NUKE_SHARE * inc), 'aparta para la bomba');
+        T.eq(n.armsFund, 0, 'no para otra cosa');
+        // En paz se guarda lo apartado (sin crecer) y no lo gasta en tropas.
+        g.settlePeace(es, fr);
+        n.gold = n.nukeFund + 10;
+        const kept = n.nukeFund;
+        g.aiNukes(fr); g.aiRecruit(fr); g.aiResearch(fr);
+        T.eq(n.nukeFund, kept, 'en paz, guardado');
+        T.ok(n.gold >= kept, `no gasta lo apartado: ${n.gold}`);
+        // De nuevo en guerra, con el oro: la compra y lo apartado vuelve a 0.
+        g.rel(es, fr).truceUntil = 0; g.declareWar(es, fr);
+        n.gold = g.weaponPrice(fr, 'nuclear');
+        g.aiNukes(fr);
+        T.eq([n.arsenal.nuclear, n.nukeFund], [1, 0], 'la compra');
+        // Prohibidas: ni aparta.
+        const p = setup(false);
+        p.n.gold = 0; p.n.nukeFund = 500;
+        p.g.aiNukes(p.fr); p.g.aiRecruit(p.fr);
+        T.eq([p.n.nukeFund, p.n.arsenal.nuclear], [0, 0], 'prohibidas: nada');
+        return true;
+    }],
+    ['C6 · baterías también contra un arsenal enemigo conocido', () => {
+        const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+        g.start(pt); T.bare(g); g.declareWar(es, fr); T.learn(g, es, 'defensa1');
+        const n = g.nations[es], foes = new Set([fr]), cities = g.citiesOf(es);
+        n.gold = 1e5;
+        g.aiBatteries(es, foes, cities);
+        T.eq(g.batteries.size, 0, 'sin drones ni arsenal conocido, nada');
+        // Francia guarda misiles, pero con niebla España no lo sabe.
+        g.nations[fr].arsenal.missile = 3;
+        T.eq(g.arsenalKnown(es, fr), false, 'con niebla no se ve el arsenal');
+        g.aiBatteries(es, foes, cities);
+        T.eq(g.batteries.size, 0, 'no lo sabe');
+        // Ha lanzado hace poco: eso lo ve cualquiera.
+        g.nations[fr].lastStrike = g.turn - 2;
+        T.ok(g.arsenalKnown(es, fr), 'conocido al lanzar');
+        g.aiBatteries(es, foes, cities);
+        T.eq([...g.batteries.values()].map(b => b.owner), [es], 'construye una batería');
+        g.nations[fr].lastStrike = g.turn - AI_ARMS_MEMORY - 1;
+        T.eq(g.arsenalKnown(es, fr), false, 'y se olvida');
+        return true;
+    }],
+    ['C6 · la IA no acaba el turno en una casilla contaminada si puede evitarlo', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+        g.start(pt); T.bare(g); g.declareWar(es, fr);
+        // Un ejército libre sobre una casilla contaminada: sale de ella.
+        const a = T.army(g, es, T.clear(g, es, 2), 3);
+        g.fallout.set(a.cell, g.turn + 10); g.falloutVersion++;
+        g.aiArmies(es);
+        const mine = [...g.armies.values()].filter(x => x.owner === es);
+        T.ok(!mine.some(x => g.contaminated(x.cell)), 'ningún ejército suyo en la contaminación');
+        T.ok(!g.armies.has(a.id) || a.cell !== [...g.fallout.keys()][0], 'se ha movido');
+        // Con una orden (como en sus operaciones): rodea la casilla contaminada si hay otro paso igual de bueno.
+        const h = T.game();
+        h.start(pt); T.bare(h); h.declareWar(es, fr);
+        T.noArmies(h, es);
+        const from = T.clear(h, es, 2), b = T.army(h, es, from, 2);
+        const dest = G.land.filter(c => h.owner[c] === es && hexDist(c, from) === 6 && T.free(h, c)).sort((x, y) => x - y)[0];
+        const copy = () => GameEngine.load(JSON.parse(JSON.stringify(h.serialize())));
+        const pick = game => { const x = game.armyOn(from); game.advance(x, dest, game.reach(es, from, game.mp(x), true)); return x.cell; };
+        const clean = pick(copy());
+        T.ok(clean !== from, 'sin contaminación avanza');
+        h.fallout.set(clean, h.turn + 10); h.falloutVersion++;
+        const p = copy(), other = pick(h);
+        T.ok(other !== from && other !== clean && !h.contaminated(other), `la evita: ${other}`);
+        // El jugador decide en lo suyo: su ejército no se desvía.
+        p.player = es;
+        T.eq(pick(p), clean, 'el del jugador va por donde va');
+        return true;
+    }],
+    ['C6 · la repetición de la IA espera a sus lanzamientos', async () => {
+        const g = T.uiStart('es'), fr = T.nation('fr'), de = T.nation('de');
+        T.bare(g); g.declareWar(fr, de); T.learn(g, fr, 'cohete2', 'defensa1'); T.learn(g, de, 'defensa1');
+        const cell = T.clearWhere(g, de, 1, c => g.launchers(fr, 'missile', c).length);
+        T.battery(g, de, cell).known.add(fr);
+        g.nations[fr].arsenal.missile = 1;
+        ui.prefs.watch = 'ver'; ui.prefs.speed = 'rapida';
+        const motion = ui.view.motion, pending = motion.pendingMs;
+        let waits = 0;
+        motion.pendingMs = () => { waits++; return 0; };
+        g.aiOrder = () => [fr];
+        try {
+            g.aiStep = id => { g.launchStrike(id, 'missile', 1, 'battery', cell); return true; };   // solo lanza: nada más cambia
+            await ui.endTurnFlow();
+            T.ok(!g.batteries.has(cell) || g.motion.some(e => e.kind === 'strike'), 'ha lanzado');
+            T.ok(waits >= 1, 'espera a la animación');
+            waits = 0;
+            g.aiStep = () => true;   // quien no hace nada no hace esperar
+            await ui.endTurnFlow();
+            T.eq(waits, 0, 'sin nada, no espera');
+        } finally { motion.pendingMs = pending; delete g.aiOrder; delete g.aiStep; }
+        return true;
+    }],
+    ['C6 · guardar y cargar los fondos del arsenal', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        Object.assign(g.nations[es], { lastStrike: 3, armsFund: 700, nukeFund: 9000 });
+        const data = JSON.parse(JSON.stringify(g.serialize())), h = GameEngine.load(data);
+        T.eq([h.nations[es].lastStrike, h.nations[es].armsFund, h.nations[es].nukeFund], [3, 700, 9000], 'se guardan');
+        for (const x of data.nations) { delete x.lastStrike; delete x.armsFund; delete x.nukeFund; }
+        const o = GameEngine.load(data).nations[es];
+        T.eq([o.lastStrike, o.armsFund, o.nukeFund], [0, 0, 0], 'partida vieja');
+        data.nations[es].armsFund = -5; data.nations[es].nukeFund = 'x'; data.nations[es].lastStrike = 1e9;
+        const b = GameEngine.load(data).nations[es];
+        T.eq([b.lastStrike, b.armsFund, b.nukeFund], [1e6, 0, 0], 'no válidos: al rango o a 0');
+        return true;
+    }],
     ['C7 · tecla 7 abre la herramienta y lista el arsenal', () => {
         const g = T.uiStart('es'), es = g.player;
         document.dispatchEvent(new KeyboardEvent('keydown', { key: '7' }));
