@@ -885,6 +885,164 @@ const CHECKS = [
     T.ok(card.scrollWidth - card.clientWidth <= 2, 'sin desbordar a lo ancho');
     return true;
 }],
+['B5 · crear un ala con escuadrones de dos bases y mandarla junta', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr); T.learn(g, es, 'drones1');
+    const [c, e] = T.border(g, es, fr), foe = g.armyOn(e) ?? T.army(g, fr, e, 20);
+    const cities = PROVINCES.filter(p => g.owner[p.city] === es).map(p => p.city).sort((x, y) => hexDist(x, e) - hexDist(y, e) || x - y);
+    const b1 = cities[0], b2 = cities.find(x => x !== b1 && hexDist(x, e) <= g.airRange(es));
+    T.ok(hexDist(b1, e) <= g.droneRange(es) && b2 !== undefined, 'bases a su alcance');
+    T.airfield(g, es, b1); T.airfield(g, es, b2);
+    const [q1] = T.squad(g, es, b1), [q2, other] = T.squad(g, es, b2, 2), [w] = T.swarm(g, es, b1);
+    const a = T.army(g, es, c, 5);
+    // Con las piezas o con su clave ('q' escuadrón, 's' enjambre y el id).
+    const wing = g.createGroup(es, [q1, `q${q2.id}`, `s${w.id}`], { air: true });
+    T.ok(wing && wing.air && wing.num === 1, 'ala nueva');
+    T.eq(wing.name, '1.ª Ala', 'nombre');
+    T.eq([q1.group, q2.group, w.group, other.group], [wing.id, wing.id, wing.id, 0], 'sus piezas');
+    // Su número va aparte del de las agrupaciones de ejércitos, que no la ven.
+    const gr = g.createGroup(es, [a.id]);
+    T.eq([gr.num, !!gr.air], [1, false], 'la agrupación de ejércitos también es la 1');
+    T.eq([g.groupById(es, wing.id), g.wingById(es, wing.id)?.id, g.armyGroups(es).map(x => x.id), g.wingsOf(es).map(x => x.id)], [null, wing.id, [gr.id], [wing.id]], 'cada una en su lista');
+    T.eq([g.createGroup(es, [a.id], { air: true }), g.createGroup(es, [q1.id]), g.addToGroup(es, wing.id, [a.id]), g.setEscort(q1, { group: wing.id }, 'defensa')], [null, null, false, false], 'no se mezclan');
+    // Vuela junta: los enjambres y los escuadrones de las dos bases, cada tipo en su misión.
+    T.luck(g, 0.5);
+    const n0 = countUnits(foe.units), res = g.wingMission(es, wing.id, 'army', e);
+    T.eq([res.flown, res.results.length, [q1, q2, w].map(q => q.flown), other.flown], [3, 2, [g.turn, g.turn, g.turn], 0], 'vuelan los tres');
+    T.ok(countUnits(foe.units) < n0, 'le quitan unidades');
+    T.eq(g.wingMission(es, wing.id, 'army', e).flown, 0, 'una vez por turno');
+    // Un encargo para el ala entera: una operación y después una escolta (el enjambre, sin Municiones merodeadoras, no).
+    const op = g.createOp(es, 'defensa', [c], { auto: 'auto' });
+    T.eq(g.wingAssign(es, wing.id, op.id), 3, 'a la operación');
+    T.eq([q1.op, q2.op, w.op, other.op], [op.id, op.id, op.id, 0], 'los tres en la operación');
+    T.eq(g.wingEscort(es, wing.id, { group: gr.id }, 'defensa'), 2, 'escoltan los escuadrones');
+    T.eq([q1.task?.group, q2.task?.group, w.task, q1.op], [gr.id, gr.id, null, 0], 'escolta');
+    // Sigue mientras tenga piezas; se guarda y se carga con ellas.
+    g.pruneGroups(es); g.dropEmptyGroups(es);
+    T.ok(g.wingById(es, wing.id), 'sigue');
+    const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+    T.eq([h.wingById(es, wing.id)?.name, h.squadrons.get(q1.id).group, h.squadrons.get(q2.id).group, h.swarms.get(w.id).group, h.squadrons.get(other.id).group, h.groupById(es, gr.id)?.num],
+        ['1.ª Ala', wing.id, wing.id, wing.id, 0, 1], 'se carga');
+    T.eq(h.squadrons.get(q1.id).task?.group, gr.id, 'con su escolta');
+    // Una partida vieja (sin alas) carga sin ninguna; y sin piezas, el ala desaparece.
+    const old = JSON.parse(JSON.stringify(g.serialize()));
+    for (const n of old.nations) n.groups = n.groups.filter(x => !x.air);
+    delete old.air.wings; delete old.drones.wings;
+    const k = GameEngine.load(old);
+    T.eq([k.wingsOf(es).length, k.squadrons.get(q1.id).group], [0, 0], 'partida vieja');
+    g.squadronDown(q1); g.squadronDown(q2); g.swarmDown(w);
+    g.pruneGroups(es);
+    T.eq([g.wingById(es, wing.id), g.groupById(es, gr.id)?.id], [null, gr.id], 'sin piezas, fuera');
+    return true;
+}],
+['B5 · el ala en la herramienta Aviación y fuera de la pestaña Batalla', () => {
+    const g = T.uiStart('es'), es = g.player, card = () => document.querySelector('#card').textContent;
+    T.bare(g); T.learn(g, es, 'drones1');
+    const cap = g.nations[es].capitalCell;
+    const other = PROVINCES.find(p => g.owner[p.city] === es && p.city !== cap && hexDist(p.city, cap) <= g.airRange(es)).city;
+    T.airfield(g, es, cap); T.airfield(g, es, other);
+    const [q1] = T.squad(g, es, cap), [q2] = T.squad(g, es, other), [w] = T.swarm(g, es, other);
+    // Lo elegido en la capital, como ala nueva.
+    ui.setTool('air'); ui.clickCell(cap);
+    document.querySelector('#card [data-action="wing-new"]').click();
+    const wing = g.wingsOf(es)[0];
+    T.ok(wing && q1.group === wing.id && ui.air.wing === wing.id, 'ala nueva y elegida');
+    // Lo de la otra base se suma al ala.
+    ui.cancel(); ui.cancel(); ui.setTool('air'); ui.clickCell(other);
+    T.ok(card().includes('Añadir al ala'), 'se puede añadir');
+    document.querySelector('#card [data-action="wing-add"]').click();
+    T.eq([q2.group, w.group], [wing.id, wing.id], 'suma las de la otra base');
+    // Ni en la pestaña Batalla ni con Alt + número de los ejércitos.
+    ui.setTool('command'); ui.tab = 'batalla'; ui.drawerOpen = true; ui.render();
+    T.ok(!document.querySelector('#drawer').textContent.includes(wing.name), 'no sale en Batalla');
+    const alt1 = () => ui.onKey({ key: '1', code: 'Digit1', altKey: true, shiftKey: false, ctrlKey: false, metaKey: false, preventDefault() {}, target: document.body });
+    alt1();
+    T.eq([ui.sel.size, ui.tool], [0, 'command'], 'Alt + 1 no elige el ala como agrupación');
+    // Con la herramienta Aviación, Alt + 1 la elige entera; vuela junta contra el blanco.
+    ui.setTool('air'); alt1();
+    T.eq([ui.air.wing, [...ui.air.picked].sort(), [...ui.air.drones]], [wing.id, [q1.id, q2.id].sort(), [w.id]], 'elegida entera');
+    T.ok(card().includes(wing.name), 'su ficha');
+    ui.clickCell(other);
+    T.ok(document.querySelector('#card [data-action="wing-mission"][data-kind="patrol"]'), 'misiones del ala');
+    document.querySelector('#card [data-action="wing-mission"][data-kind="patrol"]').click();
+    T.eq([q1.patrol, q2.patrol, w.patrol], [other, other, other], 'protegen y patrullan juntos');
+    // El encargo entero desde su ficha: una operación.
+    const op = g.createOp(es, 'defensa', [other], { auto: 'auto' });
+    ui.render();
+    const sel = document.querySelector('#card select[data-wing-task]');
+    sel.value = `op:${op.id}`; sel.dispatchEvent(new Event('change', { bubbles: true }));
+    T.eq([q1.op, q2.op, w.op], [op.id, op.id, op.id], 'a la operación');
+    // Desde la ficha de un ejército, el ala entera escolta (el enjambre, sin Municiones merodeadoras, no).
+    const spot = G.land.find(x => g.owner[x] === es && T.free(g, x) && hexDist(x, other) <= 2), a = T.army(g, es, spot, 5);
+    ui.setTool('command'); ui.select(spot);
+    const pick = document.querySelector(`#card select[data-escort-pick="a${a.id}"]`);
+    T.ok(pick && pick.querySelector(`option[value="wg:${wing.id}"]`), 'el ala en el desplegable');
+    pick.value = `wg:${wing.id}`;
+    document.querySelector(`#card [data-action="escort-add"][data-ref="a${a.id}"]`).click();
+    T.eq([q1.task?.army, q2.task?.army, w.task], [a.id, a.id, null], 'escoltan los escuadrones');
+    return true;
+}],
+['B6 · la IA en guerra compra enjambres y reconoce antes de bombardear', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+    g.start(pt); T.bare(g); T.noIntegrated(g); T.learn(g, es, 'drones1');
+    g.nations[es].gold = 50000;
+    const [b, t] = T.pair(g, es, fr, (x, y) => hexDist(x, y) <= g.droneRange(es));
+    g.fort[t] = 2; g.fortVersion++;
+    T.airfield(g, es, b); T.squad(g, es, b, 2);
+    const op = g.createOp(es, 'ofensiva', [b, t], { auto: 'auto' }); op.aims = ['fort'];
+    g.aiAir(es);
+    T.eq(g.swarms.size, 0, 'en paz, no');
+    g.declareWar(es, fr);
+    T.eq(g.knownCell(es, t), false, 'no conoce el objetivo');
+    g.aiAir(es);
+    const sws = [...g.swarms.values()].filter(q => q.owner === es);
+    T.eq(sws.length, 1, 'compra un enjambre');
+    T.ok(CITY_OF[sws[0].base] >= 0 && hexDist(sws[0].base, t) <= g.droneRange(es), 'en una ciudad desde la que llega');
+    g.aiWings(es, g.opsOf(es));
+    T.eq(sws[0].op, op.id, 'en la ofensiva');
+    sws[0].ready = 0;
+    const from = g.motion.length;
+    g.opAir(op);
+    const evs = g.motion.slice(from).filter(x => x.kind === 'air').map(x => [!!x.drone, x.mission]);
+    T.eq(evs.slice(0, 2), [[true, 'recon'], [false, 'fort']], 'reconoce y luego bombardea');
+    T.ok(g.knownCell(es, t), 'ya lo conoce');
+    return true;
+}],
+['B6 · la IA pone baterías en el frente contra un enemigo con drones', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+    g.start(pt); T.bare(g); g.declareWar(es, fr); T.learn(g, es, 'defensa1');
+    g.nations[es].gold = 50000;
+    const mine = () => [...g.batteries].filter(([, x]) => x.owner === es);
+    g.aiAir(es);
+    T.eq(mine().length, 0, 'sin drones enemigos, ninguna');
+    T.learn(g, fr, 'drones1');
+    g.aiAir(es);
+    T.eq(mine().length, 1, 'una');
+    const [c, bat] = mine()[0];
+    T.ok(CITY_OF[c] >= 0 && g.threat(es, c) > 0, 'en una ciudad del frente');
+    g.aiAir(es);
+    T.eq(mine().length, 1, 'una a la vez');
+    // Terminada, la siguiente solo va a otra ciudad a la que lleguen sus drones y que no cubra la primera.
+    bat.left = 0;
+    g.aiAir(es);
+    T.eq(mine().length, 1, 'no hay otra ciudad a su alcance');
+    T.learn(g, fr, 'drones2');
+    g.aiAir(es);
+    const cells = mine().map(([x]) => x);
+    T.ok(cells.length === 2 && hexDist(cells[0], cells[1]) > kmCells(g.batteryLevel(es).km) && g.frontField(es)[cells[1]] <= g.droneRange(fr), 'con más alcance, otra');
+    return true;
+}],
+['B6 · las operaciones aéreas de la IA buscan las baterías que conocen', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+    g.start(pt); T.bare(g); g.declareWar(es, fr);
+    const [, e] = T.border(g, es, fr), base = T.baseFor(g, es, e);
+    T.airfield(g, es, base); T.squad(g, es, base, 2);
+    const b = T.battery(g, fr, e);
+    T.eq(g.airTargets(es, [e], ['aa']).length, 0, 'desconocida, no');
+    b.known.add(es);
+    T.eq(g.airTargets(es, [e], ['aa']).map(x => [x.kind, x.cell]), [['aa', e]], 'conocida, sí');
+    return true;
+}],
 ];
 
 const exe = process.env.CHROME ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome'].find(existsSync);
