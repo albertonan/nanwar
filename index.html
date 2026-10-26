@@ -913,6 +913,20 @@ const baseRules = () => ({
 const BASE_RULES = baseRules();
 // Armas nucleares: la investigación que las da y las potencias que ya las tienen al empezar (las que estén en el mapa).
 const NUKE_TECH = 'estrategicas3', NUKE_POWERS = ['us', 'ru', 'cn', 'fr', 'gb', 'in', 'pk', 'il', 'kp'];
+// Arsenal nacional (parte C): las seis armas. `cls`: su clase para las defensas (DEFENSE_CLASSES); `km`: alcance;
+// `from`: desde dónde se lanza ('army' un ejército propio, 'armyOrCity' un ejército o una ciudad, 'city' una ciudad);
+// `turns` y `min`: precio en turnos de renta (sin el mantenimiento del arsenal) y su mínimo; `upkeep`: oro por turno y
+// unidad; `needs`: la regla (baseRules) que la permite, o null si no hace falta investigar.
+const WEAPONS = {
+    rocket:      { name: 'Cohete',        cls: 'rocket',      km: 80,   from: 'army',       turns: 1,  min: 150,  upkeep: 5,   needs: null },
+    heavyRocket: { name: 'Cohete pesado', cls: 'heavyRocket', km: 300,  from: 'armyOrCity', turns: 2,  min: 300,  upkeep: 10,  needs: 'rocketHeavy' },
+    missile:     { name: 'Misil',         cls: 'missile',     km: 500,  from: 'city',       turns: 4,  min: 600,  upkeep: 20,  needs: 'missile' },
+    heavy:       { name: 'Misil pesado',  cls: 'heavy',       km: 2500, from: 'city',       turns: 8,  min: 1200, upkeep: 40,  needs: 'missileHeavy' },
+    guided:      { name: 'Misil guiado',  cls: 'guided',      km: 1500, from: 'city',       turns: 6,  min: 900,  upkeep: 30,  needs: 'guided' },
+    nuclear:     { name: 'Bomba nuclear', cls: 'nuclear',     km: 8000, from: 'city',       turns: 25, min: 5000, upkeep: 150, needs: 'nuclear' }
+};
+const WEAPON_KEYS = Object.keys(WEAPONS);
+const emptyArsenal = () => Object.fromEntries(WEAPON_KEYS.map(k => [k, 0]));
 const RESEARCH_AREAS = ['Militar', 'Estado', 'Terreno', 'Inteligencia'];
 const RESEARCH_BRANCHES = [
     { id: 'infanteria', area: 'Militar', name: 'Infantería', sub: 'Atributos de la infantería', icon: 'inf' },
@@ -1354,7 +1368,8 @@ class GameEngine {
             id, key: c.key, name: c.name, color: c.color,
             capitalCell: PROVINCES[c.capital].city, capitalName: PROVINCES[c.capital].cityName,
             gold: 0, alive: true, recruited: new Map(), overlord: -1, templates: [], groups: [], command: newCommand(),
-            tech: { done: new Set(), progress: new Map(), current: [] },  // investigación: hechas, turnos invertidos, en curso
+            tech: { done: new Set(), progress: new Map(), current: [], seeded: new Set() },  // investigación: hechas, turnos invertidos, en curso; seeded: las de partida (no encarecen)
+            arsenal: emptyArsenal(),   // armas compradas por tipo (WEAPONS)
             lastTurn: 0,   // último turno en que empezó a jugar (ver nextOwnTurn)
             airFund: 0   // oro que la IA aparta para su próximo escuadrón (ver aiRecruit)
         }));
@@ -1409,7 +1424,7 @@ class GameEngine {
             if (!NUKE_POWERS.includes(nat.key)) continue;
             for (const t of ['estrategicas1', 'estrategicas2', NUKE_TECH]) {
                 if (nat.tech.done.has(t) === this.settings.nukes) continue;
-                this.settings.nukes ? nat.tech.done.add(t) : nat.tech.done.delete(t);
+                if (this.settings.nukes) { nat.tech.done.add(t); nat.tech.seeded.add(t); } else { nat.tech.done.delete(t); nat.tech.seeded.delete(t); }
                 this.techVersion++;
             }
         }
@@ -1458,7 +1473,8 @@ class GameEngine {
             sieges: [...this.sieges].map(([c, s]) => [c, s.by, s.prev, s.held]),
             nations: this.nations.map(n => ({ gold: n.gold, airFund: n.airFund, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord, templates: n.templates, command: n.command,
                 groups: n.groups.map(x => ({ id: x.id, num: x.num, name: x.name, color: x.color, custom: x.custom, order: x.order, reinforce: x.reinforce, ...(x.air ? { air: true } : {}) })),
-                tech: { done: [...n.tech.done], progress: [...n.tech.progress], current: [...n.tech.current] } })),
+                tech: { done: [...n.tech.done], progress: [...n.tech.progress], current: [...n.tech.current], seeded: [...n.tech.seeded] },
+                arsenal: n.arsenal })),
             relations,
             armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used, a.hunger || 0, a.disorgUntil || 0, a.units.antiair || 0]),
             nextArmyId: this.nextArmyId,
@@ -1591,7 +1607,8 @@ class GameEngine {
                 if (t && !done.has(t.id) && ready(t) && Number.isInteger(p) && p >= 0 && p < CONFIG.RESEARCH.TURNS[t.tier - 1]) progress.set(t.id, p);
             }
             const current = [...new Set(list(v?.current).map(x => str(x, 40)))].filter(x => progress.has(x)).slice(0, done.has('ciencia3') ? 2 : 1);
-            return { done, progress, current };
+            const seeded = new Set(list(v?.seeded).map(x => str(x, 40)).filter(x => done.has(x)));
+            return { done, progress, current, seeded };
         };
         // Agrupaciones: ids únicos entre todos los países, números 1–99 sin repetir en el país, color de la paleta, nombre
         // acotado (sin nombre, el automático) y orden de ataque solo contra una casilla de tierra. Sus miembros y las
@@ -1646,6 +1663,7 @@ class GameEngine {
             groups: groupsOf(n?.groups),
             templates: list(n?.templates).slice(0, TPL_OWN_MAX).map(t => ({ name: str(t?.name, 40) || 'Plantilla', units: units(t?.units, TPL_MAX) }))
                 .filter(t => countUnits(t.units) > 0),
+            arsenal: Object.fromEntries(WEAPON_KEYS.map(k => [k, int(n?.arsenal?.[k], 0, 1e6, 0)])),
             tech: techOf(n?.tech)
         }));
         g.techVersion++;   // lo calculado hasta aquí no conocía la investigación
@@ -2076,7 +2094,58 @@ class GameEngine {
         const inn = this.satellitesOf(id).reduce((s, x) => s + Math.round(this.economy(x).total * CONFIG.TRIBUTE), 0);
         return { in: inn, out };
     }
-    income(id) { const t = this.tribute(id); return this.economy(id).total - t.out + t.in; }
+    // Renta sin el mantenimiento del arsenal: con ella se fijan los precios (satélites, armas, investigaciones).
+    grossIncome(id) { const t = this.tribute(id); return this.economy(id).total - t.out + t.in; }
+    income(id) { return this.grossIncome(id) - this.arsenalUpkeep(id); }
+    // --- Arsenal (parte C): armas compradas, con mantenimiento por turno que se resta de la renta ---
+    arsenalUpkeep(id) { return WEAPON_KEYS.reduce((s, k) => s + this.nations[id].arsenal[k] * WEAPONS[k].upkeep, 0); }
+    // Precio de una arma: sus turnos de renta (sin mantenimiento) y nunca menos de su mínimo.
+    weaponPrice(id, key) { const w = WEAPONS[key]; return Math.max(w.min, Math.round(w.turns * this.grossIncome(id))); }
+    // '' si `id` puede comprar `n` de `key` ahora; si no, el motivo.
+    canBuyWeapon(id, key, n = 1) {
+        const w = WEAPONS[key];
+        if (!w) return 'Arma desconocida.';
+        if (!Number.isInteger(n) || n < 1) return 'Cantidad no válida.';
+        if (key === 'nuclear' && !this.settings.nukes) return 'Las armas nucleares están prohibidas en esta partida.';
+        if (w.needs && !this.rules(id)[w.needs]) return `Hace falta investigar ${this.weaponTech(w.needs)}.`;
+        const cost = this.weaponPrice(id, key) * n;
+        if (this.nations[id].gold < cost) return `Fondos insuficientes: ${n > 1 ? `${n} cuestan` : 'cuesta'} ${cost}g.`;
+        return '';
+    }
+    // Nombre de la investigación que da una regla de arma.
+    weaponTech(flag) {
+        const t = TECHS.find(x => x.fx?.[flag]);
+        return t ? `${t.name} (${BRANCH_BY_ID.get(t.branch).name} ${t.tier})` : flag;
+    }
+    buyWeapon(id, key, n = 1) {
+        if (this.canBuyWeapon(id, key, n)) return false;
+        this.nations[id].gold -= this.weaponPrice(id, key) * n;
+        this.nations[id].arsenal[key] += n;
+        return true;
+    }
+    playerBuyWeapon(key, n = 1) {
+        if (this.over) return false;
+        const p = this.player, why = this.canBuyWeapon(p, key, n);
+        if (why) { this.log(why); return false; }
+        const cost = this.weaponPrice(p, key) * n;
+        this.buyWeapon(p, key, n);
+        this.log(`Compras ${n > 1 ? `${n} × ` : ''}${WEAPONS[key].name.toLowerCase()} por ${cost} de oro: mantenimiento +${WEAPONS[key].upkeep * n} por turno.`);
+        return true;
+    }
+    // Si el mantenimiento dejaría el oro de `id` por debajo de 0 al cobrar, desmantela armas (primero las de más
+    // mantenimiento) hasta que no. Devuelve lo desmantelado por tipo.
+    dismantle(id) {
+        const n = this.nations[id], out = {};
+        const order = [...WEAPON_KEYS].sort((a, b) => WEAPONS[b].upkeep - WEAPONS[a].upkeep);
+        while (n.gold + this.income(id) < 0) {
+            const k = order.find(x => n.arsenal[x] > 0);
+            if (!k) break;
+            n.arsenal[k]--; out[k] = (out[k] || 0) + 1;
+        }
+        const list = Object.entries(out).map(([k, c]) => `${c} × ${WEAPONS[k].name.toLowerCase()}`);
+        if (list.length && id === this.player) this.log(`Sin oro para el mantenimiento del arsenal: se desmantelan ${list.join(', ')}.`);
+        return out;
+    }
     // Alcance del suministro: casillas propias o aliadas cerca de la red de carreteras unida a la capital (por tierra o por
     // mar, de puerto a puerto) o de una ciudad propia.
     // Devuelve, por casilla, el alcance que le queda (−1 = sin suministro).
@@ -2729,7 +2798,7 @@ class GameEngine {
     }
     // --- Satélites (rama Espacio): vigilan un círculo del mapa durante unos turnos; no se derriban ni se comparten ---
     // Precio de un satélite: unos 20 turnos de renta, y nunca menos de 1000.
-    satCost(id) { return Math.max(1000, 20 * this.income(id)); }
+    satCost(id) { return Math.max(1000, 20 * this.grossIncome(id)); }
     // Radio de lo que ve un satélite de `id`, en casillas.
     satRadius(id) { return kmCells(this.rules(id).satRangeKm); }
     satsOf(id) { return this.sats.filter(s => s.owner === id); }
@@ -8028,10 +8097,12 @@ class GameEngine {
     techTurns(id, techId) { return Math.max(1, Math.round(CONFIG.RESEARCH.TURNS[TECH_BY_ID.get(techId).tier - 1] * this.rules(id).researchTurns)); }
     techProgress(id, techId) { return Math.min(this.nations[id].tech.progress.get(techId) ?? 0, this.techTurns(id, techId) - 1); }
     // Oro de una investigación: turnos de renta según el nivel, un 10 % más por cada una ya terminada.
+    // Las investigaciones terminadas que encarecen las siguientes: no cuentan las de partida (potencias nucleares).
+    researchedCount(id) { const t = this.nations[id].tech; return t.done.size - [...t.seeded].filter(x => t.done.has(x)).length; }
     researchCost(id, techId) {
         const R = CONFIG.RESEARCH, i = TECH_BY_ID.get(techId).tier - 1;
-        const base = Math.max(R.COST_MIN[i], this.income(id) * R.COST_TURNS[i]);
-        return Math.round(base * (1 + R.COST_GROWTH * this.nations[id].tech.done.size) * this.rules(id).researchCost);
+        const base = Math.max(R.COST_MIN[i], this.grossIncome(id) * R.COST_TURNS[i]);
+        return Math.round(base * (1 + R.COST_GROWTH * this.researchedCount(id)) * this.rules(id).researchCost);
     }
     techState(id, techId) {
         const s = this.nations[id].tech, t = TECH_BY_ID.get(techId);
@@ -8208,6 +8279,7 @@ class GameEngine {
             grew = true;
         }
         if (grew) this.devVersion++;
+        this.dismantle(id);   // sin oro para el mantenimiento del arsenal, se desmantelan armas
         const inc = this.income(id);
         this.nations[id].gold += inc;
         return inc;
@@ -13786,7 +13858,7 @@ class GameUI {
             <div class="rs-deltas">${t.changes.map(([k, a, b]) => `<div><span>${k}</span><b><s>${a}</s>${uiIcon('arrow', 14)}<em>${b}</em></b></div>`).join('')}</div>
             ${action}<p class="tip">${t.note}</p></div>`;
 
-        const growth = Math.round(CONFIG.RESEARCH.COST_GROWTH * 100 * s.done.size);
+        const growth = Math.round(CONFIG.RESEARCH.COST_GROWTH * 100 * g.researchedCount(p0));
         $('#research-body').innerHTML = `<div class="rs-head"><h2>Investigación</h2>
             <span class="muted">${plural(s.done.size, 'terminada', 'terminadas')}${growth ? ` · cada nueva cuesta un ${growth} % más` : ''}</span>
             <button class="btn ghost" data-action="close-research" aria-label="Cerrar">Cerrar <kbd>Esc</kbd></button></div>
@@ -13982,6 +14054,7 @@ class GameUI {
             <dt>Recursos</dt><dd>+${e.res}${counts ? ` (${counts})` : ''}${e.looseResources.length ? `<br><span class="small muted">${plural(e.looseResources.length, 'yacimiento', 'yacimientos')} sin carretera: solo abastecen a su provincia</span>` : ''}</dd>
             ${tr.in || tr.out ? `<dt>Tributo</dt><dd>${tr.in ? `+${tr.in}` : ''}${tr.out ? ` −${tr.out}` : ''}</dd>` : ''}
             ${e.capitalLost ? `<dt>Capital</dt><dd class="warn-text">perdida: tus yacimientos y tu industria rinden la mitad hasta que la recuperes</dd>` : ''}
+            ${g.arsenalUpkeep(id) ? `<dt>Mantenimiento del arsenal</dt><dd>−${g.arsenalUpkeep(id)}</dd>` : ''}
             <dt>Total</dt><dd><b>${g.income(id)} de oro por turno</b></dd>
             <dt>Precios en la capital</dt><dd>${g.recruitTypes(id).map(k => `${CONFIG.TYPES[k].name.toLowerCase()} ${g.unitCost(id, k, G.prov[g.nations[id].capitalCell])}`).join(', ')}</dd>
         </dl>`;

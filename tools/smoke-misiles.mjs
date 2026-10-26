@@ -219,6 +219,115 @@ const CHECKS = [
         document.querySelector('#research-dialog').close();
         T.ok(/prohibid/i.test(txt), `sin motivo en la ficha: ${txt}`);
         return true;
+    }],
+    ['C1 · precio en turnos de renta con mínimo', () => {
+        const g = T.game(), id = T.nation('es'), gross = g.grossIncome(id);
+        T.ok(gross > 0, 'renta');
+        for (const [k, turns, min] of [['rocket', 1, 150], ['heavyRocket', 2, 300], ['missile', 4, 600], ['heavy', 8, 1200], ['guided', 6, 900], ['nuclear', 25, 5000]]) {
+            T.eq(g.weaponPrice(id, k), Math.max(min, turns * gross), `precio de ${k}`);
+        }
+        // Con una renta alta manda la renta; con una baja, el mínimo.
+        T.eq(g.weaponPrice(T.nation('fr'), 'nuclear'), Math.max(5000, 25 * g.grossIncome(T.nation('fr'))), 'Francia');
+        // El mantenimiento del arsenal no cambia el precio.
+        g.nations[id].arsenal.nuclear = 3;
+        T.eq(g.weaponPrice(id, 'missile'), Math.max(600, 4 * gross), 'precio con arsenal');
+        return true;
+    }],
+    ['C1 · el mantenimiento baja la renta', () => {
+        const g = T.game(), id = T.nation('es'), gross = g.grossIncome(id);
+        T.eq(g.income(id), gross, 'sin arsenal');
+        g.nations[id].arsenal.rocket = 4; g.nations[id].arsenal.guided = 2;
+        T.eq(g.arsenalUpkeep(id), 4 * 5 + 2 * 30, 'mantenimiento');
+        T.eq(g.income(id), gross - 80, 'renta neta');
+        g.nations[id].gold = 1000;
+        const got = g.beginNationTurn(id);   // el desarrollo puede subir la renta un poco al cobrar
+        T.eq(got, g.income(id), 'cobro');
+        T.eq(g.nations[id].gold, 1000 + got, 'oro');
+        T.eq(got, g.grossIncome(id) - 80, 'neto');
+        // Desglose en el resumen del país.
+        T.uiStart('es');
+        ui.game.nations[ui.game.player].arsenal.missile = 1;
+        T.ok(/Mantenimiento del arsenal\s*−20/.test(ui.economyFacts(ui.game.player).replace(/<[^>]+>/g, ' ')), 'sin línea en el desglose');
+        return true;
+    }],
+    ['C1 · sin oro se desmantela y nunca queda negativo', () => {
+        const g = T.game(), id = T.nation('es'), n = g.nations[id], gross = g.grossIncome(id);
+        n.arsenal.rocket = 10; n.arsenal.heavy = 5;   // 50 + 200
+        n.gold = 0;
+        const up = g.arsenalUpkeep(id);
+        T.ok(up > gross, 'el mantenimiento debe pasar de la renta');
+        g.player = id;
+        g.beginNationTurn(id);
+        T.ok(n.gold >= 0, `oro negativo: ${n.gold}`);
+        T.ok(g.income(id) >= 0, 'renta neta negativa');
+        // Primero los de más mantenimiento: los misiles pesados caen antes que los cohetes.
+        T.ok(n.arsenal.heavy < 5, 'no se quitó ninguno pesado');
+        if (n.arsenal.heavy > 0) T.eq(n.arsenal.rocket, 10, 'cohetes intactos mientras queden pesados');
+        T.ok(g.logs.some(l => /desmantelan/.test(l.msg)), 'sin aviso');
+        // Con oro de sobra no se toca nada.
+        n.arsenal.heavy = 1; n.arsenal.rocket = 0; n.gold = 100000;
+        g.beginNationTurn(id);
+        T.eq(n.arsenal.heavy, 1, 'con oro no se desmantela');
+        return true;
+    }],
+    ['C1 · comprar exige la investigación', () => {
+        const g = T.game(), id = T.nation('es'), n = g.nations[id];
+        n.gold = 1e7;
+        g.player = id;
+        T.eq(g.canBuyWeapon(id, 'rocket'), '', 'el cohete no pide nada');
+        const steps = [['heavyRocket', 'cohete1'], ['missile', 'cohete2'], ['heavy', 'cohete3'], ['guided', 'estrategicas1'], ['nuclear', 'estrategicas3']];
+        for (const [k, t] of steps) {
+            T.ok(g.canBuyWeapon(id, k) !== '', `${k} sin ${t}`);
+            T.eq(g.buyWeapon(id, k), false, `compra de ${k} sin investigar`);
+            T.learn(g, id, t);
+            T.eq(g.canBuyWeapon(id, k), '', `${k} con ${t}`);
+        }
+        const gold = n.gold, price = g.weaponPrice(id, 'heavy');
+        T.eq(g.buyWeapon(id, 'heavy', 2), true, 'compra');
+        T.eq(n.arsenal.heavy, 2, 'arsenal');
+        T.eq(n.gold, gold - 2 * price, 'oro');
+        n.gold = 10;
+        T.ok(g.canBuyWeapon(id, 'rocket') !== '', 'sin oro');
+        T.eq(g.playerBuyWeapon('rocket'), false, 'jugador sin oro');
+        n.gold = 1e7;
+        T.eq(g.playerBuyWeapon('rocket', 3), true, 'jugador compra');
+        T.eq(n.arsenal.rocket, 3, 'cohetes');
+        // Con las nucleares prohibidas no se compra, aunque se tenga la investigación.
+        g.configure({ ...g.settings, nukes: false });
+        T.ok(/prohibid/.test(g.canBuyWeapon(id, 'nuclear')), 'prohibida');
+        T.eq(g.buyWeapon(id, 'nuclear'), false, 'compra prohibida');
+        return true;
+    }],
+    ['C1 · guardar y cargar el arsenal', () => {
+        const g = T.game(), id = T.nation('es');
+        Object.assign(g.nations[id].arsenal, { rocket: 3, heavy: 2, nuclear: 1 });
+        const data = JSON.parse(JSON.stringify(g.serialize()));
+        T.eq(GameEngine.load(data).nations[id].arsenal, g.nations[id].arsenal, 'ida y vuelta');
+        // Partida vieja: sin arsenal, vacío. Valores raros, acotados.
+        for (const n of data.nations) delete n.arsenal;
+        T.eq(GameEngine.load(data).nations[id].arsenal, { rocket: 0, heavyRocket: 0, missile: 0, heavy: 0, guided: 0, nuclear: 0 }, 'partida vieja');
+        data.nations[id].arsenal = { rocket: -5, heavy: 'x', guided: 7.9 };
+        const a = GameEngine.load(data).nations[id].arsenal;
+        T.ok(a.rocket >= 0 && a.heavy === 0 && Number.isInteger(a.guided), `validación: ${JSON.stringify(a)}`);
+        return true;
+    }],
+    ['C4 · las investigaciones de partida no encarecen las siguientes', () => {
+        const g = T.game(), us = T.nation('fr'), es = T.nation('es');
+        T.eq(g.nations[us].tech.done.size, 3, 'Francia empieza con tres');
+        T.eq(g.researchedCount(us), 0, 'ninguna cuenta');
+        // La misma investigación cuesta lo mismo (a igual renta) a una potencia nuclear que a quien no ha investigado nada.
+        const ref = g.researchCost(us, 'infanteria1') / g.grossIncome(us), cost = id => Math.max(80, g.grossIncome(id) * 4);
+        T.eq(g.researchCost(us, 'infanteria1'), Math.round(cost(us) * g.rules(us).researchCost), 'sin recargo');
+        // Una investigación hecha de verdad sí encarece un 10 %.
+        T.learn(g, us, 'infanteria1');
+        T.eq(g.researchedCount(us), 1, 'una cuenta');
+        T.eq(g.researchCost(us, 'infanteria2') > 0 && g.researchedCount(us), 1, 'una');
+        T.ok(ref > 0, 'ref');
+        // Se guarda y se carga.
+        const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+        T.eq(h.researchedCount(us), 1, 'tras cargar');
+        T.eq(h.researchedCount(es), 0, 'España');
+        return true;
     }]
 ];
 
