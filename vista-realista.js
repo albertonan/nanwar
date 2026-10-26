@@ -114,14 +114,16 @@ function strokeChunks(x, chunks, rect, m = 2) {
 
 // ---------------------------------------------------------------------------------------------------------------
 // Animación de ejércitos. El motor apunta en game.motion lo que pasa ({kind:'move', cells...}, {kind:'battle'...} y las
-// misiones aéreas, {kind:'air', from, cell, result...}); la vista lo reproduce encadenado por ejército. La partida ya
-// está resuelta: esto solo enseña cómo ha ocurrido.
+// misiones aéreas, {kind:'air', from, cell, result...}, y los lanzamientos de cohetes y misiles, {kind:'strike', from, cell,
+// weapon, n, through}); la vista lo reproduce encadenado por ejército. La partida ya está resuelta: esto solo enseña cómo
+// ha ocurrido.
 class ArmyMotion {
     constructor(view) {
         this.view = view;
         this.tracks = new Map();   // id → [tramos pendientes o en curso]
         this.fx = [];              // combates
         this.air = [];             // misiones aéreas: un trazo de cada base al blanco
+        this.strikes = [];         // lanzamientos: unos arcos del lanzador al blanco, los interceptados cortados (strikeOf)
         this.particles = [];
         this.busy = new Map();     // id → instante en que queda libre
         this.speed = 1;            // multiplicador de duración (velocidad de la repetición de la IA)
@@ -131,7 +133,7 @@ class ArmyMotion {
         if (pose?.moving) this.facings.set(id, pose.facing);
         return this.facings.get(id) ?? 1;
     }
-    clear() { this.tracks.clear(); this.fx = []; this.air = []; this.particles = []; this.busy.clear(); }
+    clear() { this.tracks.clear(); this.fx = []; this.air = []; this.strikes = []; this.particles = []; this.busy.clear(); }
     stepMs(u, v) {
         if (!this.view.isRealistic()) return 70 * this.speed;
         const g = this.view.game, d = G.dirTo(u, v);
@@ -172,8 +174,30 @@ class ArmyMotion {
             } else if (ev.kind === 'air') {   // se ve si es del jugador o si ve el blanco
                 if (ev.owner !== g.player && !this.visible([ev.cell])) continue;
                 this.air.push({ from: ev.from, cell: ev.cell, owner: ev.owner, result: ev.result, mission: ev.mission, start: now, end: now + 900 * this.speed, done: false });
+            } else if (ev.kind === 'strike') {   // se ve si es del jugador o si ve el blanco o el lanzador; la nuclear, siempre
+                if (ev.weapon !== 'nuclear' && ev.owner !== g.player && !this.visible([ev.cell, ev.from])) continue;
+                // Si solo ve el lanzador, los arcos salen y se pierden en el blanco: sin intercepciones, impactos ni
+                // «llegan X de N», que la niebla no le diría.
+                const blind = ev.weapon !== 'nuclear' && ev.owner !== g.player && !this.visible([ev.cell]);
+                this.strikes.push(this.strikeOf(blind ? { ...ev, through: ev.n, blind } : ev, now));
             }
         }
+    }
+    // Un lanzamiento para animarlo: como mucho STRIKE_ARCS arcos (una salva mayor, en proporción), cada uno con su salida
+    // escalonada; los interceptados, repartidos entre ellos, se cortan entre el 62 y el 82 % del camino. Cada arco sube a
+    // su altura (`lift`, parte de la distancia) y cae cerca del blanco (`dx`, `dy`, en casillas), para que no se tapen.
+    strikeOf(ev, now) {
+        const k = Math.min(ev.n, STRIKE_ARCS), lost = ev.n - ev.through;
+        const cut = !lost ? 0 : !ev.through ? k : Math.min(k - 1, Math.max(1, Math.round(k * lost / ev.n)));
+        const flight = (ev.weapon === 'nuclear' ? 1500 : 1100) * this.speed, gap = 110 * this.speed, arcs = [];
+        for (let i = 0; i < k; i++) {
+            const isCut = Math.floor((i + 1) * cut / k) > Math.floor(i * cut / k), start = now + i * gap;
+            const stop = isCut ? 0.62 + 0.2 * ((i * 7) % 5) / 4 : 1;
+            arcs.push({ start, end: start + flight, stop, cut: isCut, lift: 0.1 + 0.14 * ((i * 3) % 4) / 3,
+                dx: k > 1 ? ((i % 3) - 1) * 0.32 : 0, dy: k > 1 ? (((i + 1) % 3) - 1) * 0.22 : 0, done: false });
+        }
+        const end = Math.max(...arcs.map(a => a.start + (a.end - a.start) * a.stop));
+        return { ...ev, arcs, start: now, end, hold: STRIKE_HOLD * this.speed };
     }
     // Posición de un ejército en este instante, o null si está quieto en su casilla.
     pose(id, now) {
@@ -207,13 +231,15 @@ class ArmyMotion {
         for (const q of this.tracks.values()) for (const t of q) end = Math.max(end, t.end);
         for (const f of this.fx) end = Math.max(end, f.end);
         for (const t of this.air) end = Math.max(end, t.end);
+        for (const t of this.strikes) end = Math.max(end, t.end);
         return end - now;
     }
     active(now) {
         this.fx = this.fx.filter(f => now < f.end + 600);
         this.air = this.air.filter(t => now < t.end + 700);
+        this.strikes = this.strikes.filter(t => now < t.end + t.hold + 700);
         this.particles = this.particles.filter(p => now - p.t0 < p.life);
-        return this.tracks.size > 0 || this.fx.length > 0 || this.air.length > 0 || this.particles.length > 0;
+        return this.tracks.size > 0 || this.fx.length > 0 || this.air.length > 0 || this.strikes.length > 0 || this.particles.length > 0;
     }
     spawn(kind, x, y, extra = {}) { this.particles.push({ kind, x, y, t0: performance.now(), life: 600, vx: 0, vy: 0, ...extra }); }
     // Polvo tras las miniaturas y fogonazos y humo en los combates (vista realista); un aro rojo en la sencilla. Al llegar
@@ -253,6 +279,21 @@ class ArmyMotion {
                 for (let i = 0; i < 4; i++) this.spawn('smoke', tx + (Math.random() - 0.5) * 1.6, ty - 0.2 + (Math.random() - 0.5), { life: 1600, vy: -0.0009, g: 70 + Math.random() * 50 });
             } else this.spawn('smoke', tx, ty - 0.2, { life: 1200, vy: -0.0006, g: 180 });
         }
+        // Lanzamientos: el que interceptan, un fogonazo y humo en el aire (en la realista; el destello va en
+        // drawStrikeTrails); el que llega, fogonazo y humo en el blanco (en la sencilla, el aro). La nuclear, mucho humo.
+        for (const t of this.strikes) for (const a of t.arcs) {
+            const at = a.start + (a.end - a.start) * a.stop;
+            if (a.done || now < at) continue;
+            a.done = true;
+            if (t.blind) continue;   // blanco que no ve: nada en él
+            const [x, y] = strikePoint(t, a, a.stop);
+            if (a.cut) { if (real) { this.spawn('flash', x, y, { life: 260 }); this.spawn('smoke', x, y, { life: 1300, vy: -0.0004, g: 200 }); } continue; }
+            if (!real) { this.spawn('ring', x, y, { life: t.weapon === 'nuclear' ? 1400 : 650 }); continue; }
+            const big = t.weapon === 'nuclear' ? 14 : t.weapon === 'heavy' ? 6 : 3;
+            this.spawn('flash', x, y - 0.3, { life: t.weapon === 'nuclear' ? 900 : 240 });
+            for (let i = 0; i < big; i++) this.spawn('smoke', x + (Math.random() - 0.5) * 1.6 * Math.sqrt(big), y - 0.2 + (Math.random() - 0.5) * Math.sqrt(big),
+                { life: t.weapon === 'nuclear' ? 3200 : 1600, vy: -0.0009, g: 60 + Math.random() * 60 });
+        }
     }
     shake(id, now) {
         for (const f of this.fx) if ((f.att === id || f.def === id) && now >= f.start && now < f.end) return [Math.sin(now / 23 + id) * 1.8, Math.cos(now / 31) * 1];
@@ -261,7 +302,8 @@ class ArmyMotion {
     drawParticles(ctx, view, now) {
         const s = view.scale;
         for (const p of this.particles) {
-            const t = (now - p.t0) / p.life, [x, y] = view.toScreen(p.x + p.vx * (now - p.t0), p.y + p.vy * (now - p.t0));
+            // spawn la fecha con performance.now(), que puede ser posterior al now del fotograma: sin edades negativas
+            const age = Math.max(0, now - p.t0), t = age / p.life, [x, y] = view.toScreen(p.x + p.vx * age, p.y + p.vy * age);
             if (p.kind === 'dust') { ctx.fillStyle = `rgba(196,178,138,${0.42 * (1 - t)})`; ctx.beginPath(); ctx.arc(x, y, (0.25 + t * 0.7) * s, 0, TAU); ctx.fill(); }
             else if (p.kind === 'smoke') { ctx.fillStyle = `rgba(${p.g | 0},${p.g | 0},${p.g | 0},${0.5 * (1 - t)})`; ctx.beginPath(); ctx.arc(x, y, (0.4 + t * 1.3) * s, 0, TAU); ctx.fill(); }
             else if (p.kind === 'flash') {
@@ -314,6 +356,95 @@ function drawAirTrails(ctx, view, now) {
                 ctx.beginPath(); ctx.arc(hx, hy, 3.8, 0, TAU);
                 ctx.fillStyle = color; ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = real ? '#fff' : INK; ctx.stroke();
             }
+        }
+    }
+    ctx.restore();
+}
+
+// Lanzamientos de cohetes y misiles. Cada arco es una curva de Bézier del lanzador al blanco que sube una parte de la
+// distancia (`lift`); como mucho STRIKE_ARCS arcos por salva, y se ven STRIKE_HOLD ms (× la velocidad de la repetición)
+// tras acabar antes de apagarse.
+const STRIKE_ARCS = 8, STRIKE_HOLD = 900;
+// Punto del arco `a` del lanzamiento `t` al `u` (0–1) del camino, en coordenadas del mapa. El arco se abomba hacia un
+// lado del camino, el que mira hacia arriba (en uno de norte a sur, hacia el oeste), para que se vea curvo vaya hacia
+// donde vaya; cada arco de la salva, con su altura (`lift`), en abanico.
+function strikePoint(t, a, u) {
+    const ax = G.cx[t.from], ay = G.cy[t.from], bx = G.cx[t.cell] + a.dx * G.W, by = G.cy[t.cell] + a.dy * G.W;
+    const d = Math.hypot(bx - ax, by - ay) || 1;
+    let nx = -(by - ay) / d, ny = (bx - ax) / d;
+    if (ny > 0 || (ny === 0 && nx > 0)) { nx = -nx; ny = -ny; }
+    const cx = (ax + bx) / 2 + nx * d * a.lift * 2, cy = (ay + by) / 2 + ny * d * a.lift * 2, v = 1 - u;
+    return [v * v * ax + 2 * v * u * cx + u * u * bx, v * v * ay + 2 * v * u * cy + u * u * by];
+}
+// Los lanzamientos en vuelo, en píxeles de pantalla, con el estilo de las misiones aéreas: en la realista, la estela
+// blanca que se desvanece detrás de la cabeza; en la sencilla, el arco a trazos sobre un filete oscuro, del color de los
+// cohetes. La cabeza, un punto del color del país. El interceptado se corta en el aire con un destello (una estrella de
+// rayos amarillos y, en la realista, además un halo); la nuclear que llega, una luz que se abre hasta su radio. Al
+// acabar, sobre el blanco, lo que ha llegado («llegan 2 de 6»). Todo se apaga en 700 ms pasado su `hold`.
+function drawStrikeTrails(ctx, view, now) {
+    const M = view.motion;
+    if (!M.strikes.length) return;
+    const real = view.isRealistic(), g = view.game, s = view.scale;
+    ctx.save();
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    for (const t of M.strikes) {
+        const fade = clamp01(1 - (now - t.end - t.hold) / 700), color = g.nations[t.owner].color;
+        for (const a of t.arcs) {
+            const u = Math.min(a.stop, (now - a.start) / (a.end - a.start));
+            if (u <= 0) continue;
+            const from = real ? Math.max(0, u - 0.35) : 0, pts = [];
+            for (let k = 0; k <= 24; k++) pts.push(view.toScreen(...strikePoint(t, a, from + (u - from) * k / 24)));
+            const path = new Path2D();
+            pts.forEach(([x, y], k) => (k ? path.lineTo(x, y) : path.moveTo(x, y)));
+            const [hx, hy] = pts[pts.length - 1];
+            if (real) {
+                const gr = ctx.createLinearGradient(pts[0][0], pts[0][1], hx, hy);
+                gr.addColorStop(0, 'rgba(255,255,255,0)'); gr.addColorStop(1, `rgba(255,255,255,${0.9 * fade})`);
+                ctx.strokeStyle = gr; ctx.lineWidth = 2.2; ctx.stroke(path);
+            } else {
+                ctx.globalAlpha = fade; ctx.setLineDash([5, 4]);
+                ctx.strokeStyle = INK; ctx.lineWidth = 3.6; ctx.stroke(path);
+                ctx.strokeStyle = '#ff9f7a'; ctx.lineWidth = 1.8; ctx.stroke(path);
+                ctx.setLineDash([]); ctx.globalAlpha = 1;
+            }
+            if (u < a.stop) {   // la cabeza
+                ctx.beginPath(); ctx.arc(hx, hy, 3.2, 0, TAU);
+                ctx.fillStyle = color; ctx.fill(); ctx.lineWidth = 1.4; ctx.strokeStyle = real ? '#fff' : INK; ctx.stroke();
+            } else if (a.cut) {   // el destello de la intercepción
+                const k = clamp01((now - a.start - (a.end - a.start) * a.stop) / 220), r = (6 + 5 * k) * fade;
+                if (real) {
+                    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+                    const gl = ctx.createRadialGradient(hx, hy, 0, hx, hy, r * 2);
+                    gl.addColorStop(0, `rgba(255,244,200,${0.85 * fade})`); gl.addColorStop(1, 'rgba(255,170,60,0)');
+                    ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(hx, hy, r * 2, 0, TAU); ctx.fill(); ctx.restore();
+                }
+                const star = new Path2D();
+                for (let i = 0; i < 8; i++) {
+                    const ang = i * Math.PI / 4 + 0.2, q = i % 2 ? 0.55 : 1;
+                    star.moveTo(hx + Math.cos(ang) * r * 0.35, hy + Math.sin(ang) * r * 0.35); star.lineTo(hx + Math.cos(ang) * r * q, hy + Math.sin(ang) * r * q);
+                }
+                ctx.globalAlpha = fade;
+                ctx.strokeStyle = INK; ctx.lineWidth = 3.4; ctx.stroke(star);
+                ctx.strokeStyle = SIGNAL; ctx.lineWidth = 1.8; ctx.stroke(star);
+                ctx.globalAlpha = 1;
+            } else if (t.weapon === 'nuclear') {   // la luz de la bomba, hasta su radio
+                const k = clamp01((now - a.end) / 900), R = (kmCells(NUKE.KM) + 0.5) * G.W * s * (0.35 + 0.65 * k), f = fade * (1 - 0.6 * k);
+                ctx.save(); ctx.globalCompositeOperation = 'lighter';
+                const gl = ctx.createRadialGradient(hx, hy, 0, hx, hy, R);
+                gl.addColorStop(0, `rgba(255,250,225,${0.95 * f})`); gl.addColorStop(0.55, `rgba(255,190,90,${0.55 * f})`); gl.addColorStop(1, 'rgba(255,120,40,0)');
+                ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(hx, hy, R, 0, TAU); ctx.fill(); ctx.restore();
+            }
+        }
+        if (now >= t.end && fade > 0 && !t.blind) {   // lo que ha llegado, sobre el blanco (si lo ve)
+            const [x, y] = view.toScreen(G.cx[t.cell], G.cy[t.cell]), w = WEAPONS[t.weapon];
+            const label = !t.through ? (t.n === 1 ? (w.fem ? 'interceptada' : 'interceptado') : `${t.n} ${w.fem ? 'interceptadas' : 'interceptados'}`)
+                : `${t.through === 1 ? 'llega' : 'llegan'} ${t.through} de ${t.n}`;
+            ctx.globalAlpha = fade;
+            ctx.font = "700 12px 'Barlow Semi Condensed', Bahnschrift, 'Arial Narrow', sans-serif"; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.lineWidth = 3; ctx.strokeStyle = INK; ctx.fillStyle = t.through ? '#ffb38a' : SIGNAL;
+            const ly = y - Math.max(18, G.S * s * 1.6);
+            ctx.strokeText(label, x, ly); ctx.fillText(label, x, ly);
+            ctx.globalAlpha = 1;
         }
     }
     ctx.restore();

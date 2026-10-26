@@ -1320,8 +1320,8 @@ const CHECKS = [
     T.eq(s.flown, 0, 'no se arriesga');
     return true;
 }],
-['9 · el árbol tiene 18 ramas y 54 investigaciones', () => {
-    T.eq([RESEARCH_BRANCHES.length, TECHS.length, TECH_BY_ID.get('espacio3').name], [18, 54, 'Constelación'], 'árbol');
+['9 · el árbol tiene 20 ramas y 60 investigaciones', () => {
+    T.eq([RESEARCH_BRANCHES.length, TECHS.length, TECH_BY_ID.get('espacio3').name], [20, 60, 'Constelación'], 'árbol');
     return true;
 }],
 // APP-6: la aviación de ala fija es la hélice de dos palas; los dos triángulos son el ala rotatoria (helicópteros).

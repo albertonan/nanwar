@@ -1104,6 +1104,7 @@ const CHECKS = [
     }],
     ['L6 · ficha, mapa y propuesta de una línea replegada', () => {
         const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        ui.view.motion.clear();   // sin las partículas que dejaron las pruebas anteriores: esta dibuja el mapa a mano
         g.declareWar(es, fr);
         const s = T.sector(g, es, fr);
         const op = g.createOp(es, 'defensa', s.line);
