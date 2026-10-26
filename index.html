@@ -5479,13 +5479,12 @@ class GameEngine {
             if (cell >= 0) { this.moveArmy(a, cell, r); tally.moved++; } else this.reattach(a);
         }
         // Las guarniciones: si la punta se ha ido, se quedan; si no, vuelven a juntarse con ella.
-        const words = { infantry: ['infantería', 'infanterías'], tank: ['tanque', 'tanques'], artillery: ['artillería', 'artillerías'], antiair: ['antiaérea', 'antiaéreas'] };
         for (const [a, g, city] of stays.values()) {
             if (!this.armies.has(g.id)) continue;
             const gone = this.armyAt[city] !== a.id, o = this.settle(g);
             if (!gone || o !== g) continue;
             if (!op.garrisons.includes(city)) op.garrisons.push(city);
-            tally.notes.push(`La punta deja ${UNIT_KEYS.filter(k => g.units[k]).map(k => plural(g.units[k], ...words[k])).join(' y ')} de guarnición en ${this.placeName(city)}`);
+            tally.notes.push(`La punta deja ${this.unitsText(g.units)} de guarnición en ${this.placeName(city)}`);
         }
         say('cap', capped ? `La punta espera al seguimiento: no se adelanta más de ${plural(this.opSpearLead(), 'casilla', 'casillas')}` : '');
         // 5) Grueso de la punta y bolsas.
@@ -5518,9 +5517,10 @@ class GameEngine {
     }
     // 1) Releva las guarniciones que dejó la punta. Las ciudades de op.garrisons que ya no asedia (han caído o se han
     // perdido) salen de la lista. A cada una que sigue asediada va el miembro libre del seguimiento más cercano (uno por
-    // ciudad): al entrar se funde con el destacamento, que vuelve así a la operación, y se queda en la ciudad con todas
-    // sus tropas mientras dure el asedio; cuando cae, sigue con el seguimiento. Devuelve los ids de los que relevan o
-    // mantienen un asedio: este turno no marchan con los demás.
+    // ciudad): al entrar se funde con el destacamento, que vuelve así a la operación, y en cuanto le queda movimiento
+    // deja en la ciudad lo que el asedio necesita (opGarrisonNeed) y sigue con el resto (opRelease). Esa guarnición,
+    // ya de la operación, se queda mientras dure el asedio; cuando la ciudad cae o se pierde, sigue con el seguimiento.
+    // Devuelve los ids de los que relevan o mantienen un asedio: este turno no marchan con los demás.
     opRelieve(op, free = this.opMembers(op), tally = null) {
         const id = op.owner, busy = new Set();
         const kept = [];
@@ -5534,7 +5534,12 @@ class GameEngine {
         for (const city of kept) {
             if (this.over) break;
             const at = this.armyOn(city);
-            if (at && at.owner === id && at.op === op.id) { busy.add(at.id); continue; }   // ya relevada: mantiene el asedio
+            if (at && at.owner === id && at.op === op.id) {   // ya relevada: mantiene el asedio (la punta, a lo suyo)
+                if (this.opEchelon(op, at) === 'punta') continue;
+                busy.add(at.id);
+                this.opRelease(op, city, at, tally);
+                continue;
+            }
             const f = this.orderField(id, city);
             let best = null, bd = Infinity;
             for (const a of follow) {
@@ -5550,9 +5555,57 @@ class GameEngine {
             if (now && now.owner === id && now.op === op.id) {
                 busy.add(now.id);
                 tally?.notes.push(`El seguimiento releva la guarnición de ${this.placeName(city)}`);
+                this.opRelease(op, city, now, tally);
             }
         }
         return busy;
+    }
+    // Lo que el asedio de `city` necesita de las tropas de `a` (el relevo ya fundido con el destacamento): la guarnición
+    // de leaveGarrison (2 infanterías o, sin infantería, su unidad más barata) y, si hay un ejército enemigo al lado de la
+    // ciudad, más unidades, de la más barata a la más cara, hasta que su defensa en la ciudad llegue a op.ratio contra el
+    // ataque del más fuerte de ellos (con lo que se sabe de él), y como mucho la mitad de las tropas de `a`.
+    opGarrisonNeed(op, city, a) {
+        const id = op.owner, stay = emptyUnits(), cost = k => this.unitCost(id, k);
+        const order = UNIT_KEYS.filter(k => a.units[k] > 0).sort((x, y) => cost(x) - cost(y));
+        if (a.units.infantry > 0) stay.infantry = Math.min(2, a.units.infantry);
+        else if (order.length) stay[order[0]] = 1;
+        let foe = null, best = 0;
+        for (let d = 0; d < 6; d++) {
+            const j = G.nb[city * 6 + d], e = j >= 0 && isLand(j) ? this.armyOn(j) : null;
+            if (!e || !this.atWar(id, e.owner) || !this.sees(id, j)) continue;
+            const units = this.intel(id, e.owner, j).exact ? e.units : { infantry: echelonCeil(countUnits(e.units)), tank: 0, artillery: 0 };
+            const atk = unitPower(units, 'atk', this.rules(e.owner));
+            if (atk > best) { best = atk; foe = { e, units }; }
+        }
+        if (!foe) return stay;
+        const cap = Math.max(countUnits(stay), Math.floor(countUnits(a.units) / 2));
+        const holds = () => { const f = this.combatFactors(foe.e.owner, foe.units, foe.e.cell, { id: a.id, owner: id, units: stay }, city, foe.e.id); return f.dfn >= f.atk * op.ratio; };
+        while (countUnits(stay) < cap && !holds()) {
+            const k = order.find(t => stay[t] < a.units[t]);
+            if (!k) break;
+            stay[k]++;
+        }
+        return stay;
+    }
+    // El relevo `a`, en la ciudad asediada `city`, deja lo que necesita el asedio y el resto sale con el seguimiento hacia
+    // el punto de la flecha que toca, por el pasillo, si le queda movimiento y tiene adónde; si no, lo intenta otro turno.
+    opRelease(op, city, a, tally = null) {
+        const id = op.owner, stay = this.opGarrisonNeed(op, city, a), rest = emptyUnits();
+        for (const k of UNIT_KEYS) rest[k] = Math.max(0, (a.units[k] || 0) - stay[k]);
+        if (!countUnits(rest) || this.mp(a) <= 0 || this.over) return;
+        const b = this.split(a, rest), goal = op.cells[op.wp];
+        const r = this.reach(id, b.cell, this.mp(b), b.used === 0);
+        let f = this.opField(op, goal, b, true);
+        if (f.to(b.cell) === Infinity) f = this.opField(op, goal, b, false);
+        const { cell } = this.opPick(b, f, r, () => true, v => this.opAlong(op, v));
+        if (cell < 0) { this.settle(b); return; }   // vuelve a juntarse con la guarnición
+        this.moveArmy(b, cell, r);
+        tally?.notes.push(`El seguimiento deja ${this.unitsText(stay)} de guarnición en ${this.placeName(city)} y sigue con el resto`);
+    }
+    // «2 infanterías y 1 tanque»: las unidades de `u`, con sus nombres.
+    unitsText(u) {
+        const words = { infantry: ['infantería', 'infanterías'], tank: ['tanque', 'tanques'], artillery: ['artillería', 'artillerías'], antiair: ['antiaérea', 'antiaéreas'] };
+        return UNIT_KEYS.filter(k => u[k]).map(k => plural(u[k], ...words[k])).join(' y ');
     }
     // 2) Bolsas: fuera de la lista las casillas que ya no tienen un ejército enemigo a la vista (se ha ido, ha muerto o se
     // ha rendido). Contra cada una que queda, de la más atrasada a la más adelantada, el seguimiento libre (sin los de

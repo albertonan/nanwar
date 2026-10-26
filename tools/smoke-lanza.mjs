@@ -188,9 +188,9 @@ const setup = () => {
             throw new Error('no hay bahía');
         },
         // Ciudad X de Francia que la punta `a` (3 infanterías y 6 tanques) acaba de tomar y asedia, con un camino de 8
-        // casillas por delante hasta otra provincia, y el seguimiento `b` (6 infanterías) a 2 casillas por detrás:
-        // { g, es, X, a, b, op }.
-        siege() {
+        // casillas por delante hasta otra provincia, y el seguimiento `b` (`follow` infanterías) a 2 casillas por
+        // detrás: { g, es, X, a, b, op }.
+        siege(follow = 6) {
             const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
             g.start(es); g.declareWar(es, fr);
             let X = -1, O = -1;
@@ -206,7 +206,7 @@ const setup = () => {
             const op = g.createOp(es, 'ofensiva', [X, O], { doctrine: 'lanza' });
             const back = [...g.nearCells(X, 2)].find(([c, d]) => d === 2 && T.free(g, c) && g.owner[c] === es && g.opAlong(op, c) === 0)?.[0];
             T.ok(back !== undefined, 'casilla detrás de la ciudad');
-            const b = T.army(g, es, back, 6, 0, 0);
+            const b = T.army(g, es, back, follow, 0, 0);
             for (const x of [a, b]) g.assignArmy(x, op.id);
             g.opLaunch(op);
             op.echelon = { [a.id]: 'punta', [b.id]: 'seguimiento' };
@@ -508,26 +508,79 @@ const CHECKS = [
         }
         T.ok(relieved, 'el seguimiento entra en la ciudad');
         T.ok(!g.armies.has(b.id) || relieved.id === b.id, 'y se funde con la guarnición');
-        T.ok(relieved.units.infantry >= 8, `con las tropas de los dos (${relieved.units.infantry})`);
         T.eq(g.opEchelon(op, relieved), 'seguimiento', 'en el seguimiento');
         T.ok(g.logs.some(l => l.msg.includes('releva la guarnición')), 'el parte lo dice');
-        // Mantiene el asedio hasta que cae: no se va con el seguimiento.
-        const cell = relieved.cell;
+        if (countUnits(relieved.units) > 2) T.turns(g, es, 1);   // sin movimiento al llegar: sale el turno siguiente
+        // La guarnición, ya de la operación, mantiene el asedio hasta que cae.
+        const keep = g.armyOn(X);
+        T.ok(keep?.op === op.id && countUnits(keep.units) === 2, 'queda la guarnición en la ciudad');
         for (let t = 0; t < 4 && g.sieges.has(X); t++) {
             g.beginNationTurn(es);
             if (!g.sieges.has(X)) break;
             T.turns(g, es, 1);
-            T.ok(g.armyOn(X)?.owner === es, 'la ciudad no queda vacía');
-            T.eq(relieved.cell, cell, 'el relevo no se va mientras dura el asedio');
+            T.eq(g.armyOn(X)?.id, keep.id, 'la guarnición no se va mientras dura el asedio');
         }
         T.ok(!g.sieges.has(X) && g.owner[X] === es && g.ops.has(op.id), 'el asedio termina: la ciudad es suya');
         T.turns(g, es, 1);
         T.eq(op.garrisons, [], 'y sale de la lista');
+        T.ok([...g.armies.values()].some(x => x.op === op.id && x.units.infantry > 0 && g.opEchelon(op, x) === 'seguimiento'), 'la guarnición vuelve al seguimiento');
         // Una ciudad que se pierde también sale.
         const lost = PROVINCES.find(p => g.owner[p.city] === T.nation('fr')).city;
         op.garrisons.push(lost);
         T.turns(g, es, 1);
         T.ok(!op.garrisons.includes(lost), 'sin asedio, fuera de la lista');
+        return true;
+    }],
+    ['D3 · el relevo deja la guarnición y sigue con el resto', () => {
+        const { g, es, X, b, op } = T.siege();
+        T.turns(g, es, 1);
+        let rest = null;
+        for (let t = 0; t < 5 && !rest; t++) {
+            T.turns(g, es, 1);
+            rest = [...g.armies.values()].find(x => x.op === op.id && x.cell !== X && g.opEchelon(op, x) === 'seguimiento' && x.units.infantry === 6);
+        }
+        const keep = g.armyOn(X);
+        T.ok(keep && keep.owner === es && keep.op === op.id, 'la guarnición queda en la ciudad, en la operación');
+        T.eq([keep.units.infantry, keep.units.tank], [2, 0], 'con 2 infanterías');
+        T.ok(rest, 'el resto (6 infanterías) sale de la ciudad con el seguimiento');
+        T.eq(g.sieges.get(X)?.by, es, 'el asedio sigue');
+        T.ok(g.logs.some(l => l.msg.includes('deja 2 infanterías de guarnición en') && l.msg.includes('sigue con el resto')), 'el parte lo dice');
+        // El resto sigue avanzando con el seguimiento.
+        const along = g.opAlong(op, rest.cell);
+        T.turns(g, es, 2);
+        T.ok(!g.armies.has(rest.id) || g.opAlong(op, rest.cell) > along, 'y sigue adelante');
+        T.eq(g.armyOn(X)?.id, keep.id, 'la guarnición no se mueve');
+        return true;
+    }],
+    ['D3 · con enemigo al lado deja más guarnición, como mucho la mitad', () => {
+        const { g, es, X, op } = T.siege(12), fr = T.nation('fr');
+        T.turns(g, es, 1);
+        const relief = { id: 0, owner: es, cell: X, units: { infantry: 14, tank: 0, artillery: 0, antiair: 0 } };
+        T.eq(g.opGarrisonNeed(op, X, relief), { infantry: 2, tank: 0, artillery: 0, antiair: 0 }, 'sin enemigo, 2 infanterías');
+        const nb = [0, 1, 2, 3, 4, 5].map(d => G.nb[X * 6 + d]).find(j => j >= 0 && isLand(j) && !g.armyAt[j] && g.opAlong(op, j) === 0);
+        T.ok(nb !== undefined, 'vecina libre detrás de la ciudad');
+        const foe = g.settle(g.newArmy(fr, nb, { infantry: 1, tank: 0, artillery: 0 }, 0));
+        // Lo justo para que su defensa llegue a op.ratio contra el enemigo de al lado.
+        const holds = u => { const f = g.combatFactors(fr, foe.units, nb, { id: 0, owner: es, units: u }, X, foe.id); return f.dfn >= f.atk * op.ratio; };
+        let mid = null;
+        for (let k = 1; k <= 40 && !mid; k++) {
+            foe.units.infantry = k;
+            const u = g.opGarrisonNeed(op, X, relief), n = countUnits(u);
+            if (n > 2 && n < 7) mid = [k, u];
+        }
+        T.ok(mid, 'algún enemigo pide más de 2 y menos de la mitad');
+        foe.units.infantry = mid[0];
+        T.ok(holds(mid[1]), `llega a ${op.ratio} a 1 con ${countUnits(mid[1])}`);
+        const less = { ...mid[1], infantry: mid[1].infantry - 1 };
+        T.ok(!holds(less), 'y con una menos no llega');
+        // Un enemigo enorme: como mucho, la mitad del relevo.
+        foe.units.infantry = 400;
+        T.eq(countUnits(g.opGarrisonNeed(op, X, relief)), 7, 'la mitad de 14');
+        // En el juego: el relevo de 12 con el destacamento de 2 deja 7 y sigue con 7.
+        let keep = null;
+        for (let t = 0; t < 5 && !(keep && countUnits(keep.units) === 7); t++) { T.turns(g, es, 1); keep = g.armyOn(X); }
+        T.ok(keep?.op === op.id && countUnits(keep.units) === 7, `deja 7 de guarnición (${keep && countUnits(keep.units)})`);
+        T.ok([...g.armies.values()].some(x => x.op === op.id && x.cell !== X && x.units.infantry === 7), 'y sigue con 7');
         return true;
     }],
     ['D3 · limpia una bolsa con ataque conjunto si llega, y si no la cerca', () => {
@@ -741,7 +794,7 @@ const CHECKS = [
         let relieved = false;
         for (let t = 0; t < 4 && !relieved; t++) { T.turns(h, es, 1); relieved = h.armyOn(X)?.op === op.id; }
         T.ok(relieved, 'tras cargar, el seguimiento releva la guarnición');
-        T.ok(h.armies.has(b.id) || h.armyOn(X).units.infantry >= 8, 'con su tropa');
+        T.ok(!h.armies.has(b.id) && [...h.armies.values()].filter(x => x.op === op.id).reduce((s, x) => s + x.units.infantry, 0) >= 8, 'con su tropa y la del destacamento');
         return true;
     }],
 ];
