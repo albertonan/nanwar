@@ -1115,6 +1115,15 @@ const echelonOf = n => ECHELONS.find(e => n <= e.max);
 // Lo más que puede ser un ejército de n unidades que no se conoce (niebla de guerra): el tope de su escalón; el último
 // no tiene tope, así que se supone de 3000.
 const echelonCeil = n => Math.min(echelonOf(n).max, 3000);
+// Agrupaciones (A4): hasta 99 por país, cada una con un color de esta paleta (apagados, legibles en las dos vistas y
+// distintos de los de las operaciones y de los de los países). Esperan 3 turnos a un miembro que no llega al ataque.
+const GROUP_COLORS = ['#6fb7a6', '#7f97bd', '#8c7bb5', '#d496a7', '#c27d5a', '#c9a46a', '#a8ad5e', '#86ab8c'];
+const GROUP_MAX = 99, GROUP_WAIT = 3;
+// Nombre de cada escalón para una agrupación, con su género: «1.ª División», «1.er Cuerpo de ejército».
+const GROUP_NOUNS = [['Batallón', 'm'], ['Regimiento', 'm'], ['Brigada', 'f'], ['División', 'f'], ['Cuerpo de ejército', 'm'], ['Ejército', 'm'], ['Grupo de ejércitos', 'm']];
+// Ordinal abreviado: femenino «3.ª»; masculino «2.º», y apocopado «1.er», «3.er», «21.er» (pero «11.º», undécimo).
+const ordinalAbbr = (num, fem) => fem ? `${num}.ª` : `${num}.${[1, 3].includes(num % 10) && num % 100 !== 11 ? 'er' : 'º'}`;
+const groupAutoName = (num, n) => { const [noun, gender] = GROUP_NOUNS[ECHELONS.indexOf(echelonOf(n))]; return `${ordinalAbbr(num, gender === 'f')} ${noun}`; };
 const FORT_LEVELS = ['sacos terreros', 'hormigón armado', 'búnkeres', 'casamatas'];
 // Cómo se dibuja la fortificación de cada nivel: relleno, muro (oscuro y claro) y sus grosores.
 const FORT_STYLE = {
@@ -1158,6 +1167,7 @@ class GameEngine {
         this.orderVersion = 0;      // cambia al dar, cumplir o cancelar órdenes y operaciones
         this.ops = new Map();       // operaciones: id → { owner, kind, name, cells, ... }
         this.nextOpId = 1;
+        this.nextGroupId = 1;       // agrupaciones de ejércitos (nation.groups): ids únicos entre todos los países
         this.fields = new Map();    // caminos hacia los destinos de las órdenes (se rehacen si cambia el mapa)
         this.fieldStamp = '';
         this.roadReach = new Map(); // ¿llega a una carretera en un turno? por dueño, casilla y velocidad (ver roadInReach)
@@ -1179,7 +1189,7 @@ class GameEngine {
         this.nations = E.countries.map((c, id) => ({
             id, key: c.key, name: c.name, color: c.color,
             capitalCell: PROVINCES[c.capital].city, capitalName: PROVINCES[c.capital].cityName,
-            gold: 0, alive: true, recruited: new Map(), overlord: -1, templates: [], command: newCommand(),
+            gold: 0, alive: true, recruited: new Map(), overlord: -1, templates: [], groups: [], command: newCommand(),
             tech: { done: new Set(), progress: new Map(), current: [] },  // investigación: hechas, turnos invertidos, en curso
             lastTurn: 0,   // último turno en que empezó a jugar (ver nextOwnTurn)
             airFund: 0   // oro que la IA aparta para su próximo escuadrón (ver aiRecruit)
@@ -1258,6 +1268,7 @@ class GameEngine {
             spies: [...this.spies].map(([pid, s]) => [pid, s.since, s.revealedTurn]),
             sieges: [...this.sieges].map(([c, s]) => [c, s.by, s.prev, s.held]),
             nations: this.nations.map(n => ({ gold: n.gold, airFund: n.airFund, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord, templates: n.templates, command: n.command,
+                groups: n.groups.map(x => ({ id: x.id, num: x.num, name: x.name, color: x.color, custom: x.custom, order: x.order, reinforce: null })),
                 tech: { done: [...n.tech.done], progress: [...n.tech.progress], current: [...n.tech.current] } })),
             relations,
             armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used, a.hunger || 0, a.disorgUntil || 0, a.units.antiair || 0]),
@@ -1268,6 +1279,8 @@ class GameEngine {
             armyForms: [...this.armies.values()].filter(a => a.form).map(a => [a.id, a.form]),
             nextOpId: this.nextOpId,
             armyOps: [...this.armies.values()].filter(a => a.op).map(a => [a.id, a.op]),
+            armyGroups: [...this.armies.values()].filter(a => a.group).map(a => [a.id, a.group]),
+            nextGroupId: this.nextGroupId,
             armyFrom: [...this.armies.values()].filter(a => a.from).map(a => [a.id, a.from]),
             orders: [...this.armies.values()].filter(a => a.order).map(a => [a.id, a.order.kind, a.order.dest, a.order.target, a.order.ratio, a.order.flee ? 1 : 0, a.order.since, a.order.stuck]),
             blocs: this.blocs.map(b => ({ id: b.id, name: b.name, founder: b.founder, secret: b.secret, since: b.since, members: [...b.members] })),
@@ -1376,6 +1389,24 @@ class GameEngine {
             const current = [...new Set(list(v?.current).map(x => str(x, 40)))].filter(x => progress.has(x)).slice(0, done.has('ciencia3') ? 2 : 1);
             return { done, progress, current };
         };
+        // Agrupaciones: ids únicos entre todos los países, números 1–99 sin repetir en el país, color de la paleta, nombre
+        // acotado (sin nombre, el automático) y orden de ataque solo contra una casilla de tierra. Sus miembros y las
+        // casillas de partida de la orden se validan cuando ya se conocen los ejércitos.
+        const gids = new Set();
+        const groupsOf = v => {
+            const out = [];
+            for (const x of list(v).slice(0, 400)) {
+                const id = int(x?.id, 0, 1e9, 0), num = int(x?.num, 0, 1e6, 0), c = Number(x?.color), name = str(x?.name, 40).trim(), o = x?.order;
+                if (!id || num < 1 || num > GROUP_MAX || gids.has(id) || out.some(y => y.num === num)) continue;
+                gids.add(id);
+                const target = int(o?.target, -1, G.N - 1, -1), ratio = Number(o?.ratio);
+                out.push({ id, num, name, color: Number.isInteger(c) && c >= 0 && c < GROUP_COLORS.length ? c : 0, custom: !!x?.custom && !!name,
+                    order: o?.kind === 'assault' && target >= 0 && isLand(target) ? { kind: 'assault', target, ratio: Number.isFinite(ratio) ? Math.min(5, Math.max(0, ratio)) : 1.3,
+                        since: int(o.since, 0, 1e6, g.turn), slots: o.slots && typeof o.slots === 'object' ? o.slots : {}, waitSince: int(o.waitSince, 0, 1e6, 0) } : null,
+                    reinforce: null });
+            }
+            return out;
+        };
         list(data.nations).slice(0, NN).forEach((n, i) => Object.assign(g.nations[i], {
             gold: int(n?.gold, -1e9, 1e12, 0),
             airFund: int(n?.airFund, 0, CONFIG.AIR.SQUADRON_COST, 0),
@@ -1397,6 +1428,7 @@ class GameEngine {
                 out.warned = [...new Set(list(c.warned).map(nat))];
                 return out;
             })(),
+            groups: groupsOf(n?.groups),
             templates: list(n?.templates).slice(0, TPL_OWN_MAX).map(t => ({ name: str(t?.name, 40) || 'Plantilla', units: units(t?.units, TPL_MAX) }))
                 .filter(t => countUnits(t.units) > 0),
             tech: techOf(n?.tech)
@@ -1418,11 +1450,11 @@ class GameEngine {
         for (const x of list(data.armies)) {
             const id = int(x?.[0], 1, 1e9, 1), cell = x?.[2];
             if (!Number.isInteger(cell) || cell < 0 || cell >= G.N || g.armyAt[cell] || g.armies.has(id)) continue;   // una casilla inválida no se cambia por otra
-            g.armies.set(id, { id, owner: nat(x?.[1]), cell, units: { infantry: int(x?.[3], 0, 1e6, 0), tank: int(x?.[4], 0, 1e6, 0), artillery: int(x?.[5], 0, 1e6, 0), antiair: int(x?.[9], 0, 1e6, 0) }, used: Math.min(999, int(x?.[6], 0, 999, 0) * (x?.[6] >= 999 ? 1 : moveScale)), from: 0, hunger: int(x?.[7], 0, 99, 0), disorgUntil: int(x?.[8], 0, 1e6, 0) });
+            g.armies.set(id, { id, owner: nat(x?.[1]), cell, units: { infantry: int(x?.[3], 0, 1e6, 0), tank: int(x?.[4], 0, 1e6, 0), artillery: int(x?.[5], 0, 1e6, 0), antiair: int(x?.[9], 0, 1e6, 0) }, used: Math.min(999, int(x?.[6], 0, 999, 0) * (x?.[6] >= 999 ? 1 : moveScale)), from: 0, hunger: int(x?.[7], 0, 99, 0), disorgUntil: int(x?.[8], 0, 1e6, 0), group: 0 });
             g.armyAt[cell] = id;
         }
         g.nextArmyId = Math.max(int(data.nextArmyId, 1, 1e9, 1), ...[...g.armies.keys()].map(x => x + 1), 1);
-        const kinds = ['march', 'attack', 'hold', 'fortify', 'follow'];
+        const kinds = ['march', 'attack', 'hold', 'fortify', 'follow', 'join'];
         g.blocs = list(data.blocs).map(b => ({ id: int(b?.id, 1, 1e6, 1), name: str(b?.name, 40), founder: nat(b?.founder), secret: !!b?.secret,
             since: int(b?.since, 0, 1e6, 0), members: new Set(list(b?.members).map(nat)) }));
         g.nextBlocId = Math.max(int(data.nextBlocId, 1, 1e6, 1), ...g.blocs.map(b => b.id + 1), 1);
@@ -1461,6 +1493,22 @@ class GameEngine {
             const a = g.armies.get(int(x?.[0], 1, 1e9, 0)), op = g.ops.get(int(x?.[1], 1, 1e6, 0));
             if (a && op && op.owner === a.owner) a.op = op.id;
         }
+        for (const x of list(data.armyGroups)) {
+            const a = g.armies.get(int(x?.[0], 1, 1e9, 0)), gr = a && g.groupById(a.owner, int(x?.[1], 1, 1e9, 0));
+            if (gr && !a.group) a.group = gr.id;
+        }
+        for (const n of g.nations) for (const gr of n.groups) {
+            if (gr.order) {   // casillas de partida, solo de sus miembros y en tierra
+                const slots = {};
+                for (const [k, c] of Object.entries(gr.order.slots).slice(0, 400)) {
+                    const a = g.armies.get(int(k, 1, 1e9, 0)), cell = int(c, -1, G.N - 1, -1);
+                    if (a && a.owner === n.id && a.group === gr.id && cell >= 0 && isLand(cell)) slots[a.id] = cell;
+                }
+                gr.order.slots = slots;
+            }
+            g.nameGroup(n.id, gr);
+        }
+        g.nextGroupId = Math.max(int(data.nextGroupId, 1, 1e9, 1), ...[...gids].map(x => x + 1), 1);
         for (const x of list(data.armyFrom)) {
             const a = g.armies.get(int(x?.[0], 1, 1e9, 0)), op = g.ops.get(int(x?.[1], 1, 1e6, 0));
             if (a && op && op.owner === a.owner && op.kind === 'defensa') a.from = op.id;
@@ -2859,7 +2907,7 @@ class GameEngine {
 
     // --- Ejércitos ---
     newArmy(owner, cell, units, used) {
-        const a = { id: this.nextArmyId++, owner, cell, units: fullUnits(units), used, from: 0, hunger: 0, disorgUntil: 0 };
+        const a = { id: this.nextArmyId++, owner, cell, units: fullUnits(units), used, from: 0, hunger: 0, disorgUntil: 0, group: 0 };
         this.armies.set(a.id, a);
         return a;
     }
@@ -2994,6 +3042,7 @@ class GameEngine {
         o.hunger = Math.max(o.hunger || 0, a.hunger || 0);
         o.disorgUntil = Math.max(o.disorgUntil || 0, a.disorgUntil || 0);   // desorganizado: el que más dure
         if (!o.op && a.op) o.op = a.op;   // quien se une a un ejército sin operación se la lleva
+        if (!o.group && a.group) o.group = a.group;   // y lo mismo con la agrupación
         this.armies.delete(a.id);
         return o;
     }
@@ -3003,13 +3052,280 @@ class GameEngine {
         const b = this.newArmy(a.owner, a.cell, send, a.used);
         b.disorgUntil = a.disorgUntil || 0;
         if (a.op) b.op = a.op;
+        b.group = a.group || 0;
         return b;
+    }
+
+    // --- Agrupaciones: ejércitos que se juntan bajo un nombre para elegirlos y mandarlos a la vez ---
+    // nation.groups = [{ id, num, name, color, custom, order, reinforce }]; army.group = id de la suya (0: ninguna).
+    //   num: 1 a GROUP_MAX, único en el país; color: índice de GROUP_COLORS; custom: nombre puesto a mano (si no, sale de
+    //   su escalón y su número y cambia con su tamaño); order: orden de la agrupación ({ kind: 'assault', ... }, ver
+    //   setGroupAssault); reinforce: refuerzos en curso (A7).
+    // Es una etiqueta: sus ejércitos siguen en su operación y con sus órdenes.
+    groupById(owner, gid) { return this.nations[owner].groups.find(x => x.id === gid) ?? null; }
+    // Sus ejércitos asentados (los que están de paso en un combate o una marcha no cuentan).
+    groupMembers(owner, gid) {
+        const out = [];
+        for (const a of this.armies.values()) if (a.group === gid && a.owner === owner && this.armyOn(a.cell) === a) out.push(a);
+        return out;
+    }
+    groupUnits(owner, gid) {
+        const u = emptyUnits();
+        for (const a of this.groupMembers(owner, gid)) for (const k of UNIT_KEYS) u[k] += a.units[k] || 0;
+        return u;
+    }
+    // El nombre automático sigue al tamaño; el puesto a mano no se toca.
+    nameGroup(owner, gr) { if (!gr.custom) gr.name = groupAutoName(gr.num, countUnits(this.groupUnits(owner, gr.id))); }
+    nameGroups(owner) { for (const gr of this.nations[owner].groups) this.nameGroup(owner, gr); }
+    // Ejércitos de `owner` con esos ids. Con `strict`, null si alguno no lo es (o no hay ninguno); si no, los que lo son.
+    ownArmies(owner, ids, strict = true) {
+        const out = [];
+        for (const id of ids) {
+            const a = this.armies.get(id);
+            if (!a || a.owner !== owner) { if (strict) return null; continue; }
+            if (!out.includes(a)) out.push(a);
+        }
+        return out.length || !strict ? out : null;
+    }
+    // Nueva agrupación con esos ejércitos (que dejan la suya). Sin `num`, el libre más bajo; con un `num` ocupado, la
+    // sustituye y los ejércitos de la vieja quedan sueltos. Con `name`, nombre propio. Devuelve la agrupación o null.
+    createGroup(owner, ids, { num = null, name = null } = {}) {
+        const list = this.ownArmies(owner, ids), groups = this.nations[owner].groups;
+        if (!list) return null;
+        if (num === null) { num = 1; while (groups.some(x => x.num === num)) num++; }
+        if (!Number.isInteger(num) || num < 1 || num > GROUP_MAX) return null;
+        const old = groups.find(x => x.num === num);
+        if (old) this.disbandGroup(owner, old.id);   // rehace la lista de agrupaciones
+        const gr = { id: this.nextGroupId++, num, name: '', color: (num - 1) % GROUP_COLORS.length, custom: false, order: null, reinforce: null };
+        this.nations[owner].groups.push(gr);
+        for (const a of list) a.group = gr.id;
+        this.renameGroup(owner, gr.id, name ?? '');
+        this.dropEmptyGroups(owner);
+        return gr;
+    }
+    addToGroup(owner, gid, ids) {
+        const gr = this.groupById(owner, gid), list = gr && this.ownArmies(owner, ids);
+        if (!list) return false;
+        for (const a of list) a.group = gid;
+        this.dropEmptyGroups(owner);
+        return true;
+    }
+    ungroup(owner, ids) {
+        for (const a of this.ownArmies(owner, ids, false)) a.group = 0;
+        this.dropEmptyGroups(owner);
+    }
+    disbandGroup(owner, gid) {
+        const n = this.nations[owner], gr = this.groupById(owner, gid);
+        if (!gr) return false;
+        if (gr.order) this.endGroupAssault(owner, gr);
+        for (const a of this.armies.values()) if (a.owner === owner && a.group === gid) a.group = 0;
+        n.groups = n.groups.filter(x => x !== gr);
+        this.orderVersion++;
+        return true;
+    }
+    // Nombre propio (hasta 40 letras); vacío, vuelve al automático.
+    renameGroup(owner, gid, name) {
+        const gr = this.groupById(owner, gid);
+        if (!gr) return false;
+        const t = String(name ?? '').trim().slice(0, 40);
+        gr.custom = !!t;
+        if (t) gr.name = t; else this.nameGroup(owner, gr);
+        this.orderVersion++;
+        return true;
+    }
+    recolorGroup(owner, gid, color) {
+        const gr = this.groupById(owner, gid);
+        if (!gr || !Number.isInteger(color) || color < 0 || color >= GROUP_COLORS.length) return false;
+        gr.color = color;
+        this.orderVersion++;
+        return true;
+    }
+    // Tras cambiar a mano quién está en qué agrupación: fuera las que se han quedado sin ejércitos (de paso o no) y los
+    // nombres automáticos al día.
+    dropEmptyGroups(owner) {
+        const used = new Set();
+        for (const a of this.armies.values()) if (a.owner === owner && a.group) used.add(a.group);
+        const n = this.nations[owner];
+        n.groups = n.groups.filter(x => used.has(x.id));
+        this.nameGroups(owner);
+        this.orderVersion++;
+    }
+    // Al empezar el turno del país: fuera las agrupaciones sin miembros y las marcas de los ejércitos que apuntan a una
+    // agrupación que no existe o no es de su dueño; los nombres automáticos, según el tamaño de ahora.
+    pruneGroups(id) {
+        const n = this.nations[id], ids = new Set(n.groups.map(x => x.id)), live = new Set();
+        for (const a of this.armies.values()) {
+            if (a.owner !== id || !a.group) continue;
+            if (!ids.has(a.group)) a.group = 0;
+            else if (this.armyOn(a.cell) === a) live.add(a.group);
+        }
+        const before = n.groups.length;
+        n.groups = n.groups.filter(x => live.has(x.id));
+        if (n.groups.length !== before) this.orderVersion++;
+        this.nameGroups(id);
+    }
+    // Hasta `k` casillas distintas alrededor de `dest`, empezando por ella y de cerca a lejos: de tierra, propias, aliadas
+    // o de un enemigo en guerra, y sin ejército ajeno. Con `mine` (ids), un ejército propio que no esté entre ellos
+    // también la ocupa (para no mandar a nadie a fundirse con él).
+    spreadCells(owner, dest, k, mine = null) {
+        const ok = c => {
+            if (!isLand(c)) return false;
+            const o = this.owner[c];
+            if (!(o === owner || this.allied(owner, o) || this.atWar(owner, o))) return false;
+            const a = this.armyOn(c);
+            return !a || (a.owner === owner && (!mine || mine.has(a.id)));
+        };
+        let out = [];
+        for (let R = 2; out.length < k; R += 3) {
+            const near = this.nearCells(dest, R);
+            out = [];
+            for (const c of near.keys()) if (ok(c) && out.push(c) >= k) break;
+            if (R >= 20) break;
+        }
+        return out;
+    }
+    // Marchar repartidos: cada ejército va a una casilla distinta alrededor de `dest` (spreadCells), y a cada casilla, por
+    // orden, el ejército que tenga más cerca. Si hay más ejércitos que casillas, las casillas se repiten. Devuelve cuántos
+    // reciben la orden.
+    groupMarch(owner, ids, dest) {
+        const list = this.ownArmies(owner, ids, false).filter(a => this.armyOn(a.cell) === a);
+        const cells = list.length ? this.spreadCells(owner, dest, list.length, new Set(list.map(a => a.id))) : [];
+        if (!cells.length) return 0;
+        const left = new Set(list);
+        let n = 0;
+        for (let i = 0; left.size; i++) {
+            const c = cells[i % cells.length], f = this.orderField(owner, c);
+            let best = null, bestD = Infinity;
+            for (const a of left) {
+                const d = f.to(a.cell) < Infinity ? f.dist[a.cell] : 1e9 + hexDist(a.cell, c);   // sin camino, el último
+                if (d < bestD) { bestD = d; best = a; }
+            }
+            left.delete(best);
+            if (this.setOrder(best, best.cell === c ? { kind: 'hold' } : { kind: 'march', dest: c })) n++;
+        }
+        return n;
+    }
+    // Reunir en un solo ejército: el anfitrión es el ejército propio de `cell` o, si no, el más fuerte (que va a `cell`
+    // si se ha elegido una casilla libre); los demás van tras él y se funden al llegar. Devuelve el anfitrión o null.
+    groupGather(owner, ids, cell = -1) {
+        const list = this.ownArmies(owner, ids, false).filter(a => this.armyOn(a.cell) === a);
+        const there = cell >= 0 ? this.armyOn(cell) : null;
+        if (!list.length || (there && there.owner !== owner)) return null;
+        const r = this.rules(owner), power = a => unitPower(a.units, 'atk', r) + unitPower(a.units, 'def', r);
+        const host = there ?? list.reduce((b, a) => (power(a) > power(b) ? a : b));
+        if (!(cell >= 0 && host.cell !== cell && this.setOrder(host, { kind: 'march', dest: cell }))) this.setOrder(host, { kind: 'hold' });
+        for (const a of list) if (a !== host) this.setOrder(a, { kind: 'join', target: host.id });
+        return host;
+    }
+    // A4b · Ataque coordinado de la agrupación `gid` contra la casilla enemiga `target`, con una relación de fuerzas
+    // conjunta de `ratio` o más (por defecto, la de la postura). Devuelve la orden o null.
+    //   order = { kind: 'assault', target, ratio, since, slots: { idEjército: casilla de partida }, waitSince }
+    //   waitSince: turno en que el primero llegó a su casilla (0, aún nadie).
+    setGroupAssault(owner, gid, target, ratio = null) {
+        const gr = this.groupById(owner, gid);
+        if (!gr || !Number.isInteger(target) || target < 0 || target >= G.N || !isLand(target) || !this.atWar(owner, this.owner[target])) return null;
+        if (gr.order) this.endGroupAssault(owner, gr);
+        gr.order = { kind: 'assault', target, ratio: ratio ?? POSTURES[this.nations[owner].command.posture].ratio, since: this.turn, slots: {}, waitSince: 0 };
+        this.orderVersion++;
+        return gr.order;
+    }
+    // Se acaba la orden: los miembros que esperaban en su casilla o iban hacia ella quedan sin orden (vuelven a mandar
+    // su operación o el jugador).
+    endGroupAssault(owner, gr) {
+        const o = gr.order;
+        if (!o) return;
+        for (const a of this.groupMembers(owner, gr.id)) {
+            const c = o.slots[a.id];
+            if (a.order && (a.order.kind === 'hold' || (a.order.kind === 'march' && a.order.dest === c))) this.clearOrder(a);
+        }
+        gr.order = null;
+        this.orderVersion++;
+    }
+    // Un turno del ataque coordinado (antes de las órdenes de los ejércitos):
+    // 1. Casillas de partida: la de quien ya está junto al objetivo; la que ya tenía, si sigue libre y con paso; y a los
+    //    demás, por pares de menor camino (orderField), una vecina libre del objetivo, una por lado; sin lados, a dos
+    //    casillas. Primero las que tienen el paso despejado junto al objetivo; luego, cualquiera.
+    // 2. Si están todos en su casilla, o hace GROUP_WAIT turnos que llegó el primero, ataque conjunto (A3) de los que están
+    //    si la relación conjunta (con lo que se sabe del defensor) llega a `ratio`. Nadie ataca solo por debajo de ella.
+    // 3. Si no, marcha a su casilla o la mantiene. La orden se acaba cuando el objetivo es propio o deja de ser enemigo.
+    stepGroupAssault(owner, gr) {
+        const o = gr.order, target = o?.target;
+        if (o?.kind !== 'assault') return;
+        const members = this.groupMembers(owner, gr.id);
+        if (!members.length || !this.atWar(owner, this.owner[target])) { this.endGroupAssault(owner, gr); return; }
+        const open = (c, a) => {
+            if (!isLand(c) || c === target) return false;
+            const ow = this.owner[c];
+            return (ow === owner || this.allied(owner, ow) || this.atWar(owner, ow)) && (!this.armyAt[c] || this.armyAt[c] === a.id);
+        };
+        const near = this.nearCells(target, 2), slots = {}, taken = new Set();
+        const put = (a, c) => { slots[a.id] = c; taken.add(c); };
+        for (const a of members) if (near.get(a.cell) === 1 && open(a.cell, a)) put(a, a.cell);
+        // Junto al objetivo, el camino no puede cruzar a otro que ya está quieto en su casilla (o que no es de la
+        // agrupación): orderField deja pasar por los ejércitos propios, pero la marcha no los cruza.
+        const still = c => { const id = this.armyAt[c]; return id && (taken.has(c) || this.armies.get(id).group !== gr.id); };
+        const clear = (c, a) => { const path = this.fieldPath(this.orderField(owner, c), a.cell); return path.length > 0 && path.slice(1, -1).every(x => !near.has(x) || !still(x)); };
+        for (const a of members) { const c = o.slots[a.id]; if (slots[a.id] === undefined && c !== undefined && !taken.has(c) && open(c, a) && clear(c, a)) put(a, c); }
+        for (const strict of [true, false]) for (const ring of [1, 2]) {
+            const waiting = members.filter(a => slots[a.id] === undefined);
+            if (!waiting.length) break;
+            const pairs = [];
+            for (const [c, d] of near) {
+                if (d !== ring || taken.has(c)) continue;
+                const f = this.orderField(owner, c);
+                for (const a of waiting) if (open(c, a) && f.to(a.cell) < Infinity && (!strict || clear(c, a))) pairs.push([f.dist[a.cell], a.id, c, a]);
+            }
+            pairs.sort((x, y) => x[0] - y[0] || x[1] - y[1] || x[2] - y[2]);
+            for (const [, id, c, a] of pairs) if (slots[id] === undefined && !taken.has(c)) put(a, c);
+        }
+        o.slots = slots;
+        const slotted = members.filter(a => slots[a.id] !== undefined), placed = slotted.filter(a => a.cell === slots[a.id]);
+        if (placed.length && !o.waitSince) o.waitSince = this.turn;
+        if (placed.length && (placed.length === slotted.length || this.turn - o.waitSince >= GROUP_WAIT) && this.groupStrike(owner, placed, o)) {
+            if (this.owner[target] === owner || !this.atWar(owner, this.owner[target])) { this.endGroupAssault(owner, gr); return; }
+        }
+        for (const a of slotted) {
+            if (!this.armies.has(a.id) || this.armyOn(a.cell) !== a || a.used >= 999) continue;
+            const c = slots[a.id];
+            if (a.cell === c) { if (a.order?.kind !== 'hold') this.setOrder(a, { kind: 'hold' }); }
+            else if (a.order?.kind !== 'march' || a.order.dest !== c) this.setOrder(a, { kind: 'march', dest: c });
+        }
+    }
+    // El golpe del ataque coordinado con los que están en su casilla. Contra un ejército, ataque conjunto si la relación
+    // llega (si no se le conoce, se supone lo peor de su escalón, como expectedRatio); una casilla enemiga vacía la ocupa
+    // el más fuerte. true si se ha atacado o entrado.
+    groupStrike(owner, placed, o) {
+        const target = o.target, def = this.armyOn(target);
+        if (!def) {
+            const r = this.rules(owner), ready = placed.filter(a => this.mp(a) > 0);
+            if (!ready.length) return false;
+            const a = ready.reduce((b, x) => (unitPower(x.units, 'atk', r) > unitPower(b.units, 'atk', r) ? x : b));
+            return this.advance(a, target, this.reach(owner, a.cell, this.mp(a), a.used === 0)) !== 'blocked';
+        }
+        if (def.owner === owner || !this.atWar(owner, def.owner)) return false;
+        const list = this.jointCandidates(owner, target, new Set(placed.map(a => a.id)));
+        if (!list.length) return false;
+        const seen = this.intel(owner, def.owner, target).exact ? def
+            : { id: def.id, owner: def.owner, units: { infantry: echelonCeil(countUnits(def.units)), tank: 0, artillery: 0 } };
+        const j = this.jointFactors(owner, list.map(x => ({ units: x.army.units, from: x.from, id: x.army.id })), seen, target);
+        if (j.atk / j.dfn < o.ratio) return false;
+        this.attackJoint(list, target);
+        return true;
+    }
+    // Tras las órdenes de los ejércitos: el reloj de espera del ataque coordinado empieza el turno en que llega el primero.
+    markGroupArrivals(id) {
+        for (const gr of this.nations[id].groups) {
+            const o = gr.order;
+            if (o?.kind !== 'assault' || o.waitSince) continue;
+            if (this.groupMembers(id, gr.id).some(a => o.slots[a.id] === a.cell)) o.waitSince = this.turn;
+        }
     }
 
     // --- Órdenes de ejército: duran varios turnos y se cumplen solas al terminar el turno (o con «Ejecutar órdenes») ---
     // army.order = { kind, dest, target, ratio, flee, since, stuck, path, eta }
     //   march: ir a `dest`; attack: ir a `dest` y atacar lo que haya si la relación de fuerzas llega a `ratio`;
-    //   hold: quedarse; fortify: fortificar su casilla y quedarse; follow: ir detrás del ejército `target`.
+    //   hold: quedarse; fortify: fortificar su casilla y quedarse; follow: ir detrás del ejército `target`;
+    //   join: ir tras el ejército `target` y fundirse con él al llegar (se cancela si ya no existe).
     //   flee: si queda rodeado, se aparta antes de seguir. stuck: turnos seguidos sin poder avanzar.
     // army.direct = turno en que el jugador lo movió a mano: ese turno no cumple su orden.
 
@@ -3069,7 +3385,7 @@ class GameEngine {
     orderTarget(a) {
         const o = a.order;
         if (!o) return -1;
-        if (o.kind === 'follow') { const t = this.armies.get(o.target); return t && t.owner === a.owner ? t.cell : -1; }
+        if (o.kind === 'follow' || o.kind === 'join') { const t = this.armies.get(o.target); return t && t.owner === a.owner ? t.cell : -1; }
         return o.kind === 'march' || o.kind === 'attack' ? o.dest : -1;
     }
     // Recalcula el camino y los turnos que faltan (para dibujarlos y para la ficha).
@@ -3116,7 +3432,7 @@ class GameEngine {
     setOrder(a, order) {
         if (!a || !this.armies.has(a.id)) return false;
         const o = { kind: order.kind, dest: order.dest ?? -1, target: order.target ?? 0, ratio: order.ratio ?? 1.3, flee: order.flee ?? true, since: this.turn, stuck: 0, path: [], eta: null };
-        if (!['march', 'attack', 'hold', 'fortify', 'follow'].includes(o.kind)) return false;
+        if (!['march', 'attack', 'hold', 'fortify', 'follow', 'join'].includes(o.kind)) return false;
         if (o.kind === 'march' || o.kind === 'attack') {
             const d = o.dest;
             if (d < 0) return false;
@@ -3128,7 +3444,7 @@ class GameEngine {
                 if (!(ow === a.owner || this.allied(a.owner, ow) || this.atWar(a.owner, ow))) return false;
             }
         }
-        if (o.kind === 'follow') { const t = this.armies.get(o.target); if (!t || t.owner !== a.owner || t === a) return false; }
+        if (o.kind === 'follow' || o.kind === 'join') { const t = this.armies.get(o.target); if (!t || t.owner !== a.owner || t === a) return false; }
         a.order = o;
         this.refreshOrder(a);
         this.orderVersion++;
@@ -3173,10 +3489,10 @@ class GameEngine {
         }
         if (o.kind === 'follow' && G.dirTo(a.cell, dest) >= 0) return null;   // ya va pegado detrás
         if (this.holdLanding(a, dest)) return 'waiting';
-        const res = this.advance(a, dest, r, o.kind !== 'follow');           // sigue al otro ejército sin juntarse con él
+        const res = this.advance(a, dest, r, o.kind !== 'follow');           // sigue al otro ejército sin juntarse con él (join sí se junta)
         if (res === 'blocked') {
             if (o.stuckTurn !== this.turn) { o.stuckTurn = this.turn; o.stuck++; }
-            if (o.stuck >= 3 && o.kind !== 'follow') { this.clearOrder(a); return 'cancelled'; }
+            if (o.stuck >= 3 && o.kind !== 'follow' && o.kind !== 'join') { this.clearOrder(a); return 'cancelled'; }   // el que va tras otro, espera
             return 'blocked';
         }
         o.stuck = 0;
@@ -3260,12 +3576,16 @@ class GameEngine {
         return out;
     }
     runOrders(id, opts, out) {
+        // Primero las agrupaciones con ataque coordinado: atacan si están listas y, si no, dan a sus miembros la orden de
+        // ir a su casilla de partida o mantenerla, que se cumple aquí abajo como las demás.
+        for (const gr of [...this.nations[id].groups]) if (gr.order && !this.over) this.stepGroupAssault(id, gr);
         const list = [...this.armies.values()].filter(a => a.owner === id && a.order && a.direct !== this.turn)
             .sort((x, y) => (x.order.kind === 'attack' ? 0 : 1) - (y.order.kind === 'attack' ? 0 : 1) || x.id - y.id);
         for (const a of list) {
             if (this.over) break;
             if (!this.armies.has(a.id) || this.armyOn(a.cell) !== a) continue;
-            const name = a.order?.kind === 'march' || a.order?.kind === 'attack' ? PROVINCES[SEA_PROV[a.order.dest]] : null;   // en el mar, la costa más cercana
+            const to = ['march', 'attack', 'join'].includes(a.order?.kind) ? this.orderTarget(a) : -1;
+            const name = to >= 0 ? PROVINCES[SEA_PROV[to]] : null;   // en el mar, la costa más cercana
             const res = this.stepOrder(a);
             if (res === 'moved') out.moved++;
             else if (res === 'arrived') { out.moved++; out.arrived.push(name?.name ?? '?'); }
@@ -3276,6 +3596,7 @@ class GameEngine {
             else if (res === 'fortified') out.fortified++;
             else if (res === 'cancelled') out.cancelled.push(name?.name ?? 'su objetivo');
         }
+        this.markGroupArrivals(id);
         this.directive(id);
         // Los refuerzos de las operaciones (reclutar y mandar a su zona) no dependen de la automatización.
         this.stepReinforcements(id);
@@ -3602,7 +3923,7 @@ class GameEngine {
     // Un ejército que pasa a otro país llega sin orden ni operación.
     changeOwner(a, owner) {
         a.owner = owner;
-        a.order = null; a.op = 0; a.form = 0; a.from = 0;
+        a.order = null; a.op = 0; a.form = 0; a.from = 0; a.group = 0;
         this.orderVersion++;
     }
     // Al salir de una ciudad suya, un ejército deja una infantería de guarnición fuera de la operación (como la IA).
@@ -5096,6 +5417,7 @@ class GameEngine {
         this.airTurn(id);
         for (const a of this.armies.values()) if (a.owner === id) a.used = 0;
         this.feedArmies(id);
+        this.pruneGroups(id);   // agrupaciones sin nadie, fuera; nombres según su tamaño
         this.advanceResearch(id);
         // Obras de fortificación: la nueva termina al nivel máximo de su dueño; la reparación sube un nivel y no avanza
         // con el enemigo al lado. Las dos se pierden si la casilla cambia de dueño.
@@ -9115,6 +9437,7 @@ class GameUI {
             case 'hold': return 'Mantiene la posición: no se mueve hasta que le des otra orden.';
             case 'fortify': return `Fortificará su casilla en cuanto tengas ${g.rules(g.player).fortCost} de oro.`;
             case 'follow': { const t = g.armies.get(o.target); return t ? `Sigue al ejército ${afloat(t.cell) ? 'que está en' : 'de'} ${place(t.cell)} (${countUnits(t.units)} unidades), una casilla por detrás.` : 'Sigue a un ejército que ya no existe.'; }
+            case 'join': { const t = g.armies.get(o.target); return t ? `Va a juntarse con el ejército ${afloat(t.cell) ? 'que está en' : 'de'} ${place(t.cell)} (${countUnits(t.units)} unidades)${eta}.` : 'Iba a juntarse con un ejército que ya no existe.'; }
         }
         return '';
     }

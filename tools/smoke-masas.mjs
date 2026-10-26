@@ -55,6 +55,17 @@ const setup = () => {
             }
             throw new Error('no hay casilla rodeable');
         },
+        // Casillas libres de `owner` (tierra, sin ciudad) a `d` pasos de `center`, por cada `d` de `dists`, distintas entre
+        // sí y con camino por tierra hasta `center`.
+        cellsAt(g, owner, center, dists) {
+            const near = g.nearCells(center, Math.max(...dists)), f = g.orderField(owner, center), used = new Set();
+            return dists.map(d => {
+                const c = [...near].find(([c, k]) => k === d && !used.has(c) && T.free(g, c) && g.owner[c] === owner && f.to(c) < Infinity)?.[0];
+                if (c === undefined) throw new Error(`no hay casilla a ${d}`);
+                used.add(c);
+                return c;
+            });
+        },
         // Ejército nuevo de `owner` en `cell` (sin moverse aún este turno).
         army(g, owner, cell, inf = 1, tank = 0, art = 0) { return g.settle(g.newArmy(owner, cell, { infantry: inf, tank, artillery: art }, 0)); },
         // Casilla libre de `owner`, sin ciudad, a entre `min` y `max` puntos de movimiento de `from` por su territorio.
@@ -248,6 +259,221 @@ const CHECKS = [
         T.eq(g.owner[target], fr, 'la casilla pasa a Francia');
         const ev = g.motion.filter(e => e.kind === 'battle').pop();
         T.eq(ev.joint.slice().sort(), [x.id, y.id].sort(), 'atacan juntos');
+        return true;
+    }],
+    ['A4 · crear, nombre automático y número', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        const spot = () => T.plainPair(g, es)[1];
+        const xs = [13, 13, 14].map(n => T.army(g, es, spot(), n));   // 40 en total
+        T.eq(groupAutoName(1, 40), '1.ª División', 'división');
+        T.eq([groupAutoName(3, 30), groupAutoName(4, 12), groupAutoName(1, 150), groupAutoName(2, 150), groupAutoName(3, 150), groupAutoName(1, 500), groupAutoName(2, 500), groupAutoName(1, 2000), groupAutoName(2, 5), groupAutoName(1, 2)],
+            ['3.ª División', '4.ª Brigada', '1.er Cuerpo de ejército', '2.º Cuerpo de ejército', '3.er Cuerpo de ejército', '1.er Ejército', '2.º Ejército', '1.er Grupo de ejércitos', '2.º Regimiento', '1.er Batallón'], 'ordinales y género');
+        T.eq(GROUP_COLORS.length, 8, 'ocho colores');
+        T.ok(GROUP_COLORS.every(c => /^#[0-9a-f]{6}$/i.test(c) && !OP_COLORS.includes(c)), 'hex y distintos de los de operaciones');
+        T.ok(new Set(GROUP_COLORS).size === 8, 'todos distintos');
+        const a = g.createGroup(es, xs.map(x => x.id));
+        T.ok(a, 'se crea');
+        T.eq([a.num, a.name, a.custom, a.order, a.reinforce], [1, '1.ª División', false, null, null], 'número y nombre');
+        T.ok(a.color >= 0 && a.color < 8, 'color de la paleta');
+        T.eq(g.groupMembers(es, a.id).map(x => x.id).sort(), xs.map(x => x.id).sort(), 'miembros');
+        T.eq(countUnits(g.groupUnits(es, a.id)), 40, 'unidades');
+        T.eq(g.groupById(es, a.id), a, 'por id');
+        const ys = [75, 75].map(n => T.army(g, es, spot(), n));
+        const b = g.createGroup(es, ys.map(x => x.id));
+        T.eq([b.num, b.name], [2, '2.º Cuerpo de ejército'], '150 unidades: cuerpo');
+        T.ok(a.id !== b.id && g.nextGroupId > b.id, 'ids nuevos');
+        T.ok(g.createGroup(es, [xs[0].id, 999999]) === null, 'un id que no existe: nada');
+        const foe = T.army(g, fr, T.plainPair(g, fr)[0], 5);
+        T.ok(g.createGroup(es, [foe.id]) === null && g.createGroup(es, []) === null, 'ajenos o vacío: nada');
+        // Renombrar, colorear, añadir, quitar.
+        T.ok(g.renameGroup(es, a.id, '  Tercio de Flandes  '), 'renombra');
+        T.eq([a.name, a.custom], ['Tercio de Flandes', true], 'nombre propio');
+        T.ok(g.recolorGroup(es, a.id, 5) && a.color === 5, 'color');
+        g.addToGroup(es, a.id, [ys[0].id]);
+        T.eq([ys[0].group, countUnits(g.groupUnits(es, a.id)), a.name], [a.id, 115, 'Tercio de Flandes'], 'añade y conserva el nombre propio');
+        T.eq(b.name, '2.ª División', 'la otra, con 75, se renombra sola');
+        T.ok(g.renameGroup(es, a.id, '') && a.custom === false && a.name === '1.er Cuerpo de ejército', 'sin nombre vuelve al automático');
+        // Crear con un número ocupado lo sustituye: los antiguos miembros quedan sin agrupación.
+        const c = g.createGroup(es, [xs[0].id], { num: 2 });
+        T.eq(c.num, 2, 'número pedido');
+        T.ok(!g.groupById(es, b.id) && ys[1].group === 0, 'la 2 vieja desaparece y su ejército queda suelto');
+        T.eq(xs[0].group, c.id, 'el ejército pasa a la nueva');
+        T.eq(g.createGroup(es, [ys[1].id]).num, 3, 'el número libre más bajo');
+        g.ungroup(es, [xs[1].id]);
+        T.eq(xs[1].group, 0, 'quitar');
+        g.disbandGroup(es, a.id);
+        T.ok(!g.groupById(es, a.id) && [xs[2], ys[0]].every(x => x.group === 0), 'disolver');
+        return true;
+    }],
+    ['A4 · fundir, dividir y morir no deja restos', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        const spot = () => T.plainPair(g, es)[1];
+        const [a1, a2] = [10, 10].map(n => T.army(g, es, spot(), n));
+        const [b1, b2, b3] = [5, 5, 5].map(n => T.army(g, es, spot(), n));
+        const u = T.army(g, es, spot(), 4);
+        const A = g.createGroup(es, [a1.id, a2.id]), B = g.createGroup(es, [b1.id, b2.id, b3.id]);
+        const into = (x, y) => { if (g.armyAt[x.cell] === x.id) g.armyAt[x.cell] = 0; x.cell = y.cell; return g.settle(x); };
+        T.eq(into(b1, a1), a1, 'b1 se funde en a1');
+        T.eq(a1.group, A.id, 'el que recibe conserva la suya');
+        T.eq(into(b3, u), u, 'b3 se funde en u');
+        T.eq(u.group, B.id, 'el que no tenía toma la del que llega');
+        const part = g.split(a2, { infantry: 4, tank: 0, artillery: 0, antiair: 0 });
+        T.ok(part !== a2 && part.group === A.id, 'la parte que sale la conserva');
+        g.settle(Object.assign(part, { cell: spot() }));
+        g.changeOwner(b2, fr);
+        T.eq(b2.group, 0, 'el que cambia de dueño, sin agrupación');
+        g.removeArmy(u);   // muere el último de B
+        const stray = T.army(g, es, spot(), 1), foe = [...g.armies.values()].find(x => x.owner === fr);
+        stray.group = 999; foe.group = A.id;   // restos que apuntan a nada o a otro dueño
+        T.eq(g.groupMembers(es, B.id).length, 0, 'B se queda sin nadie');
+        g.beginNationTurn(es); g.beginNationTurn(fr);
+        T.ok(!g.groupById(es, B.id), 'B desaparece');
+        T.ok(g.groupById(es, A.id), 'A sigue');
+        T.eq(g.groupMembers(es, A.id).map(x => x.id).sort(), [a1.id, a2.id, part.id].sort(), 'miembros de A');
+        T.eq(A.name, '1.ª División', 'nombre según su tamaño (25)');
+        const ids = new Set(g.nations[es].groups.map(x => x.id));
+        T.ok([...g.armies.values()].every(x => !x.group || (x.owner === es && ids.has(x.group))), 'ningún ejército apunta a nada');
+        T.eq([stray.group, foe.group], [0, 0], 'los restos se limpian');
+        return true;
+    }],
+    ['A4 · marchar repartidos y reunir en uno', () => {
+        const g = T.game(), es = T.nation('es');
+        const home = T.plainPair(g, es)[1];
+        const xs = T.cellsAt(g, es, home, [0, 1, 2, 3]).map(c => T.army(g, es, c, 3, 2, 0));
+        const total = xs.reduce((s, x) => s + countUnits(x.units), 0);
+        const dest = T.farCell(g, es, home, 8, 16);
+        const spread = g.spreadCells(es, dest, 4, new Set(xs.map(x => x.id)));
+        T.eq(spread.length, 4, 'cuatro casillas');
+        T.eq(spread[0], dest, 'empieza por el destino');
+        T.ok(new Set(spread).size === 4 && spread.every(c => isLand(c) && !g.armyAt[c]), 'distintas, de tierra y libres');
+        T.ok(spread.every(c => g.nearCells(dest, 2).has(c)), 'alrededor del destino');
+        g.groupMarch(es, xs.map(x => x.id), dest);
+        T.ok(xs.every(x => x.order?.kind === 'march'), 'todos marchan');
+        T.eq(new Set(xs.map(x => x.order.dest)).size, 4, 'cada uno a una');
+        T.turns(g, es, 12);
+        T.ok(xs.every(x => g.armies.has(x.id)), 'ninguno se funde');
+        T.eq(new Set(xs.map(x => x.cell)).size, 4, 'cuatro casillas distintas');
+        T.ok(xs.every(x => spread.includes(x.cell)), `en las repartidas (${xs.map(x => x.cell)} / ${spread})`);
+        const host = g.groupGather(es, xs.map(x => x.id));
+        T.ok(host && host.order?.kind === 'hold', 'el anfitrión espera');
+        T.ok(xs.filter(x => x !== host).every(x => x.order?.kind === 'join' && x.order.target === host.id), 'los demás van a juntarse');
+        T.turns(g, es, 6);
+        T.eq(xs.filter(x => g.armies.has(x.id)).map(x => x.id), [host.id], 'queda uno');
+        T.eq(countUnits(host.units), total, 'con todas las unidades');
+        // Si el que se busca desaparece, la orden se cancela.
+        const [p, q] = T.cellsAt(g, es, home, [1, 4]).map(c => T.army(g, es, c, 2));
+        T.ok(g.setOrder(p, { kind: 'join', target: q.id }), 'orden de juntarse');
+        T.ok(!g.setOrder(p, { kind: 'join', target: p.id }), 'consigo mismo no');
+        g.removeArmy(q);
+        T.eq(g.stepOrder(p), 'cancelled', 'sin objetivo, se cancela');
+        T.eq(p.order, null, 'sin orden');
+        return true;
+    }],
+    ['A4b · ataque coordinado espera a todos y ataca a la vez', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.declareWar(es, fr);
+        const { target } = T.ring(g, es, fr, 6);   // seis lados de tierra: sitio para todos
+        g.settle(g.newArmy(fr, target, { infantry: 400, tank: 0, artillery: 0 }, 0));
+        // Sin suministro (no hay carreteras) se avanza una casilla por turno: a 2, 3 y 3 pasos del objetivo, llegan a su
+        // casilla en 1, 2 y 2 turnos.
+        const f = g.orderField(es, target), hops = c => g.fieldPath(f, c).length - 1;
+        const near = [...g.nearCells(target, 5).keys()].filter(c => T.free(g, c) && g.owner[c] === es);
+        const pick = k => { const c = near.find(c => hops(c) === k && !g.armyAt[c]); if (c === undefined) throw new Error(`nada a ${k}`); return c; };
+        const xs = [2, 3, 3].map(k => T.army(g, es, pick(k), 0, 0, 50));
+        const gr = g.createGroup(es, xs.map(x => x.id));
+        const o = g.setGroupAssault(es, gr.id, target, 1.3);
+        T.ok(o && gr.order === o, 'orden de agrupación');
+        T.eq([o.kind, o.target, o.ratio, o.waitSince], ['assault', target, 1.3, 0], 'campos');
+        const seen = new Set(g.motion), battles = () => g.motion.filter(e => e.kind === 'battle' && !seen.has(e));
+        const adj = x => g.armies.has(x.id) && G.dirTo(x.cell, target) >= 0;
+        // Se ataca al empezar el turno (antes de mover): el turno del combate empieza con los tres en su sitio.
+        let partial = false;
+        for (let t = 0; t < 15 && g.owner[target] !== es; t++) {
+            const before = xs.filter(adj).length;
+            T.turns(g, es, 1);
+            const n = xs.filter(adj).length;
+            if (battles().length) T.eq(before, 3, 'el combate es con los tres en su sitio');
+            else if (n > 0 && n < 3) partial = true;
+        }
+        T.ok(partial, 'hubo turnos con solo parte en su sitio');
+        T.eq(g.owner[target], es, 'la casilla cambia de dueño');
+        const bs = battles();
+        T.eq(bs.length, 1, 'un solo combate');
+        T.eq(bs[0].joint.slice().sort(), xs.map(x => x.id).sort(), 'los tres a la vez');
+        T.eq(new Set(Object.values(o.slots)).size, 3, 'cada uno en su casilla');
+        T.eq(gr.order, null, 'la orden se cumple');
+        return true;
+    }],
+    ['A4b · con uno que no llega, atacan los demás a los 3 turnos', () => {
+        let g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.declareWar(es, fr);
+        let { target } = T.ring(g, es, fr, 3);
+        g.settle(g.newArmy(fr, target, { infantry: 200, tank: 0, artillery: 0 }, 0));
+        const near = T.cellsAt(g, es, target, [2, 3]).map(c => T.army(g, es, c, 0, 0, 50));
+        const far = T.army(g, es, T.farCell(g, es, target, 45, 90), 0, 0, 50);
+        let gr = g.createGroup(es, [...near, far].map(x => x.id));
+        g.setGroupAssault(es, gr.id, target, 1.3);
+        const seen = new Set(g.motion), battles = () => g.motion.filter(e => e.kind === 'battle' && !seen.has(e));
+        const adj = x => g.armies.has(x.id) && G.dirTo(x.cell, target) >= 0;
+        let arrived = 0, fought = 0;
+        for (let t = 0; t < 12 && !fought; t++) {
+            T.turns(g, es, 1);
+            if (!arrived && near.some(adj)) arrived = g.turn - 1;
+            if (battles().length) fought = g.turn - 1;
+        }
+        T.ok(arrived && fought, `llegan (${arrived}) y atacan (${fought})`);
+        T.ok(fought - arrived >= 3, `esperan 3 turnos (${arrived} → ${fought})`);
+        T.ok(!adj(far), 'el lejano no ha llegado');
+        const b = battles()[0];
+        T.eq(b.joint.slice().sort(), near.map(x => x.id).sort(), 'atacan los dos que están');
+        T.eq(g.owner[target], es, 'y ganan');
+        // Contra lo que no pueden, esperan: nadie ataca solo ni juntos por debajo de la relación pedida.
+        g = T.game(); es = T.nation('es'); fr = T.nation('fr');
+        g.declareWar(es, fr);
+        ({ target } = T.ring(g, es, fr, 3));
+        g.settle(g.newArmy(fr, target, { infantry: 3000, tank: 0, artillery: 0 }, 0));
+        const two = T.cellsAt(g, es, target, [2, 3]).map(c => T.army(g, es, c, 0, 0, 10));
+        gr = g.createGroup(es, two.map(x => x.id));
+        g.setGroupAssault(es, gr.id, target, 1.3);
+        const seen2 = new Set(g.motion);
+        T.turns(g, es, 8);
+        T.eq(g.motion.filter(e => e.kind === 'battle' && !seen2.has(e)).length, 0, 'sin combates');
+        T.ok(two.every(x => G.dirTo(x.cell, target) >= 0 && x.order?.kind === 'hold'), 'esperan en su sitio');
+        T.ok(gr.order?.kind === 'assault' && g.owner[target] === fr, 'la orden sigue');
+        return true;
+    }],
+    ['A4 · guardar y cargar conserva agrupaciones y órdenes', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.declareWar(es, fr);
+        const { target } = T.ring(g, es, fr, 2);
+        g.settle(g.newArmy(fr, target, { infantry: 900, tank: 0, artillery: 0 }, 0));
+        const xs = T.cellsAt(g, es, target, [2, 3, 4, 6]).map(c => T.army(g, es, c, 0, 0, 20));
+        const a = g.createGroup(es, [xs[0].id, xs[1].id]);
+        g.renameGroup(es, a.id, 'Agrupación Norte'); g.recolorGroup(es, a.id, 6);
+        g.setGroupAssault(es, a.id, target, 1.8);
+        T.turns(g, es, 1);   // reparte las casillas
+        T.eq(Object.keys(a.order.slots).length, 2, 'casillas repartidas');
+        const b = g.createGroup(es, [xs[2].id], { num: 7 });
+        T.ok(g.setOrder(xs[3], { kind: 'join', target: xs[2].id }), 'orden de juntarse');
+        const data = JSON.parse(JSON.stringify(g.serialize()));
+        const h = GameEngine.load(data);
+        T.eq(h.nations[es].groups, g.nations[es].groups, 'agrupaciones');
+        T.eq(h.nextGroupId, g.nextGroupId, 'siguiente id');
+        T.eq(xs.map(x => h.armies.get(x.id).group), [a.id, a.id, b.id, 0], 'cada ejército en la suya');
+        T.eq([h.armies.get(xs[3].id).order.kind, h.armies.get(xs[3].id).order.target], ['join', xs[2].id], 'orden de juntarse');
+        // Un archivo manipulado: números, colores, nombres, órdenes y miembros que no valen.
+        const bad = JSON.parse(JSON.stringify(data));
+        const foe = [...g.armies.values()].find(x => x.owner === fr);
+        bad.nations[es].groups.push({ id: 60, num: 500, name: 'x', color: 2 }, { id: a.id, num: 9, name: 'repetida', color: 1 },
+            { id: 61, num: 9, name: 'y'.repeat(100), color: 12, custom: 1, order: { kind: 'assault', target: -5 } }, { id: 62, num: 7, name: 'número repetido' });
+        bad.nations[es].groups[0].order.slots[123456] = target;
+        bad.armyGroups.push([foe.id, a.id], [987654, 61]);
+        const k = GameEngine.load(bad), ks = k.nations[es].groups;
+        T.eq(ks.map(x => x.id), [a.id, b.id, 61], 'se quedan las válidas');
+        const y = ks[2];
+        T.eq([y.num, y.name.length, y.color, y.order, y.custom], [9, 40, 0, null, true], 'se acota lo demás');
+        T.eq(k.armies.get(foe.id).group, 0, 'un ejército ajeno no entra');
+        T.eq(Object.keys(ks[0].order.slots).length, 2, 'casillas de ejércitos que no existen, fuera');
         return true;
     }],
     ['A6 · oro de operación hasta 6400 y fondo mayor', () => {
