@@ -947,14 +947,22 @@ const WEAPON_KEYS = Object.keys(WEAPONS);
 // lo desorganiza; `kinds`: los blancos que admite; `fort`: niveles de fortificación que quita; `aa`: lo que hace a un
 // antiaéreo ('hit', un acierto como el de la aviación, solo a un sitio fijo; 'kill', lo destruye); `splash`: bajas en
 // los ejércitos de las casillas vecinas; `dev`: lo que deja del desarrollo de la provincia si el blanco es su ciudad;
-// `precise`: rinde entero aunque no se conozca el blanco. La nuclear (C4) tiene su propio efecto.
+// `precise`: rinde entero aunque no se conozca el blanco; `nuke`: la nuclear (C4), con su propio efecto (nukeEffect):
+// arrasa la zona, así que no falla a ciegas y su blanco es un ejército o una casilla ('area').
 const STRIKE_FX = {
     rocket:      { loss: [0.06, 0.03], kinds: ['army', 'roads'] },
     heavyRocket: { loss: [0.10, 0.04], kinds: ['army', 'roads', 'aa'], aa: 'hit' },
     missile:     { loss: [0.15, 0.05], kinds: ['army', 'fort', 'aa', 'battery', 'airfield'], disorg: true, fort: 1, aa: 'kill' },
     heavy:       { loss: [0.25, 0.05], kinds: ['army', 'fort', 'aa', 'battery', 'airfield'], fort: 2, aa: 'kill', splash: 0.08, dev: 0.75 },
-    guided:      { loss: [0.15, 0.05], kinds: ['army', 'fort', 'aa', 'battery', 'airfield'], fort: 1, aa: 'kill', precise: true }
+    guided:      { loss: [0.15, 0.05], kinds: ['army', 'fort', 'aa', 'battery', 'airfield'], fort: 1, aa: 'kill', precise: true },
+    nuclear:     { kinds: ['army', 'area'], precise: true, nuke: true }
 };
+// Bomba nuclear (C4). KM: radio (al menos una casilla); HALF: parte de las unidades que pierde cada ejército del radio
+// (el de la casilla, todo); FALLOUT_TURNS: turnos que queda contaminada la zona; FALLOUT_LOSS: lo que pierde por turno el
+// ejército que termina el turno de su dueño en ella; PARIAH_TURNS: turnos de paria de quien la lanza; PARIAH_WAR: la
+// warRatio de la IA contra un paria; ALLY_LEAVE: probabilidad de que cada aliado suyo deje el bloque; LOSING: parte de
+// sus provincias de partida perdidas con la que la IA se ve perdiendo de verdad.
+const NUKE = { KM: 40, HALF: 0.5, FALLOUT_TURNS: 15, FALLOUT_LOSS: 0.1, PARIAH_TURNS: 30, PARIAH_WAR: 0.6, ALLY_LEAVE: 0.5, LOSING: 0.4 };
 // Turnos que queda inservible un aeródromo al que llega un misil, y parte de sus antiaéreas que pierde un ejército.
 const STRIKE_DOWN_TURNS = 3, STRIKE_MOBILE = 0.5;
 const emptyArsenal = () => Object.fromEntries(WEAPON_KEYS.map(k => [k, 0]));
@@ -1401,6 +1409,7 @@ class GameEngine {
             gold: 0, alive: true, recruited: new Map(), overlord: -1, templates: [], groups: [], command: newCommand(),
             tech: { done: new Set(), progress: new Map(), current: [], seeded: new Set() },  // investigación: hechas, turnos invertidos, en curso; seeded: las de partida (no encarecen)
             arsenal: emptyArsenal(),   // armas compradas por tipo (WEAPONS)
+            pariahUntil: 0,   // paria nuclear hasta este turno (sin incluirlo): ver makePariah
             lastTurn: 0,   // último turno en que empezó a jugar (ver nextOwnTurn)
             airFund: 0   // oro que la IA aparta para su próximo escuadrón (ver aiRecruit)
         }));
@@ -1440,6 +1449,10 @@ class GameEngine {
         // turno de cada país: todo se repone al empezar (defenseRound).
         this.batteries = new Map();   // casilla → { owner, left, known, used }: left, turnos de obra; used, armas atendidas
         this.defUsed = new Map();
+        // Contaminación nuclear (C4): casilla → turno en que se acaba (sin incluirlo). No da renta y desgasta a quien
+        // termina su turno en ella.
+        this.fallout = new Map();
+        this.falloutVersion = 0;
         this.splitFrom = new Map();   // id de la parte → [id del ejército del que sale, turno] (su escolta de ataque la apoya ese turno)
         this.aiEscortOnly = new Set();   // ofensivas de la IA que protegen y escoltan solo por sus drones (aiWings, cada turno; no se guarda)
         this.seedAir();
@@ -1507,7 +1520,7 @@ class GameEngine {
             nations: this.nations.map(n => ({ gold: n.gold, airFund: n.airFund, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord, templates: n.templates, command: n.command,
                 groups: n.groups.map(x => ({ id: x.id, num: x.num, name: x.name, color: x.color, custom: x.custom, order: x.order, reinforce: x.reinforce, ...(x.air ? { air: true } : {}) })),
                 tech: { done: [...n.tech.done], progress: [...n.tech.progress], current: [...n.tech.current], seeded: [...n.tech.seeded] },
-                arsenal: n.arsenal })),
+                arsenal: n.arsenal, pariahUntil: n.pariahUntil })),
             relations,
             armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used, a.hunger || 0, a.disorgUntil || 0, a.units.antiair || 0, a.rocketTurn || 0]),
             nextArmyId: this.nextArmyId,
@@ -1542,7 +1555,8 @@ class GameEngine {
                 hits: [...this.droneHits].filter(([, t]) => t === this.turn).map(([k]) => k),
                 seen: [...this.droneSeen].filter(([, t]) => t >= this.turn),
                 wings: [...this.swarms.values()].filter(q => q.group).map(q => [q.id, q.group]) },
-            defense: { bat: [...this.batteries].map(([c, b]) => [c, b.owner, b.left, [...b.known], b.used]), used: [...this.defUsed] }
+            defense: { bat: [...this.batteries].map(([c, b]) => [c, b.owner, b.left, [...b.known], b.used]), used: [...this.defUsed] },
+            fallout: [...this.fallout]
         };
     }
 
@@ -1697,6 +1711,7 @@ class GameEngine {
             templates: list(n?.templates).slice(0, TPL_OWN_MAX).map(t => ({ name: str(t?.name, 40) || 'Plantilla', units: units(t?.units, TPL_MAX) }))
                 .filter(t => countUnits(t.units) > 0),
             arsenal: Object.fromEntries(WEAPON_KEYS.map(k => [k, int(n?.arsenal?.[k], 0, 1e6, 0)])),
+            pariahUntil: int(n?.pariahUntil, 0, 1e6, 0),
             tech: techOf(n?.tech)
         }));
         g.techVersion++;   // lo calculado hasta aquí no conocía la investigación
@@ -1912,6 +1927,13 @@ class GameEngine {
                 g.defUsed.set(m[0], n);
             }
         }
+        // Contaminación nuclear: casillas de tierra con un turno de fin por venir. Las partidas de antes, sin ella.
+        g.fallout = new Map();
+        for (const x of list(data.fallout).slice(0, G.N)) {
+            const c = int(x?.[0], -1, G.N - 1, -1), end = int(x?.[1], 0, 1e6, 0);
+            if (c >= 0 && isLand(c) && end > g.turn) g.fallout.set(c, end);
+        }
+        g.falloutVersion++;
         // Escoltas (el campo 10 de un escuadrón y el 8 de un enjambre): a un ejército o a una agrupación de su dueño que
         // existan, en un modo que exista; la de un enjambre, con Municiones merodeadoras (escortTask). La de una operación
         // sigue en ella. Las partidas de antes, sin escolta.
@@ -2045,15 +2067,17 @@ class GameEngine {
         return false;
     }
     economy(id) {
-        const key = `${this.version}:${this.roadVersion}:${this.blocVersion}:${this.devVersion}:${this.techVersion}`;
+        // Con contaminación, también por turno: se acaba con él (ver contaminated).
+        const key = `${this.version}:${this.roadVersion}:${this.blocVersion}:${this.devVersion}:${this.techVersion}${this.fallout.size ? `:${this.falloutVersion}:${this.turn}` : ''}`;
         const cached = this.econCache[id];
         if (cached && cached.key === key) return cached;
+        const hot = this.fallout.size ? c => this.contaminated(c) : () => false;   // las casillas contaminadas no dan renta
         const seen = this.reachedRoadCells(id);
         const connected = new Set();
         for (const p of PROVINCES) if (this.owner[p.city] === id && this.nearSeen(seen, p.city)) connected.add(p.id);
         let base = 0, road = 0, res = 0, dev = 0;
         for (const i of G.land) {
-            if (this.owner[i] !== id) continue;
+            if (this.owner[i] !== id || hot(i)) continue;
             const disputed = this.legal[i] !== id;
             const v = CELL_VALUE[i] * (disputed ? CONFIG.DISPUTED_INCOME : 1);
             base += v;
@@ -2062,7 +2086,7 @@ class GameEngine {
         }
         // Un yacimiento siempre rinde su oro y abastece a su provincia. Si una carretera pasa por su casilla, abastece
         // también a las provincias cuya ciudad está en ese mismo tramo de red (territorio propio o aliado).
-        const owned = RESOURCES.filter(r => this.owner[r.cell] === id);
+        const owned = RESOURCES.filter(r => this.owner[r.cell] === id && !hot(r.cell));
         const rules = this.rules(id);
         for (const r of owned) res += r.value * (this.legal[r.cell] === id ? 1 : CONFIG.DISPUTED_INCOME) * rules.resIncome;
         const comp = this.roadComponents(id);
@@ -2077,7 +2101,7 @@ class GameEngine {
         }
         let industry = 0;
         for (const i of G.land) {
-            if (this.owner[i] !== id) continue;
+            if (this.owner[i] !== id || hot(i)) continue;
             const list = access.get(G.prov[i]);
             if (!list) continue;
             const v = CELL_VALUE[i] * (this.legal[i] === id ? 1 : CONFIG.DISPUTED_INCOME) * (1 + this.dev[G.prov[i]] / 1000);
@@ -3541,10 +3565,11 @@ class GameEngine {
         const w = WEAPONS[key], fx = STRIKE_FX[key];
         if (!w) return 'Arma desconocida.';
         const the = `${w.fem ? 'La' : 'El'} ${w.name.toLowerCase()}`;
-        if (!fx) return `${the} aún no se puede lanzar.`;   // la nuclear llega con su efecto (C4)
+        if (!fx) return `${the} aún no se puede lanzar.`;
+        if (fx.nuke && !this.settings.nukes) return 'Las armas nucleares están prohibidas en esta partida.';
         if (!Number.isInteger(n) || n < 1) return 'Salva no válida: hay que lanzar al menos una.';
         if (!Number.isInteger(cell) || cell < 0 || cell >= G.N) return 'Blanco no válido.';
-        const target = { army: 'un ejército', roads: 'las carreteras', fort: 'una fortificación', aa: 'un antiaéreo', battery: 'una batería', airfield: 'un aeródromo' }[kind];
+        const target = { army: 'un ejército', roads: 'las carreteras', fort: 'una fortificación', aa: 'un antiaéreo', battery: 'una batería', airfield: 'un aeródromo', area: 'una casilla' }[kind];
         if (!target) return 'Ese blanco no existe.';
         if (!fx.kinds.includes(kind)) return `${the} no sirve contra ${target}.`;
         const have = this.nations[owner].arsenal[key];
@@ -3580,6 +3605,7 @@ class GameEngine {
                 if (!f || f.owner === owner || this.allied(owner, f.owner) || !this.airfieldUp(cell)) return 'No hay aeródromo enemigo que funcione.';
                 return this.atWar(owner, f.owner) ? '' : war;
             }
+            case 'area': return isLand(cell) && this.atWar(owner, this.owner[cell]) ? '' : war;   // la nuclear, sobre una casilla enemiga
         }
         return '';
     }
@@ -3599,7 +3625,12 @@ class GameEngine {
         const known = kind === 'aa' || kind === 'battery' || this.knownCell(viewer, cell), hit = known || fx.precise ? 1 : BASE_RULES.blindHit;
         const hits = def.through * hit, chance = 1 - (1 - hits / n) ** n, pc = x => `${Math.round(x * 100)} %`;
         let loss = 0, units = null, levels = 0, effect = '';
-        switch (kind) {
+        if (fx.nuke) {   // la nuclear arrasa la zona (C4): si llega una, el ejército blanco desaparece
+            if (kind === 'army') { loss = chance; if (this.knownCell(viewer, cell)) units = countUnits(this.armyOn(cell).units); }
+            effect = `arrasa ${NUKE.KM} km a la redonda (${pc(chance)}): destruye lo que hay en la casilla y quita la mitad de sus unidades a todos los`
+                + ` ejércitos del radio, también a los tuyos; destruye sus instalaciones, aeródromos y enjambres y rompe sus carreteras;`
+                + ` el desarrollo de la provincia cae a 0 y la zona queda contaminada ${NUKE.FALLOUT_TURNS} turnos. Lanzarla te deja paria ${NUKE.PARIAH_TURNS} turnos`;
+        } else switch (kind) {
             case 'army':
                 loss = 1 - (1 - fx.loss[0] - fx.loss[1] / 2) ** hits;   // las bajas se componen
                 if (this.knownCell(viewer, cell)) units = Math.round(countUnits(this.armyOn(cell).units) * loss);
@@ -3717,6 +3748,7 @@ class GameEngine {
         if (!this.strikeFromCity(owner, key, from)) this.armyOn(from).rocketTurn = this.turn;
         const def = this.incomingDefense(owner, w.cls, cell, n), through = Math.round(def.through);
         this.note({ kind: 'strike', owner, from, cell, weapon: key, n, through });   // la vista lo anima
+        if (fx.nuke) return this.nukeStrike(owner, n, cell, def, through);
         const known = kind === 'aa' || kind === 'battery' || fx.precise || this.knownCell(owner, cell);
         const st = { hits: 0, missed: 0, lost: 0, disorg: false, gone: false, splash: new Map(), roads: 0, levels: 0, aa: '', down: 0, dev: null };
         for (let i = 0; i < through && this.strikeStands(kind, cell, army, src); i++) {
@@ -3768,6 +3800,170 @@ class GameEngine {
         if (through) parts.push(stopped ? `${through === 1 ? (w.fem ? 'llega una' : 'llega uno') : `llegan ${through}`}${tail ? `: ${tail}` : ''}` : tail);
         const body = parts.filter(Boolean).join('; ');
         return `${head}${body ? `: ${body}` : ''}.`;
+    }
+    // --- Armas nucleares (C4) ---
+    // Las bombas que llegan arrasan la zona, una tras otra (nukeEffect). Quien la lanza queda paria aunque se la
+    // intercepten: lo que cuenta es haberla lanzado. Un ataque nuclear sale en el parte de todos.
+    nukeStrike(owner, n, cell, def, through) {
+        const st = { hits: 0, armies: new Map(), sites: 0, batteries: 0, fields: 0, squadrons: 0, swarms: 0, forts: 0, roads: 0, dev: null, zone: new Set() };
+        for (let i = 0; i < through; i++) { st.hits++; this.nukeEffect(cell, st); }
+        const text = this.nukeReport(owner, cell, n, through, st, owner);
+        if (this.player !== null) this.log(owner === this.player ? text : this.nukeReport(owner, cell, n, through, st, this.player));
+        this.makePariah(owner);
+        return { result: through ? 'hit' : 'intercepted', through, stopped: def.stopped, text };
+    }
+    // Lo que hace una bomba nuclear que llega a `cell`, sin distinguir de quién es nada: los ejércitos de la casilla
+    // desaparecen y los del radio (NUKE.KM, al menos una casilla) pierden la mitad de sus unidades; en el radio se
+    // destruyen fortificaciones (y sus obras), antiaéreos fijos, baterías, aeródromos con sus escuadrones y los enjambres
+    // con base en él, y se rompen las carreteras; la provincia del blanco queda con desarrollo 0 y la tierra del radio,
+    // contaminada NUKE.FALLOUT_TURNS turnos. Lo apunta en `st` para el parte.
+    nukeEffect(cell, st) {
+        const zone = hexDisc(cell, kmCells(NUKE.KM)), inZone = new Set(zone);
+        for (const a of [...this.armies.values()]) {
+            if (!inZone.has(a.cell)) continue;
+            const n = countUnits(a.units), k = a.cell === cell ? n : Math.min(n, Math.ceil(n * NUKE.HALF));
+            const e = st.armies.get(a) ?? { owner: a.owner, lost: 0, gone: false };
+            this.takeUnits(a, k);
+            e.lost += k;
+            if (!countUnits(a.units)) { this.removeArmy(a); e.gone = true; }
+            st.armies.set(a, e);
+        }
+        const end = this.turn + NUKE.FALLOUT_TURNS;
+        for (const c of zone) {
+            if (this.fort[c]) { this.fort[c] = 0; st.forts++; this.fortVersion++; }
+            if (this.fortWork.delete(c)) this.fortVersion++;
+            if (this.aaSites.delete(c)) st.sites++;
+            if (this.batteries.delete(c)) st.batteries++;
+            if (this.airfields.has(c)) {
+                const lost = this.squadronsAt(c);
+                for (const q of lost) this.squadrons.delete(q.id);
+                this.airfields.delete(c);
+                st.fields++; st.squadrons += lost.length;
+            }
+            st.roads += this.breakRoads(c);
+            if (isLand(c)) { this.fallout.set(c, Math.max(this.fallout.get(c) ?? 0, end)); st.zone.add(c); }
+        }
+        for (const q of [...this.swarms.values()]) if (inZone.has(q.base)) { this.swarmDown(q); st.swarms++; }
+        if (isLand(cell)) {
+            const p = G.prov[cell];
+            st.dev ??= this.dev[p];
+            this.dev[p] = 0;
+            this.devVersion++;
+        }
+        this.armyVersion++; this.airVersion++; this.falloutVersion++;
+    }
+    // Parte de un ataque nuclear para `viewer`: quien la lanza («Lanzas una bomba nuclear contra X: …») o cualquier otro
+    // («Francia lanza una bomba nuclear contra X: …»), con lo que pierden sus ejércitos.
+    nukeReport(owner, cell, n, through, st, viewer) {
+        const w = WEAPONS.nuclear, X = this.placeName(cell), many = n > 1, stopped = n - through;
+        const salvo = many ? `${n} ${w.many}` : 'una bomba nuclear';
+        const head = viewer === owner ? `Lanzas ${salvo} contra ${X}` : `${this.nm(owner)} lanza ${salvo} contra ${X}`;
+        const and = xs => xs.length > 1 ? `${xs.slice(0, -1).join(', ')} y ${xs[xs.length - 1]}` : xs.join('');
+        const fx = [];
+        if (st.hits) {
+            const all = [...st.armies.values()], lost = all.reduce((s, e) => s + e.lost, 0), gone = all.filter(e => e.gone).length;
+            if (all.length) fx.push(`${plural(all.length, 'ejército pierde', 'ejércitos pierden')} ${plural(lost, 'unidad', 'unidades')}${gone ? ` (${gone === 1 ? 'uno queda destruido' : `${gone} quedan destruidos`})` : ''}`);
+            const own = all.filter(e => e.owner === viewer).reduce((s, e) => s + e.lost, 0);
+            if (own) fx.push(`tus ejércitos pierden ${plural(own, 'unidad', 'unidades')}`);
+            const gear = [st.fields ? `${plural(st.fields, 'aeródromo', 'aeródromos')}${st.squadrons ? ` con ${plural(st.squadrons, 'escuadrón', 'escuadrones')}` : ''}` : '',
+                st.sites ? plural(st.sites, 'antiaéreo', 'antiaéreos') : '', st.batteries ? plural(st.batteries, 'batería', 'baterías') : '',
+                st.swarms ? plural(st.swarms, 'enjambre', 'enjambres') : '', st.forts ? plural(st.forts, 'fortificación', 'fortificaciones') : ''].filter(Boolean);
+            if (gear.length) fx.push(`destruye ${and(gear)}`);
+            if (st.roads) fx.push(plural(st.roads, 'tramo de carretera roto', 'tramos de carretera rotos'));
+            if (st.dev !== null) fx.push(`el desarrollo de ${PROVINCES[G.prov[cell]].name} cae a 0`);
+            fx.push(`${plural(st.zone.size, 'casilla queda contaminada', 'casillas quedan contaminadas')} ${NUKE.FALLOUT_TURNS} turnos`);
+        }
+        const tail = fx.join('; '), parts = [];
+        if (stopped) parts.push(many ? `${stopped} de ${n} ${w.many} interceptadas` : 'la interceptan');
+        if (through) parts.push(stopped ? `${through === 1 ? 'llega una' : `llegan ${through}`}: ${tail}` : tail);
+        return `${head}: ${parts.join('; ')}.`;
+    }
+    // ¿Está contaminada `cell` ahora? (Hasta el turno de fin, sin incluirlo.)
+    contaminated(cell) { return (this.fallout.get(cell) ?? 0) > this.turn; }
+    // Al empezar el turno de `id`: se acaba la contaminación que ha cumplido sus turnos y cada ejército suyo que terminó
+    // su turno en una casilla contaminada pierde el 10 % de sus unidades (al menos una).
+    falloutTurn(id) {
+        if (!this.fallout.size) return;
+        for (const [c, end] of this.fallout) if (end <= this.turn) { this.fallout.delete(c); this.falloutVersion++; }
+        for (const a of [...this.armies.values()]) {
+            if (a.owner !== id || !this.contaminated(a.cell)) continue;
+            const n = countUnits(a.units), k = Math.min(n, Math.max(1, Math.round(n * NUKE.FALLOUT_LOSS))), where = this.placeName(a.cell);
+            this.takeUnits(a, k);
+            const gone = !countUnits(a.units);
+            if (gone) this.removeArmy(a);
+            this.armyVersion++;
+            if (id === this.player) this.log(`Tu ejército en ${where} sufre la contaminación nuclear: pierde ${plural(k, 'unidad', 'unidades')}${gone ? ' y se disuelve' : ''}.`);
+        }
+    }
+    // ¿Es `id` un paria nuclear ahora?
+    isPariah(id) { return id >= 0 && id < this.nations.length && this.nations[id].pariahUntil > this.turn; }
+    // Por qué no se firma nada con alguno de `ids` ('' si ninguno es paria): «eres un paria nuclear», «Francia es un…».
+    pariahWhy(...ids) {
+        const x = ids.find(i => this.isPariah(i));
+        return x === undefined ? '' : x === this.player ? 'eres un paria nuclear' : `${this.nm(x)} es un paria nuclear`;
+    }
+    // Quien lanza una nuclear queda paria NUKE.PARIAH_TURNS turnos: las IA le declaran la guerra con la warRatio ×0,6 y
+    // no firman con él la paz ni alianzas (peaceWish, acceptsPeace, acceptsBloc, admits), y cada aliado suyo de la IA deja
+    // el bloque con un 50 % (el jugador decide él). Las propuestas de paz y de alianza que tenga el jugador paria se retiran.
+    // Pasado ese tiempo, sus guerras siguen las reglas de siempre (también la salida por tiempo), así que no se eternizan.
+    makePariah(id) {
+        const nat = this.nations[id];
+        nat.pariahUntil = Math.max(nat.pariahUntil, this.turn + NUKE.PARIAH_TURNS);
+        this.warVersion++;
+        const last = nat.pariahUntil - 1;   // el último turno de paria
+        this.log(id === this.player
+            ? `Eres un paria nuclear hasta el turno ${last}: ningún país de la IA firmará la paz ni alianzas contigo, y te declararán la guerra con mucha menos ventaja.`
+            : `${nat.name} es un paria nuclear hasta el turno ${last}: ningún país de la IA firmará la paz ni alianzas con él.`);
+        for (const bl of this.blocsOf(id)) for (const m of [...bl.members]) {
+            if (m === id || m === this.player || !this.nations[m].alive || !bl.members.has(m)) continue;
+            if (this.rng() < NUKE.ALLY_LEAVE) this.leaveBloc(bl, m, ` tras el ataque nuclear de ${nat.name}`);
+        }
+        if (id === this.player) this.proposals = this.proposals.filter(p => p.kind !== 'paz' && p.kind !== 'bloque');
+    }
+    // ¿Pierde `id` de verdad? Su capital tomada, asediada o con un ejército enemigo al lado, o el 40 % de sus provincias
+    // de partida ocupadas por quien está en guerra con él.
+    nukeLosing(id) {
+        const cap = this.nations[id].capitalCell, foe = o => o >= 0 && this.atWar(id, o);
+        if (foe(this.owner[cap]) || foe(this.sieges.get(cap)?.by ?? -1)) return true;
+        if (hexDisc(cap, 1).some(c => { const a = this.armyOn(c); return !!a && foe(a.owner); })) return true;
+        const lost = PROVINCES.filter(p => this.legal[p.city] === id && foe(this.owner[p.city])).length;
+        return START_PROVINCES[id] > 0 && lost >= NUKE.LOSING * START_PROVINCES[id];
+    }
+    // Blanco de la nuclear de la IA: el mayor ejército enemigo (en unidades) dentro de su territorio (de derecho) o junto a
+    // su capital, que pueda alcanzar; −1 si no hay.
+    nukeTarget(id) {
+        const cap = this.nations[id].capitalCell;
+        let best = -1, most = 0;
+        for (const a of this.armies.values()) {
+            if (!this.atWar(id, a.owner) || this.armyAt[a.cell] !== a.id) continue;
+            if (this.legal[a.cell] !== id && hexDist(a.cell, cap) > 1) continue;
+            const n = countUnits(a.units);
+            if (n < most || (n === most && a.cell > best) || this.strikeCheck(id, 'nuclear', 1, 'army', a.cell)) continue;
+            best = a.cell; most = n;
+        }
+        return best;
+    }
+    // ¿Está la renta de `id` en el tercio alto de los países vivos? Con la última renta calculada de cada uno (la de su
+    // cobro, o una más reciente): rehacerlas todas en el mapa del mundo cuesta demasiado para esto.
+    nukeRich(id) {
+        const inc = x => (this.econCache[x] ?? this.economy(x)).total, alive = this.nations.filter(n => n.alive).map(n => n.id), mine = inc(id);
+        return alive.filter(x => inc(x) > mine).length < Math.ceil(alive.length / 3);
+    }
+    // La bomba de la IA (C4), nunca con las nucleares prohibidas. Si tiene una, la lanza solo si pierde de verdad
+    // (nukeLosing), contra nukeTarget. Si no la tiene, compra una si puede, es rica (nukeRich) y está en guerra con alguien
+    // más fuerte que ella.
+    aiNukes(id, powers = this.powers()) {
+        if (!this.settings.nukes) return;
+        const n = this.nations[id];
+        if (n.arsenal.nuclear > 0) {
+            if (!this.nukeLosing(id)) return;
+            const cell = this.nukeTarget(id);
+            if (cell >= 0) this.launchStrike(id, 'nuclear', 1, 'army', cell);
+            return;
+        }
+        if (!this.rules(id).nuclear || !this.enemiesOf(id).some(e => powers[e] > powers[id])) return;
+        if (n.gold < this.weaponPrice(id, 'nuclear') || !this.nukeRich(id)) return;
+        this.buyWeapon(id, 'nuclear', 1);
     }
     // El jugador lanza; si no puede, el parte dice por qué y no sale nada del arsenal.
     playerStrike(key, n, kind, cell) {
@@ -8546,6 +8742,7 @@ class GameEngine {
         this.airTurn(id);
         for (const a of this.armies.values()) if (a.owner === id) a.used = 0;
         this.feedArmies(id);
+        this.falloutTurn(id);   // la contaminación nuclear: se acaba la que ha cumplido sus turnos y desgasta al que sigue en ella
         this.pruneGroups(id);   // agrupaciones sin nadie, fuera; nombres según su tamaño
         this.pruneEscorts(id);  // y la escolta de lo que ya no existe
         this.advanceResearch(id);
@@ -8922,11 +9119,18 @@ class GameEngine {
     // perdido territorio. Y, porque ha pasado un tiempo, también el que la empezó: tras peaceAfter turnos, si la guerra se
     // ha estancado (6 turnos sin ganar terreno), y tras 2 × peaceAfter, siempre. Antes, el muy superior que la empezó y
     // aún no ha cumplido su objetivo ni la propone ni la acepta. blocker: por qué no la quiere y qué le haría quererla;
-    // ways: solo esto último (para la niebla, que no deja ver la fuerza).
+    // ways: solo esto último (para la niebla, que no deja ver la fuerza). Con un paria nuclear (C4) nadie la quiere,
+    // ni vencido (pariah: true), hasta que deja de serlo; entonces vuelven estas reglas, con su salida por tiempo.
     peaceWish(ai, other, powers = this.powers()) {
         if (!this.atWar(ai, other)) return { wants: false, why: null, blocker: null, ways: null };
+        const t = k => plural(k, 'turno', 'turnos');
+        if (this.isPariah(other)) {
+            const left = t(this.nations[other].pariahUntil - this.turn), you = other === this.player;
+            return { wants: false, why: null, pariah: true, ways: `cuando ${you ? 'dejes' : 'deje'} de ser un paria nuclear, dentro de ${left}`,
+                blocker: `${this.pariahWhy(other)} y nadie firma la paz ${you ? 'contigo' : 'con él'} hasta dentro de ${left}` };
+        }
         const s = this.warState(ai, other, powers), min = CONFIG.WAR_MIN_TURNS, after = this.ai.peaceAfter, long = 2 * after;
-        const yes = why => ({ wants: true, why, blocker: null, ways: null }), t = k => plural(k, 'turno', 'turnos');
+        const yes = why => ({ wants: true, why, blocker: null, ways: null });
         if (s.crushed) return yes('vencido');
         if (s.turns < min) return { wants: false, why: null, blocker: `nadie negocia antes de ${min} turnos de guerra; faltan ${t(min - s.turns)}`, ways: null };
         if (s.goalDone) return yes('objetivo');
@@ -8962,16 +9166,18 @@ class GameEngine {
         if (wish.wants) {
             accept = fog && (wish.why === 'inferior' || wish.why === 'vencido') ? 'Aceptaría la paz.' : `Aceptaría la paz: ${PEACE_WHY_TEXT[wish.why]}.`;
             if (!this.acceptsWhite(rival, wish.why)) accept += ' Solo quedándose lo que ocupa: no una paz blanca.';
-        } else if (fog && s.turns >= CONFIG.WAR_MIN_TURNS) accept = `No aceptará la paz: no sabes cuánta fuerza reúne su bando. Lo hará ${wish.ways}.`;
+        } else if (wish.pariah) accept = `No aceptará la paz: ${wish.blocker}.`;
+        else if (fog && s.turns >= CONFIG.WAR_MIN_TURNS) accept = `No aceptará la paz: no sabes cuánta fuerza reúne su bando. Lo hará ${wish.ways}.`;
         else accept = `No aceptará la paz: ${wish.blocker}.`;
         // Si no la empezó él y va por delante, aún puede aceptar que cada uno se quede lo ocupado (ver acceptsPeace).
-        if (!wish.wants && s.turns >= CONFIG.WAR_MIN_TURNS && !this.warRole(rival, p).started) {
+        if (!wish.wants && !wish.pariah && s.turns >= CONFIG.WAR_MIN_TURNS && !this.warRole(rival, p).started) {
             const occ = this.occupation(rival);
             if (occ.theirs > occ.mine + occ.sats) accept += ' Aun así, como te ocupa más de lo que le ocupas, puede aceptar que cada uno se quede lo ocupado.';
         }
         return { origin, turns: s.turns, power: s.power, enemyPower: fog ? null : s.enemyPower, mine: s.mine, theirs: s.theirs, accept, wants: wish.wants };
     }
     acceptsPeace(ai, terms, offered) {
+        if (this.isPariah(this.player)) return false;   // con un paria nuclear, nada (C4)
         if (terms.mode === 'satellite') return this.isCrushed(ai);
         const wish = this.peaceWish(ai, this.player);
         // Si quiere la paz (o la ha propuesto él), acepta quedarse cada uno lo ocupado; la paz blanca, solo si no pierde con ella.
@@ -9035,8 +9241,10 @@ class GameEngine {
         return total;
     }
     // ¿Acepta `ai` entrar en `bloc` (o fundar uno con `inviter` si bloc es null)?
+    // Con un paria nuclear (C4), sea él o alguno de los demás, no hay alianza.
     acceptsBloc(ai, bloc, inviter) {
         const members = bloc ? [...bloc.members] : [inviter];
+        if (this.pariahWhy(ai, ...members)) return false;
         if (members.includes(ai) || members.some(m => this.atWar(ai, m))) return false;
         if (members.some(m => this.enemiesOf(m).some(e => this.allied(ai, e)))) return false;   // chocaría con sus aliados
         const powers = this.powers();
@@ -9047,9 +9255,10 @@ class GameEngine {
         if (bloc?.secret) p -= 0.05;
         return this.rng() < p;
     }
-    // ¿Admite el bloque a `applicant`? Decide su miembro más fuerte.
+    // ¿Admite el bloque a `applicant`? Decide su miembro más fuerte. A un paria nuclear, no; ni hay alianza si lo es alguno.
     admits(bloc, applicant) {
         const members = [...bloc.members];
+        if (this.pariahWhy(applicant, ...members)) return false;
         if (members.some(m => this.atWar(m, applicant))) return false;
         const powers = this.powers();
         const shared = this.enemiesOf(applicant).some(e => members.some(m => this.atWar(m, e)));
@@ -9333,7 +9542,8 @@ class GameEngine {
         if (this.over || !this.atWar(p, target) || (offered < 0 && this.proposedThisTurn.has(key))) return false;
         this.proposedThisTurn.add(key);
         if (!this.acceptsPeace(target, terms, offered >= 0)) {
-            this.log(`${this.nm(target)} rechaza tus condiciones de paz.`);
+            const why = this.pariahWhy(p);
+            this.log(`${this.nm(target)} rechaza tus condiciones de paz${why ? `: ${why}` : ''}.`);
             return false;
         }
         if (offered >= 0) this.proposals.splice(offered, 1);
@@ -9423,14 +9633,20 @@ class GameEngine {
         if (this.over || !bloc || !bloc.members.has(this.player) || bloc.members.has(target) || this.proposedThisTurn.has(key)) return;
         this.proposedThisTurn.add(key);
         if (this.acceptsBloc(target, bloc, this.player)) this.joinBloc(bloc, target);
-        else this.log(`${this.nm(target)} rechaza unirse a ${bloc.name}.`);
+        else {
+            const why = this.pariahWhy(target, ...bloc.members);
+            this.log(`${this.nm(target)} rechaza unirse a ${bloc.name}${why ? `: ${why}` : ''}.`);
+        }
     }
     playerRequestJoin(blocId) {
         const bloc = this.bloc(blocId), key = `req${blocId}`;
         if (this.over || !bloc || bloc.members.has(this.player) || this.proposedThisTurn.has(key)) return;
         this.proposedThisTurn.add(key);
         if (this.admits(bloc, this.player)) this.joinBloc(bloc, this.player);
-        else this.log(`${bloc.name} rechaza tu solicitud de ingreso.`);
+        else {
+            const why = this.pariahWhy(this.player, ...bloc.members);
+            this.log(`${bloc.name} rechaza tu solicitud de ingreso${why ? `: ${why}` : ''}.`);
+        }
     }
     playerLeaveBloc(blocId) {
         const bloc = this.bloc(blocId);
@@ -9464,6 +9680,7 @@ class GameEngine {
     aiTurn(id) {
         const powers = this.powers();
         this.aiDiplomacy(id, powers);
+        this.aiNukes(id, powers);   // la bomba, solo si pierde de verdad (y comprarla, si es rica y su enemigo más fuerte)
         this.aiResearch(id);
         this.aiForts(id);   // antes de reclutar: en guerra el reclutamiento gasta todo el oro
         this.aiRepairs(id);   // también antes de reclutar, por lo mismo
@@ -9497,8 +9714,9 @@ class GameEngine {
         if (enemies.length <= S.maxWars && this.turn >= S.warFrom && this.rng() < S.warChance) {
             // Declara contando con los aliados del otro que acudirían (los seguros enteros, los dudosos a medias) y
             // con sus propios satélites, que entran siempre. Tras una paz, no vuelve a por el mismo país hasta noWarUntil.
+            // Contra un paria nuclear le basta mucho menos ventaja (warRatio ×0,6).
             const own = powers[id] + this.satellitesOf(id).reduce((s, x) => s + powers[x], 0), expected = new Map();
-            const side = t => { if (!expected.has(t)) expected.set(t, this.expectedDefense(id, t, powers)); return expected.get(t); };
+            const side = t => { if (!expected.has(t)) expected.set(t, this.expectedDefense(id, t, powers) * (this.isPariah(t) ? NUKE.PARIAH_WAR : 1)); return expected.get(t); };
             const target = [...this.borderSets()[id]]
                 .filter(b => this.nations[b].alive && !this.atWar(id, b) && this.turn >= this.rel(id, b).truceUntil && this.turn >= this.rel(id, b).noWarUntil
                     && (!this.allied(id, b) || this.rng() < S.betrayChance))
@@ -9506,8 +9724,8 @@ class GameEngine {
             if (target !== undefined && own > S.warRatio * side(target)) this.declareWar(id, target);
         }
         if (enemies.length && this.rng() < S.blocChance) {
-            const partner = this.nations.find(n => n.alive && n.id !== id && !this.allied(id, n.id) && !this.atWar(id, n.id)
-                && enemies.some(e => this.atWar(n.id, e)));
+            const partner = this.isPariah(id) ? null : this.nations.find(n => n.alive && n.id !== id && !this.allied(id, n.id) && !this.atWar(id, n.id)
+                && !this.isPariah(n.id) && enemies.some(e => this.atWar(n.id, e)));
             if (!partner) return;
             const own = this.blocs.find(b => b.founder === id && b.members.has(id));
             if (partner.id === this.player) {

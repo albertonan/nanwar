@@ -513,18 +513,249 @@ const CHECKS = [
         if (!g.armyOn(far)) T.army(g, fr, far, 10);
         const before = JSON.stringify(ar), moves = g.motion.length, units = countUnits(g.armyOn(cell).units);
         for (const [key, n, kind, c, why] of [['missile', 3, 'army', cell, /Solo tienes 2 misiles/], ['missile', 1, 'army', far, /alcance/], ['rocket', 1, 'army', cell, /ejército/],
-            ['missile', 0, 'army', cell, /salva/i], ['rocket', 1, 'fort', cell, /fortificación/], ['nuclear', 1, 'army', cell, /nuclear/i], ['guided', 1, 'army', cell, /No tienes/]]) {
+            ['missile', 0, 'army', cell, /salva/i], ['rocket', 1, 'fort', cell, /fortificación/], ['nuclear', 1, 'fort', cell, /nuclear no sirve/], ['nuclear', 2, 'army', cell, /Solo tienes 1 bomba nuclear/], ['guided', 1, 'army', cell, /No tienes/]]) {
             const res = g.playerStrike(key, n, kind, c);
             T.eq(res.result, 'invalid', `${key} × ${n}`);
             T.ok(why.test(res.text), `${key} × ${n}: ${res.text}`);
             T.eq(g.logs[g.logs.length - 1].msg, res.text, 'el parte dice por qué');
         }
         T.eq([JSON.stringify(ar), g.motion.length, countUnits(g.armyOn(cell).units)], [before, moves, units], 'no lanza nada');
-        // La nuclear no se lanza aún: llega con su efecto (C4).
-        T.ok(g.strikeCheck(es, 'nuclear', 1, 'army', cell) !== '', 'nuclear rechazada');
+        // La nuclear, contra un ejército o una casilla, sí (C4).
+        T.eq(g.strikeCheck(es, 'nuclear', 1, 'army', cell), '', 'nuclear contra un ejército');
         // Con lo justo, sí.
         T.eq(g.playerStrike('missile', 2, 'army', cell).result, 'hit', 'lanza');
         T.eq(ar.missile, 0, 'gasta');
+        return true;
+    }],
+    ['C4 · destruye la casilla y la mitad en el radio, también lo propio', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), R = kmCells(40);
+        T.eq(R, 2, 'radio de 40 km en Europa');
+        g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'estrategicas3');
+        const cell = T.clear(g, fr, R + 1), ring = d => hexDisc(cell, d).filter(c => hexDist(c, cell) === d && isLand(c) && !g.armyAt[c]);
+        T.ok(g.launchers(es, 'nuclear', cell).length > 0, 'a alcance de una ciudad');
+        const foe = T.army(g, fr, cell, 40), near = T.army(g, fr, ring(1)[0], 20), edge = T.army(g, fr, ring(R)[0], 9);
+        const mine = T.army(g, es, ring(1)[0], 10), out = T.army(g, fr, ring(R + 1)[0], 20);
+        g.nations[es].arsenal.nuclear = 2;
+        const o = g.strikeOdds(es, 'nuclear', 1, 'army', cell);
+        T.eq([o.why, o.through, o.hit], ['', 1, 1], 'previsión: sin defensas, llega');
+        T.ok(/mitad/.test(o.effect) && /paria/.test(o.effect) && /contamina/.test(o.effect), `previsión: ${o.effect}`);
+        T.eq(g.isPariah(es), false, 'aún no es paria');
+        const t0 = g.turn, res = g.launchStrike(es, 'nuclear', 1, 'army', cell);
+        T.eq(res.result, 'hit', res.text);
+        T.ok(/bomba nuclear/.test(res.text) && /tus ejércitos pierden 5 unidades/.test(res.text), `parte: ${res.text}`);
+        T.ok(!g.armies.has(foe.id), 'el ejército de la casilla, destruido');
+        T.eq([countUnits(near.units), countUnits(edge.units), countUnits(mine.units), countUnits(out.units)], [10, 4, 5, 20], 'la mitad en el radio, también lo propio; fuera, nada');
+        T.eq(g.dev[G.prov[cell]], 0, 'desarrollo de la provincia a 0');
+        T.eq([g.isPariah(es), g.nations[es].pariahUntil, g.nations[es].arsenal.nuclear], [true, t0 + 30, 1], 'paria 30 turnos; gasta una');
+        T.ok(g.motion.some(e => e.kind === 'strike' && e.weapon === 'nuclear' && e.cell === cell), 'evento para la animación');
+        // También contra una casilla sin ejército (blanco «area»), y solo en guerra.
+        const empty = ring(R)[1];
+        T.eq(g.strikeCheck(es, 'nuclear', 1, 'area', empty), '', 'casilla enemiga');
+        T.ok(/guerra/.test(g.strikeCheck(es, 'nuclear', 1, 'area', T.clear(g, T.nation('it'), 0))), 'no contra quien está en paz');
+        // Con las nucleares prohibidas no se lanza aunque se tenga.
+        const h = T.game(7, false, false);
+        h.start(es); T.bare(h); h.declareWar(es, fr); T.learn(h, es, 'estrategicas3'); h.nations[es].arsenal.nuclear = 1;
+        T.ok(/prohibidas/.test(h.strikeCheck(es, 'nuclear', 1, 'area', T.clear(h, fr, 0))), 'prohibidas');
+        return true;
+    }],
+    ['C4 · instalaciones, aeródromos, enjambres y carreteras del radio', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), R = kmCells(40);
+        g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'estrategicas3');
+        // Una ciudad de Francia con todo alrededor en tierra francesa (sin lagos): el blanco, sin ejércitos cerca.
+        const city = PROVINCES.map(p => p.city).find(c => g.owner[c] === fr && c !== g.nations[fr].capitalCell
+            && hexDisc(c, R + 1).every(j => isLand(j) && g.owner[j] === fr && CELL_TERRAIN[j] !== 'lake'));
+        T.ok(city !== undefined, 'ciudad francesa de interior');
+        for (const j of hexDisc(city, R + 1)) if (g.armyOn(j)) g.removeArmy(g.armyOn(j));
+        const ring = d => hexDisc(city, d).filter(c => hexDist(c, city) === d);
+        const [a1, a2, a3] = ring(1), b1 = ring(R)[0], o1 = ring(R + 1)[0];
+        T.airfield(g, fr, a1); const sqs = T.squad(g, fr, a1, 2);
+        T.site(g, fr, a2); T.battery(g, fr, a3); const sws = T.swarm(g, fr, city, 2);
+        g.fort[city] = 3; g.fort[b1] = 2; g.fortVersion++;
+        const d = [0, 1, 2, 3, 4, 5].find(k => G.nb[city * 6 + k] === a1);
+        g.road[city * 6 + d] = 1; g.road[a1 * 6 + (d + 3) % 6] = 1; g.roadVersion++;
+        // Fuera del radio, todo sigue.
+        T.airfield(g, fr, o1); const kept = T.squad(g, fr, o1)[0]; T.site(g, fr, o1);
+        g.dev[G.prov[city]] = 500; g.devVersion++;
+        g.nations[es].arsenal.nuclear = 1;
+        T.luck(g, 0.99);   // ninguna defensa la para
+        const res = g.launchStrike(es, 'nuclear', 1, 'area', city);
+        T.eq(res.result, 'hit', res.text);
+        T.ok(!g.airfields.has(a1) && sqs.every(q => !g.squadrons.has(q.id)), 'aeródromo y escuadrones');
+        T.ok(!g.aaSites.has(a2) && !g.batteries.has(a3), 'antiaéreo y batería');
+        T.ok(sws.every(q => !g.swarms.has(q.id)), 'enjambres');
+        T.eq([g.fort[city], g.fort[b1]], [0, 0], 'fortificaciones');
+        T.eq([g.road[city * 6 + d], g.broken[city * 6 + d]], [0, 1], 'carretera rota');
+        T.ok(g.airfields.has(o1) && g.squadrons.has(kept.id) && g.aaSites.has(o1), 'fuera del radio, intacto');
+        T.eq(g.dev[G.prov[city]], 0, 'desarrollo a 0');
+        T.ok(/aeródromo/.test(res.text) && /enjambres/.test(res.text), `parte: ${res.text}`);
+        return true;
+    }],
+    ['C4 · contaminación 15 turnos: sin renta y −10 % al que termina en ella', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), R = kmCells(40);
+        g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'estrategicas3');
+        const cell = T.clear(g, fr, R + 1), zone = hexDisc(cell, R).filter(c => isLand(c)), outside = hexDisc(cell, R + 1).find(c => hexDist(c, cell) === R + 1);
+        const before = g.economy(fr), value = zone.reduce((s, c) => s + CELL_VALUE[c], 0);
+        g.nations[es].arsenal.nuclear = 1;
+        const t0 = g.turn;
+        g.launchStrike(es, 'nuclear', 1, 'area', cell);
+        T.ok(zone.every(c => g.contaminated(c)) && !g.contaminated(outside), 'contamina el radio');
+        T.near(before.base - g.economy(fr).base, value, 1.01, 'las casillas contaminadas no dan renta');
+        // Pierde el 10 % (al menos una) el ejército que termina el turno de su dueño en ella; los demás, no.
+        const spots = zone.filter(c => c !== cell);
+        const a = T.army(g, fr, spots[0], 20), b = T.army(g, es, spots[1], 20), c = T.army(g, fr, spots[2], 3);
+        g.beginNationTurn(fr);
+        T.eq([countUnits(a.units), countUnits(b.units), countUnits(c.units)], [18, 20, 2], '−10 % al de Francia');
+        g.beginNationTurn(es);
+        T.eq(countUnits(b.units), 18, 'y al de España en su turno');
+        T.ok(g.logs.some(l => /contaminación/.test(l.msg) && /pierde 2 unidades/.test(l.msg)), 'el parte lo dice');
+        // Quince turnos: el 14.º sigue; al empezar el 15.º, se acaba.
+        g.turn = t0 + 14;
+        T.ok(g.contaminated(cell), 'sigue el turno 14');
+        g.turn = t0 + 15;
+        g.beginNationTurn(fr);
+        T.ok(!g.contaminated(cell) && g.fallout.size === 0, 'se acaba a los 15');
+        T.eq(countUnits(a.units), 18, 'sin contaminación, sin desgaste');
+        T.near(g.economy(fr).base, before.base, 1.01, 'vuelve la renta');
+        return true;
+    }],
+    ['C4 · paria 30 turnos: sin paz ni alianzas y aliados que se van', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), it = T.nation('it');
+        g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'estrategicas3');
+        // Diez aliados de España: cada uno deja el bloque con un 50 %.
+        const allies = ['pt', 'it', 'de', 'nl', 'be', 'pl', 'at', 'ch', 'cz', 'dk'].map(T.nation).filter(i => i >= 0);
+        T.eq(allies.length, 10, 'aliados');
+        const bloc = g.createBloc(es, 'Pacto de prueba', false);
+        for (const x of allies) bloc.members.add(x);
+        g.blocsChanged();
+        g.nations[es].arsenal.nuclear = 1;
+        g.launchStrike(es, 'nuclear', 1, 'area', T.clear(g, fr, 0));
+        const left = allies.filter(x => !bloc.members.has(x)).length;
+        T.ok(left >= 2 && left <= 8, `se van ${left} de 10`);
+        T.ok(g.logs.some(l => /sale de Pacto de prueba tras el ataque nuclear/.test(l.msg)), 'el registro lo dice');
+        T.ok(g.logs.some(l => /Eres un paria nuclear hasta el turno/.test(l.msg)), 'aviso al jugador');
+        T.luck(g, 0);   // sin el paria, aceptarían alianzas y admisiones
+        // Una guerra muy larga: sin el paria, ya querría la paz («dura ya demasiado»).
+        g.turn += 100;
+        g.nations[es].pariahUntil = g.turn + 30;
+        const w = g.peaceWish(fr, es);
+        T.eq(w.wants, false, 'nadie firma la paz con el paria');
+        T.ok(/eres un paria nuclear/.test(w.blocker), `motivo: ${w.blocker}`);
+        T.ok(/paria nuclear/.test(g.warBrief(fr).accept), `cajón: ${g.warBrief(fr).accept}`);
+        g.settings.fog = true;
+        T.ok(/paria nuclear/.test(g.warBrief(fr).accept), `cajón con niebla: ${g.warBrief(fr).accept}`);
+        T.eq(g.acceptsPeace(fr, { mode: 'annex' }, true), false, 'ni la que propuso');
+        T.eq(g.playerPeace(fr, { mode: 'annex' }), false, 'rechaza');
+        T.ok(/paria nuclear/.test(g.logs[g.logs.length - 1].msg), `parte: ${g.logs[g.logs.length - 1].msg}`);
+        // Ni alianzas: ni le aceptan ni le admiten.
+        T.eq(g.acceptsBloc(it, null, es), false, 'no entra con él');
+        const mine = g.playerCreateBloc('Solo', false);
+        g.playerInvite(mine.id, it);
+        T.ok(/paria nuclear/.test(g.logs[g.logs.length - 1].msg), `invitación: ${g.logs[g.logs.length - 1].msg}`);
+        const other = g.createBloc(it, 'Ajeno', false); other.members.add(T.nation('de')); g.blocsChanged();
+        T.eq(g.admits(other, es), false, 'no le admiten');
+        // Pasados los 30 turnos, la guerra larga termina por las reglas de siempre: no hay guerras eternas.
+        g.turn = g.nations[es].pariahUntil;
+        T.eq([g.isPariah(es), g.peaceWish(fr, es).wants], [false, true], 'tras el paria, la paz de siempre');
+        // Entre dos IA: Alemania declara la guerra al paria con ×0,6 de la warRatio y no firma la paz con él.
+        for (const paria of [true, false]) {
+            const h = T.game(), de = T.nation('de');
+            h.start(es); h.turn = 20;
+            T.ok(h.borderSets()[de].has(fr), 'Alemania y Francia vecinas');
+            if (paria) h.makePariah(fr);
+            const powers = h.powers().map(() => 1e9);
+            powers[de] = 100; powers[fr] = 100 / (0.8 * h.ai.warRatio);   // ni ×1 ni ×0,6: en medio
+            T.luck(h, 0);
+            h.aiDiplomacy(de, powers);
+            T.eq(h.atWar(de, fr), paria, paria ? 'declara al paria' : 'sin paria, no');
+            if (!paria) continue;
+            const r = h.rel(de, fr); r.since = r.war.since = h.turn - 100;
+            T.eq(h.peaceWish(de, fr).wants, false, 'la IA no firma la paz con él');
+            T.eq([h.acceptsBloc(it, null, fr), h.acceptsBloc(fr, null, it)], [false, false], 'ni alianzas, en ningún sentido');
+            h.turn = h.nations[fr].pariahUntil;
+            T.eq(h.peaceWish(de, fr).wants, true, 'después, sí');
+        }
+        return true;
+    }],
+    ['C4 · la IA solo la usa perdiendo', () => {
+        const setup = (nukes = true) => {
+            const g = T.game(7, false, nukes), es = T.nation('es'), fr = T.nation('fr');
+            g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr);
+            T.learn(g, fr, 'estrategicas3');
+            g.nations[fr].arsenal.nuclear = 1;
+            return { g, es, fr, cap: g.nations[fr].capitalCell };
+        };
+        const { g, es, fr, cap } = setup();
+        // Ejércitos de España dentro de Francia, lejos de París: no basta.
+        const deep = G.land.filter(c => g.owner[c] === fr && CITY_OF[c] < 0 && !g.armyAt[c] && hexDist(c, cap) > 4 && CELL_TERRAIN[c] !== 'lake');
+        const big = T.army(g, es, deep[0], 60), small = T.army(g, es, deep[deep.length - 1], 30);
+        T.eq(g.nukeLosing(fr), false, 'aún no pierde de verdad');
+        g.aiNukes(fr);
+        T.eq([g.nations[fr].arsenal.nuclear, g.isPariah(fr)], [1, false], 'no la usa');
+        // Con un enemigo al lado de la capital, sí: contra el mayor ejército enemigo en su territorio.
+        const nb = hexDisc(cap, 1).find(c => c !== cap && isLand(c) && !g.armyAt[c]);
+        T.army(g, es, nb, 5);
+        T.eq(g.nukeLosing(fr), true, 'capital con enemigo al lado');
+        T.eq(g.nukeTarget(fr), big.cell, 'el mayor');
+        g.aiStep(fr);   // en su turno
+        T.eq([g.nations[fr].arsenal.nuclear, g.isPariah(fr), g.armies.has(big.id), g.armies.has(small.id)], [0, true, false, true], 'la usa');
+        T.ok(g.logs.some(l => /Francia lanza una bomba nuclear/.test(l.msg)), 'el jugador se entera');
+        // Prohibidas: nunca.
+        const p = setup(false);
+        T.army(p.g, p.es, hexDisc(p.cap, 1).find(c => c !== p.cap && isLand(c) && !p.g.armyAt[c]), 50);
+        p.g.aiNukes(p.fr);
+        T.eq(p.g.nations[p.fr].arsenal.nuclear, 1, 'prohibidas: no');
+        // El 40 % de sus provincias de partida perdidas en una guerra en curso.
+        const q = setup(), lost = Math.ceil(0.4 * START_PROVINCES[q.fr]);
+        const far = PROVINCES.filter(x => q.g.owner[x.city] === q.fr && hexDist(x.city, q.cap) > 2).map(x => x.city);
+        T.ok(far.length >= lost, 'provincias');
+        for (const c of far.slice(0, lost - 1)) q.g.owner[c] = q.es;
+        q.g.version++;
+        T.eq(q.g.nukeLosing(q.fr), false, `${lost - 1} de ${START_PROVINCES[q.fr]}: no`);
+        q.g.owner[far[lost - 1]] = q.es; q.g.version++;
+        T.eq(q.g.nukeLosing(q.fr), true, `${lost} de ${START_PROVINCES[q.fr]}: sí`);
+        // Comprar: rica (tercio alto de renta) y en guerra con alguien más fuerte.
+        const b = setup();
+        b.g.nations[b.fr].arsenal.nuclear = 0;
+        const price = b.g.weaponPrice(b.fr, 'nuclear');
+        b.g.nations[b.fr].gold = price;
+        T.ok(b.g.nukeRich(b.fr), 'Francia, en el tercio alto');
+        T.army(b.g, b.fr, T.clear(b.g, b.fr, 0), 3000);   // más fuerte que España: no compra
+        b.g.aiNukes(b.fr);
+        T.eq(b.g.nations[b.fr].arsenal.nuclear, 0, 'contra uno más débil, no compra');
+        T.army(b.g, b.es, T.clear(b.g, b.es, 0), 9000);   // ahora España es más fuerte
+        b.g.aiNukes(b.fr);
+        T.eq([b.g.nations[b.fr].arsenal.nuclear, b.g.nations[b.fr].gold], [1, 0], 'compra una');
+        // La más pobre no compra, aunque pueda pagarla.
+        const poor = b.g.nations.filter(n => n.alive && n.id !== b.es).sort((x, y) => b.g.grossIncome(x.id) - b.g.grossIncome(y.id))[0].id;
+        T.eq(b.g.nukeRich(poor), false, 'la más pobre no es rica');
+        T.learn(b.g, poor, 'estrategicas3'); b.g.declareWar(b.es, poor); b.g.nations[poor].gold = 1e6;
+        b.g.aiNukes(poor);
+        T.eq(b.g.nations[poor].arsenal.nuclear, 0, 'la pobre no compra');
+        return true;
+    }],
+    ['C4 · guardar y cargar contaminación y paria', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'estrategicas3');
+        g.nations[es].arsenal.nuclear = 1;
+        g.launchStrike(es, 'nuclear', 1, 'area', T.clear(g, fr, 3));
+        const data = JSON.parse(JSON.stringify(g.serialize())), h = GameEngine.load(data);
+        T.ok(g.fallout.size > 0, 'hay contaminación');
+        T.eq([...h.fallout], [...g.fallout], 'contaminación');
+        T.eq([h.nations[es].pariahUntil, h.isPariah(es)], [g.nations[es].pariahUntil, true], 'paria');
+        T.eq(h.economy(fr).base, g.economy(fr).base, 'la renta, igual');
+        // Partida vieja: sin contaminación ni parias.
+        const old = JSON.parse(JSON.stringify(data));
+        delete old.fallout;
+        for (const n of old.nations) delete n.pariahUntil;
+        const o = GameEngine.load(old);
+        T.eq([o.fallout.size, o.isPariah(es), o.nations[es].pariahUntil], [0, false, 0], 'partida vieja');
+        // Datos raros: fuera.
+        const bad = JSON.parse(JSON.stringify(data)), sea = G.landless?.[0] ?? [...Array(G.N).keys()].find(c => !isLand(c));
+        bad.fallout = [[-5, 99], [sea, 99], [G.land[0], 'x'], 'zz', [G.land[1], g.turn - 1], [G.land[2], 1e9]];
+        bad.nations[es].pariahUntil = -7;
+        const b = GameEngine.load(bad);
+        T.eq([...b.fallout], [[G.land[2], 1e6]], 'solo lo válido');
+        T.eq(b.nations[es].pariahUntil, 0, 'paria no válido');
         return true;
     }]
 ];
