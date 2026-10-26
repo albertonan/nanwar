@@ -1355,6 +1355,7 @@ class GameEngine {
         this.batteries = new Map();   // casilla → { owner, left, known, used }: left, turnos de obra; used, armas atendidas
         this.defUsed = new Map();
         this.splitFrom = new Map();   // id de la parte → [id del ejército del que sale, turno] (su escolta de ataque la apoya ese turno)
+        this.aiEscortOnly = new Set();   // ofensivas de la IA que protegen y escoltan solo por sus drones (aiWings, cada turno; no se guarda)
         this.seedAir();
         this.configure({ aggression: 'normal', alliances: 'reales', victory: 0.5, fog: true });
         for (const nat of this.nations) nat.gold = this.income(nat.id) * CONFIG.START_GOLD_TURNS;
@@ -3446,23 +3447,26 @@ class GameEngine {
     // zona. Ofensiva: a 3 casillas de su objetivo y a 2 de sus ejércitos (lo que defiende el objetivo y el camino), y
     // protege a sus ejércitos. Línea: a 3 casillas de la línea, y protege sus casillas más amenazadas. En manual, en pausa
     // o en la reserva no vuela. Las de la IA no atacan ejércitos de menos de AI_MIN_ARMY unidades.
-    // Con «Proteger y escoltar», antes reparte escoltas (opEscorts); las que escoltan no vuelan aquí. Sus enjambres sin
-    // escolta reconocen antes los blancos que no conoce (flyTargets).
+    // Con «Proteger y escoltar», antes reparte escoltas (opEscorts); las de defensa no vuelan aquí. Las de ataque que no
+    // han volado este turno (lo escoltado no ha atacado) sí: vuela al final, tras los ataques de la operación, y el vuelo
+    // vuelve a estar libre el turno que viene. Sus enjambres sin escolta reconocen antes los blancos que no conoce
+    // (flyTargets). Una ofensiva de la IA que solo protege y escolta para que la acompañen sus drones (aiEscortOnly) no
+    // manda escuadrones a proteger sus casillas.
     opAir(op) {
         const id = op.owner, aims = op.aims ?? [], idle = op.kind === 'reserva' || op.auto === 'manual' || op.paused || !aims.length || this.over;
         this.opEscorts(op, !idle && aims.includes('patrol'));
         if (idle) return { flown: 0, hits: 0, strikes: 0, notes: [] };
-        const pool = [];
-        for (const q of this.squadrons.values()) if (q.op === op.id && q.owner === id && !q.task && this.canFly(q)) pool.push(q);
+        const pool = [], free = q => q.op === op.id && q.owner === id && (!q.task || (q.task.kind === 'escort' && q.task.mode === 'ataque'));
+        for (const q of this.squadrons.values()) if (free(q) && this.canFly(q)) pool.push(q);
         if (!pool.length) return { flown: 0, hits: 0, strikes: 0, notes: [] };
         const members = this.opMembers(op), zone = new Set(), obj = op.kind === 'ofensiva' ? op.cells[op.cells.length - 1] : -1;
         const around = (c, k) => { for (const x of this.nearCells(c, k).keys()) zone.add(x); };
         if (obj >= 0) { around(obj, 3); for (const a of members) around(a.cell, 2); } else for (const c of op.cells) around(c, 3);
         const strike = aims.filter(k => k !== 'patrol'), opts = { obj, members, pool, minArmy: id === this.player ? 1 : AI_MIN_ARMY };
         let targets = strike.length ? this.airTargets(id, [...zone], strike, opts) : [];
-        if (aims.includes('patrol')) targets = [...targets, ...this.airTargets(id, obj >= 0 ? members.map(a => a.cell) : op.cells, ['patrol'], opts)].sort(airTargetOrder).slice(0, AIR_TARGETS);
+        if (aims.includes('patrol') && !this.aiEscortOnly.has(op.id)) targets = [...targets, ...this.airTargets(id, obj >= 0 ? members.map(a => a.cell) : op.cells, ['patrol'], opts)].sort(airTargetOrder).slice(0, AIR_TARGETS);
         const eyes = [];
-        if (strike.length && this.swarms.size) for (const q of this.swarms.values()) if (q.op === op.id && q.owner === id && !q.task && this.canFlySwarm(q)) eyes.push(q);
+        if (strike.length && this.swarms.size) for (const q of this.swarms.values()) if (free(q) && this.canFlySwarm(q)) eyes.push(q);
         return this.flyTargets(id, pool, targets, eyes);
     }
     // Las órdenes de zona de los escuadrones sueltos de `id`: los que comparten zona y fines vuelan juntos.
@@ -8228,9 +8232,14 @@ class GameEngine {
                 }
             }
         }
+        // Sin aviación ni drones enemigos, «Proteger y escoltar» solo sirve para que escolten sus drones (y los escuadrones
+        // que les toquen, en ataque): sus escuadrones no protegen casillas (opAir).
         const escorts = this.rules(id).droneEscort;
+        let foeDrones = false;
+        if (!threat && this.swarms.size) for (const q of this.swarms.values()) if (foes.has(q.owner)) { foeDrones = true; break; }
         for (const op of ops) {
             const want = threat || (escorts && flock.has(op.id));
+            if (op.kind === 'ofensiva' && want && !threat && !foeDrones) this.aiEscortOnly.add(op.id); else this.aiEscortOnly.delete(op.id);
             if (op.kind !== 'ofensiva' || op.aims.includes('patrol') === want) continue;
             op.aims = want ? [...op.aims, 'patrol'] : op.aims.filter(k => k !== 'patrol');
         }

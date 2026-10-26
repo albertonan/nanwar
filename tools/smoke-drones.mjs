@@ -1189,6 +1189,27 @@ const CHECKS = [
     ui.view.draw();
     return true;
 }],
+['Rev M8 · la IA no manda escuadrones a proteger casillas si el enemigo no tiene aviación', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+    g.start(pt); T.bare(g); g.declareWar(es, fr); T.learn(g, es, 'drones1', 'drones2');
+    const [b2, t2] = T.pair(g, es, fr), off = g.createOp(es, 'ofensiva', [b2, t2], { auto: 'auto' }); off.aims = ['army'];
+    T.airfield(g, es, b2); const sqs = T.squad(g, es, b2, 3), sws = T.swarm(g, es, b2, 2);
+
+    const near = G.land.filter(x => g.owner[x] === es && T.free(g, x)).sort((x, y) => hexDist(x, t2) - hexDist(y, t2))[0];
+    const m = T.army(g, es, near, 8); g.assignArmy(m, off.id);
+    for (const q of [...sqs, ...sws]) g.assignSquadron(q, off.id);
+    g.aiWings(es, [off]);
+    T.ok(off.aims.includes('patrol'), 'protege y escolta por sus drones');
+    g.opAir(off);
+    T.eq(sws.map(q => q.task?.kind ?? null), [null, 'escort'], 'un enjambre escolta (el otro reconoce)');
+
+    T.eq(sqs.filter(q => q.patrol >= 0).length, 0, 'ningún escuadrón protege casillas');
+    // Con aviación enemiga, sí.
+    T.airfield(g, fr, t2); g.aiWings(es, [off]);
+    g.turn++; g.opAir(off);
+    T.ok(sqs.some(q => q.patrol >= 0), 'con aviación enemiga, protegen');
+    return true;
+}],
 ['Rev M9 · escoltar desde una operación lo dice el parte', () => {
     const g = T.game(), es = T.nation('es');
     g.start(es); T.bare(g);
@@ -1212,6 +1233,22 @@ const CHECKS = [
     T.luck(g, 0.99);
     document.querySelector('#card [data-action="drone-mission"][data-kind="army"]').click();
     T.ok(g.logs.some(l => /saturan el antiaéreo, ×0,5/.test(l.msg)), `en el parte: ${g.logs[g.logs.length - 1].msg}`);
+    return true;
+}],
+['Rev M11 · la escolta de ataque que no ha atacado vuela con su operación', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [b2, t2] = T.pair(g, es, fr), off = g.createOp(es, 'ofensiva', [b2, t2], { auto: 'auto' }); off.aims = ['patrol'];
+    T.airfield(g, es, b2); const more = T.squad(g, es, b2, 2);
+    const cells = G.land.filter(x => g.owner[x] === es && T.free(g, x)).sort((x, y) => hexDist(x, t2) - hexDist(y, t2));
+    for (const x of [cells[0], cells.find(y => hexDist(y, cells[0]) >= 2)]) g.assignArmy(T.army(g, es, x, 8), off.id);
+    for (const q of more) g.assignSquadron(q, off.id);
+    g.opAir(off);
+    const esc = more.find(q => q.task?.kind === 'escort');
+    T.ok(esc && esc.task.mode === 'ataque', 'una escolta de ataque');
+    T.eq(esc.flown, g.turn, 'vuela con la operación');
+    g.turn++;
+    T.ok(g.escortSupport(es, [esc.task.army]).includes(esc), 'y al turno siguiente vuelve a escoltar');
     return true;
 }],
 ];
