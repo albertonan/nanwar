@@ -235,13 +235,18 @@ const CHECKS = [
         g.declareWar(es, fr);
         const { target, sides } = T.ring(g, es, fr, 1);
         const a = T.army(g, es, sides[0], 0, 0, 10);
-        for (const [n, guess] of [[2000, 3000], [300, 399], [30, 99], [10, 24]]) {
+        // Al atacar, lo peor de su escalón; para las líneas y los frentes, su valor central.
+        const line = g.createOp(es, 'defensa', [sides[0]]);
+        const pw = n => unitPower({ infantry: n, tank: 0, artillery: 0 }, 'atk', g.rules(fr));
+        for (const [n, guess, mid] of [[2000, 3000, 2000], [600, 1499, 800], [300, 399, 200], [30, 99, 50], [10, 24, 24], [5, 9, 9], [2, 3, 3]]) {
             const old = g.armyOn(target); if (old) g.removeArmy(old);
             const foe = T.army(g, fr, target, n);
             T.ok(!g.intel(es, fr, target).exact, 'no lo conoce');
             const fx = g.combatFactors(es, a.units, sides[0], { owner: fr, units: { infantry: guess, tank: 0, artillery: 0 } }, target);
             T.ok(Math.abs(g.expectedRatio(es, a.units, sides[0], foe, target) - fx.atk / fx.dfn) < 1e-9, `${n} se supone de ${guess} al atacar`);
-            T.eq(g.seenPower(es, foe, 'def'), unitPower({ infantry: guess, tank: 0, artillery: 0 }, 'def', g.rules(fr)), `${n} se ve como ${guess}`);
+            T.eq(g.seenPower(es, foe, 'def', 'ataque'), unitPower({ infantry: guess, tank: 0, artillery: 0 }, 'def', g.rules(fr)), `${n} se ve como ${guess} al atacar`);
+            T.eq(g.seenPower(es, foe, 'atk', 'linea'), pw(mid), `${n} se ve como ${mid} desde una línea`);
+            T.eq(g.lineEval(line).enemy, pw(mid), `${n}: la línea lo cuenta como ${mid}`);
         }
         return true;
     }],

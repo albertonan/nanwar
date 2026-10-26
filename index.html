@@ -1174,6 +1174,10 @@ const echelonOf = n => ECHELONS.find(e => n <= e.max);
 // Lo más que puede ser un ejército de n unidades que no se conoce (niebla de guerra): el tope de su escalón; el último
 // no tiene tope, así que se supone de 3000.
 const echelonCeil = n => Math.min(echelonOf(n).max, 3000);
+// Lo que vale de ordinario: un valor central de su escalón. Lo usan las líneas y los frentes (seenPower 'linea'): con el
+// tope se replegarían ante cualquier división sin identificar; los ataques siguen con el tope (pesimista que los frena).
+const ECHELON_MID = [3, 9, 24, 50, 200, 800, 2000];
+const echelonMid = n => ECHELON_MID[ECHELONS.indexOf(echelonOf(n))];
 // Agrupaciones (A4): hasta 99 por país, cada una con un color de esta paleta (apagados, legibles en las dos vistas y
 // distintos de los de las operaciones y de los de los países). Esperan 3 turnos a un miembro que no llega al ataque.
 const GROUP_COLORS = ['#6fb7a6', '#7f97bd', '#8c7bb5', '#d496a7', '#c27d5a', '#c9a46a', '#a8ad5e', '#86ab8c'];
@@ -2781,7 +2785,7 @@ class GameEngine {
             if (want.has('army')) {
                 const a = this.armyOn(c);
                 if (a && this.atWar(owner, a.owner) && this.sees(owner, c) && this.leastUnits(owner, a) >= minArmy)
-                    add('army', c, this.seenPower(owner, a, 'atk') * (afloat(c) ? 2 : 1));
+                    add('army', c, this.seenPower(owner, a, 'atk', 'ataque') * (afloat(c) ? 2 : 1));
             }
             if (!isLand(c) || !this.atWar(owner, this.owner[c])) continue;
             if (want.has('fort') && this.fort[c]) add('fort', c, ((this.fortLevel(owner, c) ?? 0) + 1) * 10 + (c === obj ? 20 : 0));
@@ -3802,11 +3806,14 @@ class GameEngine {
         if (fx) m *= fx.fortDefense;
         return Math.min(m, fx ? fx.fortCap : CONFIG.MAX_DEFENSE_BONUS);
     }
-    // Ataque o defensa de un ejército tal como lo ve `viewer` (con niebla, lo peor de su escalón, como expectedRatio).
-    seenPower(viewer, a, kind) {
+    // Ataque o defensa de un ejército tal como lo ve `viewer`. Con niebla, según para qué: `mode` 'ataque' (decidir un
+    // ataque o un blanco: lo peor de su escalón, echelonCeil, como expectedRatio) o 'linea' (cuánto aprieta el enemigo a
+    // una línea o un frente: el valor central de su escalón, echelonMid).
+    seenPower(viewer, a, kind, mode) {
         const r = this.rules(a.owner);
         if (this.intel(viewer, a.owner, a.cell).exact) return unitPower(a.units, kind, r);
-        return unitPower({ infantry: echelonCeil(countUnits(a.units)), tank: 0, artillery: 0 }, kind, r);
+        const n = countUnits(a.units);
+        return unitPower({ infantry: mode === 'linea' ? echelonMid(n) : echelonCeil(n), tank: 0, artillery: 0 }, kind, r);
     }
     // Unidades que `viewer` sabe seguro que tiene el ejército `a`: todas si lo conoce; si no, las menos de su escalón
     // (un batallón, II, puede ser una sola).
@@ -3861,7 +3868,7 @@ class GameEngine {
         let enemy = 0, breach = false;
         const near = new Set();
         for (const c of cells) for (const x of this.nearCells(c, 3).keys()) near.add(x);
-        for (const c of near) { const e = foeOn(c); if (e) enemy += this.seenPower(id, e, 'atk'); }
+        for (const c of near) { const e = foeOn(c); if (e) enemy += this.seenPower(id, e, 'atk', 'linea'); }
         let lost = false, rear = false;
         for (const c of cells) if (this.atWar(id, this.owner[c]) || foeOn(c)) { lost = true; break; }
         if (dir) for (const c of this.lineBand(op, cells)) {
@@ -5257,7 +5264,7 @@ class GameEngine {
         const start = city ? border.reduce((m, c) => (d2(c, city.city) < d2(m, city.city) ? c : m), border[0]) : border[0];
         // Tramo amenazado: los trozos de la cadena con ejércitos enemigos cerca (huecos de 2 casillas o menos), el de más ataque.
         const foesNear = c => { const out = []; for (const x of this.nearCells(c, 3).keys()) { const a = this.armyOn(x); if (a && a.owner === e && this.sees(id, x)) out.push(a); } return out; };
-        const power = chain.map(c => foesNear(c).reduce((t, a) => t + this.seenPower(id, a, 'atk'), 0));
+        const power = chain.map(c => foesNear(c).reduce((t, a) => t + this.seenPower(id, a, 'atk', 'linea'), 0));
         let i0 = -1, i1 = -1;
         if (power.some(x => x > 0)) {
             let best = -1, g0 = -1, last = -9, sum = 0;
@@ -5286,7 +5293,7 @@ class GameEngine {
         const forces = [...this.armies.values()].filter(a => a.owner === id && !a.op && !a.order && !a.form && near.has(a.cell) && this.armyOn(a.cell) === a && !(CITY_OF[a.cell] >= 0 && countUnits(a.units) <= 1));
         const foes = new Set();
         for (const c of ref) for (const a of foesNear(c)) foes.add(a);
-        const enemy = [...foes].reduce((t, a) => t + this.seenPower(id, a, 'atk'), 0), cap = this.nations[id].capitalCell;
+        const enemy = [...foes].reduce((t, a) => t + this.seenPower(id, a, 'atk', 'linea'), 0), cap = this.nations[id].capitalCell;
         const res = this.bestLine(id, { ref, forces, enemy, dir: this.lineDir(id, ref), limit: 3, steps: true, keep: this.owner[cap] === id ? cap : -1 });
         const line = res ? res.cells : ref;
         const plan = { enemy: e, line, attack: city ? [start, city.city] : null, target: city?.cityName,
