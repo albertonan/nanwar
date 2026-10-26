@@ -273,6 +273,13 @@
         .members { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
         .check { display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: start; }
         .orders { display: flex; flex-wrap: wrap; gap: 6px; }
+        .sel-list { display: grid; gap: 4px; margin: 8px 0 2px; max-height: 232px; overflow-y: auto; }
+        .sel-row { display: flex; align-items: center; gap: 4px; }
+        .sel-go { flex: 1; min-width: 0; display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 8px; align-items: center; text-align: left; padding: 6px 9px;
+            border: 1px solid transparent; border-radius: 10px; background: var(--raised); color: var(--text); font: 14px var(--font); cursor: pointer; }
+        .sel-go:hover { border-color: var(--line); }
+        .sel-go small { display: block; color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .sel-go .tag { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin: 0 4px 0 2px; vertical-align: 0; }
         .op-list { display: grid; gap: 4px; margin-top: 10px; }
         .op-row { display: grid; grid-template-columns: 12px 1fr auto; gap: 10px; align-items: center; text-align: left; width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--text); font: 14px var(--font); cursor: pointer; }
         .op-row:hover { background: var(--raised); }
@@ -5706,6 +5713,98 @@ class GameEngine {
         return res;
     }
     playerClearOrder(army) { if (army?.owner === this.player) this.clearOrder(army); }
+    // Ataque conjunto desde la interfaz: `list` = [{ army, send }], cada uno del jugador y con `target` entre sus ataques
+    // de este turno (el que no, se queda fuera). `send` es la parte que ataca (la del ejército elegido, como en
+    // playerMove); sin él, todo el ejército. Con uno solo es playerMove. Devuelve el ejército que queda en `target` o null.
+    playerAttackJoint(list, target) {
+        if (this.over) return null;
+        const parts = [];
+        for (const { army, send } of list) {
+            if (army?.owner !== this.player || !this.armies.has(army.id) || army.used >= 999 || parts.some(x => x.army === army)) continue;
+            const units = send ?? army.units;
+            if (UNIT_KEYS.some(k => (units[k] || 0) < 0 || (units[k] || 0) > (army.units[k] || 0)) || countUnits(units) === 0) continue;
+            const r = this.reach(army.owner, army.cell, this.moveBudget(army.owner, army.cell, units, army.used), army.used === 0);
+            if (r.attacks.has(target)) parts.push({ army, units, r });
+        }
+        if (!parts.length) return null;
+        if (parts.length === 1) return this.playerMove(parts[0].army, copyUnits(parts[0].units), target);
+        this.attackJoint(parts.map(({ army, units, r }) => {
+            const mover = this.split(army, copyUnits(units));
+            mover.direct = this.turn;   // orden directa: este turno no cumple la suya
+            return { army: mover, from: r.attacks.get(target), r };
+        }), target);
+        return this.armyOn(target);
+    }
+    // Agrupaciones y órdenes a varios ejércitos a la vez (ficha de selección múltiple, atajos de teclado).
+    playerCreateGroup(ids, opts = {}) {
+        if (this.over) return null;
+        const gr = this.createGroup(this.player, ids, opts);
+        if (gr) this.log(`Nueva agrupación: ${gr.name}, con ${plural(this.groupMembers(this.player, gr.id).length, 'ejército', 'ejércitos')}.`);
+        return gr;
+    }
+    playerAddToGroup(gid, ids) {
+        const gr = this.groupById(this.player, gid);
+        if (this.over || !gr || !this.addToGroup(this.player, gid, ids)) return false;
+        this.log(`${gr.name}: ${plural(this.groupMembers(this.player, gid).length, 'ejército', 'ejércitos')} tras añadir los elegidos.`);
+        return true;
+    }
+    playerDisbandGroup(gid) {
+        const gr = this.groupById(this.player, gid);
+        if (this.over || !gr) return false;
+        this.disbandGroup(this.player, gid);
+        this.log(`${gr.name} se disuelve: sus ejércitos quedan sin agrupación.`);
+        return true;
+    }
+    // Marchar repartidos alrededor de `dest`; cada uno empieza ya, como con playerOrder.
+    playerGroupMarch(ids, dest) {
+        const list = this.over ? [] : this.ownArmies(this.player, ids, false);
+        const n = list.length ? this.groupMarch(this.player, ids, dest) : 0;
+        if (!n) { this.log('No se puede marchar allí: el destino tiene que ser tuyo, de un aliado o de un enemigo en guerra.'); return 0; }
+        for (const a of list) if (this.armies.has(a.id) && a.order?.kind === 'march') { a.direct = 0; this.stepOrder(a); }
+        this.log(`${plural(n, 'ejército marcha', 'ejércitos marchan')} hacia ${this.placeName(dest)}, repartidos alrededor.`);
+        return n;
+    }
+    playerGroupGather(ids, cell = -1) {
+        const host = this.over ? null : this.groupGather(this.player, ids, cell);
+        if (!host) { this.log('No se pueden reunir allí: elige una casilla libre o un ejército tuyo.'); return null; }
+        if (host.order?.kind === 'march') { host.direct = 0; this.stepOrder(host); }
+        for (const a of this.ownArmies(this.player, ids, false)) if (a !== host && this.armies.has(a.id) && a.order?.kind === 'join') { a.direct = 0; this.stepOrder(a); }
+        this.log(`Los elegidos se reúnen en un solo ejército en ${this.placeName(host.order?.kind === 'march' ? host.order.dest : host.cell)}.`);
+        return host;
+    }
+    // Ataque coordinado (A4b) con los elegidos: si son justo los de una agrupación, la de ellos; si no, una agrupación
+    // nueva con ellos.
+    playerGroupAssault(ids, target, ratio = null) {
+        if (this.over) return null;
+        const list = this.ownArmies(this.player, ids, false);
+        if (!list.length) return null;
+        const gid = list[0].group, same = gid && list.every(a => a.group === gid) && this.groupMembers(this.player, gid).every(a => list.includes(a));
+        if (!this.atWar(this.player, this.owner[target]) || !isLand(target)) { this.log('El ataque coordinado tiene que ser contra una casilla de tierra de un enemigo en guerra.'); return null; }
+        const gr = same ? this.groupById(this.player, gid) : this.createGroup(this.player, list.map(a => a.id));
+        const o = gr && this.setGroupAssault(this.player, gr.id, target, ratio);
+        if (!o) return null;
+        this.log(`${same ? '' : 'Nueva agrupación para el ataque: '}${gr.name} prepara un ataque coordinado contra ${this.placeName(target)} (${plural(this.groupMembers(this.player, gr.id).length, 'ejército', 'ejércitos')}, ${decimal(o.ratio)} a 1 o más).`);
+        return o;
+    }
+    // Una orden sin destino ('hold' o 'fortify') a cada uno. Devuelve a cuántos.
+    playerOrderMany(ids, kind) {
+        if (this.over || !['hold', 'fortify'].includes(kind)) return 0;
+        let n = 0;
+        for (const a of this.ownArmies(this.player, ids, false)) {
+            if (kind === 'fortify' && afloat(a.cell)) continue;
+            if (this.setOrder(a, { kind })) { a.direct = 0; this.stepOrder(a); n++; }
+        }
+        this.log(kind === 'hold' ? `${plural(n, 'ejército mantiene', 'ejércitos mantienen')} la posición.` : `${plural(n, 'ejército fortificará', 'ejércitos fortificarán')} su casilla.`);
+        return n;
+    }
+    playerAssignMany(ids, opId) {
+        const op = opId ? this.ops.get(opId) : null;
+        if (this.over || (opId && op?.owner !== this.player)) return 0;
+        const list = this.ownArmies(this.player, ids, false);
+        for (const a of list) this.assignArmy(a, op ? op.id : 0);
+        this.log(op ? `${plural(list.length, 'ejército pasa', 'ejércitos pasan')} a ${op.name}.` : `${plural(list.length, 'ejército queda', 'ejércitos quedan')} sin operación.`);
+        return list.length;
+    }
     playerCommand(key, value) {
         const c = this.nations[this.player].command;
         if (key === 'posture') this.setPosture(this.player, value);
@@ -7178,6 +7277,12 @@ class MapView {
             ctx.strokeStyle = INK; ctx.lineWidth = 5 / s; ctx.stroke(p);
             ctx.strokeStyle = SIGNAL; ctx.lineWidth = 2.6 / s; ctx.stroke(p);
         }
+        if (this.sel?.size) {   // selección múltiple: contorno suave, del color de su agrupación si son todos de una
+            const p = new Path2D();
+            for (const id of this.sel) { const a = g.armies.get(id); if (a && g.armyOn(a.cell) === a && a.cell !== this.selectedCell) this.hexPath(p, a.cell); }
+            ctx.strokeStyle = 'rgba(21,26,18,0.75)'; ctx.lineWidth = 4 / s; ctx.stroke(p);
+            ctx.strokeStyle = this.selColor ?? SIGNAL; ctx.lineWidth = 2 / s; ctx.stroke(p);
+        }
         if (this.selectedCell >= 0) {
             const p = new Path2D(); this.hexPath(p, this.selectedCell);
             ctx.strokeStyle = INK; ctx.lineWidth = 4.5 / s; ctx.stroke(p);
@@ -7273,7 +7378,7 @@ class MapView {
             const view = g.armyView(g.player, a);
             tokens.push({ id: a.id, owner: a.owner, type: view.type, n: view.n, echelon: view.echelon, level: view.level, wx, wy, mine,
                 spent: mine && g.mp(a) === 0, noSupply: mine && !sea && !g.inSupply(a.owner, a.cell),
-                flanked: !sea && g.hostileSides(a.owner, a.cell) >= CONFIG.FLANKED_SIDES, starving: g.starving(a.owner, a.cell), selected: a.cell === this.selectedCell && !pose?.moving,
+                flanked: !sea && g.hostileSides(a.owner, a.cell) >= CONFIG.FLANKED_SIDES, starving: g.starving(a.owner, a.cell), selected: (a.cell === this.selectedCell || !!this.sel?.has(a.id)) && !pose?.moving,
                 moving: !!pose?.moving, facing: this.motion.facingOf(a.id, pose), afloat: onSea(wx, wy, a.cell), alpha: 1 });
         }
         if (g.player !== null) for (const gh of this.motion.ghosts(now)) {
@@ -7332,6 +7437,12 @@ class MapView {
                 ctx.lineWidth = 3.5; ctx.strokeStyle = 'rgba(21,26,18,0.85)'; ctx.fillStyle = '#fff';
                 ctx.strokeText(t, x, y); ctx.fillText(t, x, y);
             }
+        }
+        if (this.box) {   // rectángulo de selección que se está trazando
+            const b = this.box, x = Math.min(b.x0, b.x1), y = Math.min(b.y0, b.y1), w = Math.abs(b.x1 - b.x0), h = Math.abs(b.y1 - b.y0);
+            ctx.beginPath(); ctx.roundRect(x, y, w, h, 6);
+            ctx.fillStyle = 'rgba(240,196,25,0.12)'; ctx.fill();
+            ctx.setLineDash([6, 4]); ctx.lineWidth = 1.5; ctx.strokeStyle = SIGNAL; ctx.stroke(); ctx.setLineDash([]);
         }
         if (this.motion.active(now)) this.requestFrame();
     }
@@ -7827,7 +7938,11 @@ class GameUI {
         this.view.showOps = this.prefs.ops !== false;
         this.mapMenu = false;        // panel «Mapa»: vista y capas
         this.multi = new Set();      // provincias seleccionadas con la herramienta Ciudades
-        this.ordering = null;        // { kind }: orden a la espera de que se elija el destino en el mapa
+        this.ordering = null;        // { kind, ids }: orden a la espera de que se elija el destino en el mapa
+        this.sel = new Set();        // selección múltiple (ids de ejércitos propios); vacía si hay uno solo, que va en `selected`
+        this.boxMode = false;        // «Seleccionar zona»: el siguiente arrastre traza un rectángulo en vez de mover el mapa
+        this.jointAll = false;       // «Sumar a todos los vecinos»: al atacar se suman también los no elegidos que lleguen
+        this.jointCache = new Map(); // participantes de cada ataque conjunto bajo el ratón, hasta el próximo render
         this.opDraft = null;         // { kind, cells, redraw }: operación que se está dibujando con la herramienta Operación
         this.air = this.noAir();     // herramienta Aviación: aeródromo elegido, sus escuadrones elegidos y el blanco
         this.focusOp = null;         // operación abierta en la pestaña Mando
@@ -7930,6 +8045,7 @@ class GameUI {
         this.tool = 'command';
         this.air = this.noAir();
         this.anchor = -1;
+        this.sel = new Set(); this.boxMode = false; this.view.box = null;
         this.choice = g.player;
         this.focusNation = null;
         this.seenLog = g.logs.length;
@@ -7939,25 +8055,39 @@ class GameUI {
 
     // --- Mapa ---
     // Ratón y pantalla táctil: arrastrar mueve el mapa, la rueda o el pellizco hacen zoom, un toque o clic selecciona.
+    // Ctrl/⌘ + arrastrar, o arrastrar con «Seleccionar zona», traza un rectángulo de selección en vez de mover el mapa.
     bindMap() {
         const c = this.view.canvas;
         const pointers = new Map();
-        let drag = null, pinch = null;
+        let drag = null, pinch = null, box = null;
         const startDrag = (x, y, moved = false) => { drag = { x, y, ox: this.view.ox, oy: this.view.oy, moved }; };
+        const boxing = e => (this.boxMode || ((e.ctrlKey || e.metaKey) && e.pointerType === 'mouse')) && this.tool === 'command' && this.game.player !== null && !this.game.over;
         c.addEventListener('pointerdown', e => {
             if (e.pointerType === 'mouse' && e.button !== 0) return;
             c.setPointerCapture(e.pointerId);
             this.touch = e.pointerType !== 'mouse';
             pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-            if (pointers.size === 1) startDrag(e.clientX, e.clientY);
+            if (pointers.size === 1 && boxing(e)) { box = { x: e.clientX, y: e.clientY, add: e.shiftKey, moved: false }; drag = null; }
+            else if (pointers.size === 1) startDrag(e.clientX, e.clientY);
             else if (pointers.size === 2) {
                 const [a, b] = [...pointers.values()];
                 pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), scale: this.view.scale };
                 if (drag) drag.moved = true;
+                if (box) { box = null; this.view.box = null; }   // con dos dedos, zoom
             }
         });
         c.addEventListener('pointermove', e => {
             if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            if (box && pointers.has(e.pointerId)) {
+                if (Math.abs(e.clientX - box.x) + Math.abs(e.clientY - box.y) > (e.pointerType === 'mouse' ? 4 : 10)) box.moved = true;
+                if (box.moved) {
+                    const r = c.getBoundingClientRect();
+                    this.view.box = { x0: box.x - r.left, y0: box.y - r.top, x1: e.clientX - r.left, y1: e.clientY - r.top };
+                    $('#tooltip').hidden = true;
+                    this.requestDraw();
+                }
+                return;
+            }
             if (pinch && pointers.size === 2) {
                 const [a, b] = [...pointers.values()];
                 const r = c.getBoundingClientRect();
@@ -7980,15 +8110,24 @@ class GameUI {
         });
         const end = e => {
             const tap = drag && !drag.moved && !pinch && pointers.size === 1 && e.type === 'pointerup';
+            const boxed = box && !pinch && pointers.size === 1 && e.type === 'pointerup' ? box : null;
             pointers.delete(e.pointerId);
             if (pointers.size < 2) pinch = null;
             if (pointers.size === 1) { const [p] = pointers.values(); startDrag(p.x, p.y, true); }   // tras el pellizco sigue arrastrando
             if (pointers.size === 0) {
-                if (tap) this.clickCell(this.cellFromEvent(e), e.shiftKey);
-                drag = null;
+                const b = this.view.box;
+                if (boxed?.moved && b) this.boxSelect(b.x0, b.y0, b.x1, b.y1, boxed.add);
+                else if (tap || boxed) this.clickCell(this.cellFromEvent(e), e.shiftKey, e.ctrlKey || e.metaKey);   // Ctrl + clic sin arrastrar
+                if (this.view.box) { this.view.box = null; this.requestDraw(); }
+                drag = null; box = null;
                 c.classList.remove('dragging');
             }
         };
+        // Doble clic sobre un ejército tuyo de una agrupación: toda la agrupación.
+        c.addEventListener('dblclick', e => {
+            const g = this.game, cell = this.cellFromEvent(e), a = cell >= 0 && g.player !== null ? g.armyOn(cell) : null;
+            if (this.tool === 'command' && a && a.owner === g.player && a.group && !this.replaying) this.selectGroup(a.group);
+        });
         c.addEventListener('pointerup', end);
         c.addEventListener('pointercancel', end);
         c.addEventListener('contextmenu', e => { e.preventDefault(); this.cancel(); });
@@ -8145,7 +8284,20 @@ class GameUI {
         if (g.player !== null && o === g.player && !g.inSupply(g.player, cell)) lines.push('<span style="color:#ffb347">Sin suministro</span>');
         if (this.reachInfo?.attacks.has(cell) && a && g.armyView(g.player, a).n === null) {
             lines.push('<b style="color:#ffd166">Clic para atacar a un ejército sin identificar</b>');
+            const n = this.jointList(cell).length - 1;
+            if (n > 0) lines.push(`Atacan contigo: ${plural(n, 'ejército vecino', 'ejércitos vecinos')}`);
             lines.push('<span class="muted">Sin Reconocimiento 2 ni un espía en la provincia no hay previsión del combate.</span>');
+        } else if (this.reachInfo?.attacks.has(cell) && a && this.jointList(cell).length > 1) {
+            // Ataque conjunto: la fuerza de todos sumada contra la defensa, sin el río (cada uno lleva el suyo).
+            const list = this.jointList(cell), mine = list[0].army;
+            const fx = g.jointFactors(g.player, list.map(x => ({ units: x.send ?? x.army.units, from: x.from, id: x === list[0] && !sameUnits(this.send, mine.units) ? 0 : x.army.id })), a, cell);
+            const defParts = this.isolationHidden(a) ? fx.defState.parts.filter(([k]) => k !== 'aislado') : fx.defState.parts;
+            const dfn = defParts === fx.defState.parts ? fx.dfn : Math.max(0.5, fx.baseDef * fx.bonus * defParts.reduce((m, [, x]) => m * x, 1));
+            const chance = g.winChance(fx.atk, dfn), color = chance >= 0.7 ? '#a8e38a' : chance >= 0.35 ? '#ffd166' : '#ff8a78';
+            const factors = fx.parts.map(([nm, x]) => `${nm} ×${decimal(x)}`).concat(fx.capped ? [`tope ×${decimal(fx.cap)}`] : [], defParts.map(([nm, x]) => `${nm} ×${decimal(x)}`)).join(', ');
+            lines.push(`<b style="color:${color}">Clic para atacar: ${Math.round(chance * 100)} % de victoria</b>`);
+            lines.push(`Atacan contigo: ${plural(list.length - 1, 'ejército vecino', 'ejércitos vecinos')}${this.jointAll ? ' (todos los que llegan)' : ''}`);
+            lines.push(`Fuerza sumada ${Math.round(fx.atk)} (${fx.members.map(m => `${Math.round(m.atk)}${m.river ? ' tras un río' : ''}`).join(' + ')}) contra su defensa ${Math.round(dfn)}${factors ? ` (${factors})` : ''}`);
         } else if (this.reachInfo?.attacks.has(cell) && a) {
             const mine = this.selectedArmy();
             const fx = g.combatFactors(g.player, this.send, this.reachInfo.from.get(cell) ?? mine.cell, a, cell, sameUnits(this.send, mine.units) ? mine.id : 0, mine.id);
@@ -8176,7 +8328,7 @@ class GameUI {
         tip.style.top = `${Math.min(y, box.height - tip.offsetHeight - 8)}px`;
     }
 
-    clickCell(cell, shift = false) {
+    clickCell(cell, shift = false, ctrl = false) {
         const g = this.game;
         if (this.replaying) return;
         if (this.ordering) { this.pickOrderTarget(cell); return; }
@@ -8191,12 +8343,24 @@ class GameUI {
         if (this.tool === 'op') { this.opClick(cell); return; }
         if (this.tool === 'air') { this.airClick(cell); return; }
         if (this.tool !== 'command') { this.buildClick(cell); return; }
+        // Ctrl/⌘ + clic: añade o quita un ejército tuyo de la selección; en otra casilla no hace nada.
+        if (ctrl) { const t = g.armyOn(cell); if (t && t.owner === g.player) this.toggleSel(t.id); return; }
         const army = this.selectedArmy();
         // Mayúsculas + clic: orden de marchar (o de atacar, si allí hay un enemigo) hasta esa casilla, en varios turnos.
         if (army && shift && cell !== army.cell) {
             const foe = g.armyOn(cell);
             this.ordering = { kind: foe && g.atWar(g.player, foe.owner) && g.sees(g.player, cell) ? 'attack' : 'march' };
             this.pickOrderTarget(cell);
+            return;
+        }
+        // Con varios elegidos, un clic en uno de ellos lo elige solo (no lo funde con el elegido).
+        const there = g.armyOn(cell);
+        if (this.sel.size > 1 && there && this.sel.has(there.id)) { this.select(cell); return; }
+        // Ataque conjunto: con él atacan los de la selección (o los de su agrupación) que también lleguen.
+        const joint = army && this.reachInfo?.attacks.has(cell) ? this.jointList(cell) : [];
+        if (joint.length > 1) {
+            const result = g.playerAttackJoint(joint, cell);
+            this.select(result && result.owner === g.player ? result.cell : this.selected, true);
             return;
         }
         if (army && this.reachInfo && (this.reachInfo.attacks.has(cell) || this.reachInfo.moves.has(cell))) {
@@ -8249,8 +8413,18 @@ class GameUI {
 
     // Destino de la orden que se está dando: casilla para marchar o atacar, ejército propio para seguir.
     pickOrderTarget(cell) {
-        const g = this.game, kind = this.ordering?.kind, army = this.selectedArmy();
+        const g = this.game, kind = this.ordering?.kind, ids = this.ordering?.ids ?? [], army = this.selectedArmy();
         this.ordering = null;
+        // Órdenes de la ficha de selección múltiple: marchar repartidos, reunir en uno o ataque coordinado.
+        if (kind?.startsWith('group-')) {
+            if (cell >= 0) {
+                if (kind === 'group-march') g.playerGroupMarch(ids, cell);
+                else if (kind === 'group-gather') g.playerGroupGather(ids, cell);
+                else g.playerGroupAssault(ids, cell);
+            }
+            this.render();
+            return;
+        }
         if (!army || cell < 0 || cell === army.cell) { this.render(); return; }
         let order;
         if (kind === 'follow') {
@@ -8584,6 +8758,8 @@ class GameUI {
     setTool(id, draft = null) {
         if (this.game.player === null || this.game.over) return;
         this.tool = id;
+        if (id !== 'command') this.sel.clear();
+        this.boxMode = false;
         this.stretch = this.view.stretch = this.repair = this.fortRepair = null;
         this.opDraft = id === 'op' ? draft ?? { kind: this.opDraft?.kind ?? 'ofensiva', cells: [], redraw: null } : null;
         this.air = this.noAir();
@@ -8609,6 +8785,7 @@ class GameUI {
         if (this.mapMenu) { this.mapMenu = false; this.render(); return; }
         if ((this.stretch || this.repair || this.fortRepair) && !this.pending) { this.stretch = this.view.stretch = this.repair = this.fortRepair = null; this.render(); return; }
         if (this.ordering) { this.ordering = null; this.render(); return; }
+        if (this.boxMode) { this.boxMode = false; this.render(); return; }
         if (this.proposal) { this.endProposal(); return; }
         if (this.tool === 'op' && this.opDraft?.cells.length) { this.opDraft.cells.pop(); this.render(); return; }
         if (this.pending) { this.pending = null; this.view.preview = null; this.render(); return; }
@@ -8634,11 +8811,89 @@ class GameUI {
         return a && a.owner === this.game.player && !this.game.over ? a : null;
     }
 
-    select(cell) {
+    // Elige una casilla (y su ejército). Sin `keep`, se olvida la selección múltiple.
+    select(cell, keep = false) {
+        if (!keep) this.sel.clear();
         this.selected = cell;
         const a = this.selectedArmy();
         this.send = a ? copyUnits(a.units) : emptyUnits();
         this.render();
+    }
+
+    // --- Selección múltiple ---
+    // Los ejércitos de la selección que siguen vivos, asentados y siendo tuyos; los demás se quitan de ella.
+    selArmies() {
+        const g = this.game, out = [];
+        for (const id of [...this.sel]) {
+            const a = g.armies.get(id);
+            if (a && a.owner === g.player && g.armyOn(a.cell) === a) out.push(a); else this.sel.delete(id);
+        }
+        return out;
+    }
+    // Ids a los que van las órdenes de la ficha y los atajos: la selección múltiple o, si no la hay, el ejército elegido.
+    selIds() {
+        const xs = this.selArmies(), a = this.selectedArmy();
+        return xs.length > 1 ? xs.map(x => x.id) : a ? [a.id] : [];
+    }
+    // Fija la selección. Con dos o más, el elegido (el que ataca con un clic y cuyo alcance se ve) es `lead` o el mayor;
+    // con uno, la ficha de siempre de ese ejército; sin ninguno, nada elegido.
+    setSel(armies, lead = null) {
+        if (armies.length < 2) { this.select(armies[0]?.cell ?? -1); return; }
+        this.sel = new Set(armies.map(a => a.id));
+        const head = lead && armies.includes(lead) ? lead : armies.reduce((b, a) => (countUnits(a.units) > countUnits(b.units) ? a : b));
+        this.select(head.cell, true);
+    }
+    // Ctrl/⌘ + clic: añade o quita un ejército propio (si no había selección, empieza con el elegido).
+    toggleSel(id) {
+        const g = this.game, a = g.armies.get(id);
+        if (!a || a.owner !== g.player || g.armyOn(a.cell) !== a || g.over) return;
+        const cur = this.selArmies(), lead = this.selectedArmy();
+        if (!cur.length && lead) cur.push(lead);
+        const next = cur.includes(a) ? cur.filter(x => x !== a) : [...cur, a];
+        this.setSel(next, lead && next.includes(lead) ? lead : null);
+    }
+    // Elige todos los ejércitos de la agrupación `gid`; con `center`, centra el mapa en el que esté más en medio.
+    selectGroup(gid, center = false) {
+        const g = this.game, xs = g.player === null || g.over ? [] : g.groupMembers(g.player, gid);
+        if (!xs.length) return false;
+        if (this.tool !== 'command') this.setTool('command');
+        if (center) {
+            const mx = xs.reduce((s, a) => s + G.cx[a.cell], 0) / xs.length, my = xs.reduce((s, a) => s + G.cy[a.cell], 0) / xs.length;
+            const mid = xs.reduce((b, a) => (Math.hypot(G.cx[a.cell] - mx, G.cy[a.cell] - my) < Math.hypot(G.cx[b.cell] - mx, G.cy[b.cell] - my) ? a : b));
+            this.view.centerOn(mid.cell, Math.max(5, G.S * this.view.scale));
+        }
+        this.setSel(xs);
+        return true;
+    }
+    // Rectángulo de selección, en píxeles del mapa (los de view.toScreen): elige tus ejércitos de dentro; con `add`, los
+    // suma a los que ya había. Apaga «Seleccionar zona».
+    boxSelect(x0, y0, x1, y1, add = false) {
+        const g = this.game;
+        this.boxMode = false;
+        this.view.box = null;
+        if (g.player === null || g.over) return;
+        const [l, r, t, b] = [Math.min(x0, x1), Math.max(x0, x1), Math.min(y0, y1), Math.max(y0, y1)], inside = [];
+        for (const a of g.armies.values()) {
+            if (a.owner !== g.player || g.armyOn(a.cell) !== a) continue;
+            const [x, y] = this.view.toScreen(G.cx[a.cell], G.cy[a.cell]);
+            if (x >= l && x <= r && y >= t && y <= b) inside.push(a);
+        }
+        if (this.tool !== 'command') this.setTool('command');
+        const base = !add ? [] : this.sel.size ? this.selArmies() : [this.selectedArmy()].filter(Boolean);
+        this.setSel([...new Set([...base, ...inside.sort((p, q) => p.id - q.id)])], add ? this.selectedArmy() : null);
+    }
+    // Quiénes atacan `cell` con el ejército elegido: él (con la parte que mandas) y, de los que también llegan, los de la
+    // selección múltiple o, sin ella, los de su agrupación; con «Sumar a todos los vecinos», todos. [{ army, send?, from }]
+    jointList(cell) {
+        const g = this.game, mine = this.selectedArmy();
+        if (!mine || !this.reachInfo?.attacks.has(cell)) return [];
+        const key = `${cell}:${this.jointAll}`;
+        if (this.jointCache.has(key)) return this.jointCache.get(key);
+        const ids = this.jointAll ? null : new Set(this.sel.size > 1 ? this.sel : mine.group ? g.groupMembers(g.player, mine.group).map(a => a.id) : []);
+        const others = ids?.size === 0 ? [] : g.jointCandidates(g.player, cell, ids).filter(x => x.army !== mine);
+        const list = [{ army: mine, send: copyUnits(this.send), from: this.reachInfo.from.get(cell) ?? mine.cell }, ...others.map(x => ({ army: x.army, from: x.from }))];
+        this.jointCache.set(key, list);
+        return list;
     }
 
     nextArmy() {
@@ -8654,7 +8909,17 @@ class GameUI {
     }
 
     updateReach() {
-        const g = this.game, a = this.selectedArmy();
+        const g = this.game;
+        this.jointCache = new Map();
+        // La selección múltiple, al día: fuera los que han muerto o se han fundido; con uno solo, su ficha de siempre; si
+        // el elegido ya no está en ella, el mayor de los que quedan.
+        if (this.sel.size) {
+            const xs = this.tool === 'command' && g.player !== null && !g.over ? this.selArmies() : [];
+            const pick = a => { this.selected = a.cell; this.send = copyUnits(a.units); };
+            if (xs.length < 2) { this.sel.clear(); if (xs.length) pick(xs[0]); }
+            else if (!xs.some(x => x.cell === this.selected)) pick(xs.reduce((b, x) => (countUnits(x.units) > countUnits(b.units) ? x : b)));
+        }
+        const a = this.selectedArmy();
         this.reachInfo = null;
         if (a) {
             for (const k of UNIT_KEYS) this.send[k] = Math.min(this.send[k], a.units[k] || 0);
@@ -8665,7 +8930,12 @@ class GameUI {
         }
         this.view.highlight = this.reachInfo;
         this.view.selectedCell = this.selected;
-        this.view.multi = this.tool === 'cities' ? new Set([...this.multi].map(pid => PROVINCES[pid].city)) : null;
+        this.view.sel = this.sel.size ? new Set(this.sel) : null;
+        // El contorno de los elegidos lleva el color de su agrupación si son todos de la misma.
+        const gid = this.sel.size ? g.armies.get([...this.sel][0])?.group : 0;
+        const gr = gid && [...this.sel].every(id => g.armies.get(id)?.group === gid) ? g.groupById(g.player, gid) : null;
+        this.view.selColor = gr ? GROUP_COLORS[gr.color] : null;
+        this.view.multi =this.tool === 'cities' ? new Set([...this.multi].map(pid => PROVINCES[pid].city)) : null;
         if (this.tool === 'air') this.airTidy();
         this.view.airPick = this.tool === 'air' ? this.airPick() : null;
     }
@@ -8798,6 +9068,27 @@ class GameUI {
                 break;
             }
             case 'order-cancel': g.playerClearOrder(this.selectedArmy()); break;
+            // Ficha de selección múltiple
+            case 'sel-remove': this.toggleSel(+d.id); return;
+            case 'sel-center': {
+                const a = g.armies.get(+d.id);
+                if (!a) return;
+                this.view.centerOn(a.cell, Math.max(5, G.S * this.view.scale));
+                break;
+            }
+            case 'sel-group-new': g.playerCreateGroup(this.selIds()); break;
+            case 'sel-group-add': { const s = document.querySelector('#card select[data-sel-group]'); if (s && +s.value) g.playerAddToGroup(+s.value, this.selIds()); break; }
+            case 'sel-march': case 'sel-gather': case 'sel-assault':
+                this.ordering = { kind: `group-${d.action.slice(4)}`, ids: this.selIds() };
+                break;
+            case 'sel-gather-strong': g.playerGroupGather(this.selIds()); break;
+            case 'sel-hold': g.playerOrderMany(this.selIds(), 'hold'); break;
+            case 'sel-fortify': g.playerOrderMany(this.selIds(), 'fortify'); break;
+            case 'sel-op': { const s = document.querySelector('#card select[data-sel-op]'); if (s) g.playerAssignMany(this.selIds(), +s.value); break; }
+            case 'sel-disband': g.playerDisbandGroup(+d.id); break;
+            case 'sel-clear': this.select(-1); return;
+            case 'box-mode': this.boxMode = !this.boxMode; if (this.boxMode && isMobile()) this.setSheet('mini'); break;
+            case 'joint-all': this.jointAll = !this.jointAll; break;
             case 'order-ratio': {
                 this.orderRatio = +d.value;
                 const a = this.selectedArmy();
@@ -9139,6 +9430,23 @@ class GameUI {
         if (e.key === 'v' || e.key === 'V') { this.toggleViewMode(); return; }
         if ((e.key === 'm' || e.key === 'M') && (this.game.player === null || this.game.over)) { this.mapMenu = !this.mapMenu; this.render(); return; }
         if (g.player === null || g.over) return;
+        // Alt + 1–9: elige la agrupación de ese número y centra el mapa; Alt + Mayúsculas + 1–9: la crea (o la sustituye)
+        // con la selección. Por la tecla física: con Mayúsculas, `key` es «!», «"»… según el teclado.
+        const digit = /^(?:Digit|Numpad)([1-9])$/.exec(e.code ?? '');
+        if (e.altKey && digit && !e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+            const num = +digit[1];
+            if (e.shiftKey) {
+                const ids = this.tool === 'command' ? this.selIds() : [];
+                if (!ids.length) { this.flash(`Elige antes los ejércitos de la agrupación ${num}.`); return; }
+                const gr = g.playerCreateGroup(ids, { num });
+                if (gr) this.selectGroup(gr.id); else this.render();
+            } else {
+                const gr = g.nations[g.player].groups.find(x => x.num === num);
+                if (!gr || !this.selectGroup(gr.id, true)) this.flash(`No tienes ninguna agrupación con el número ${num}.`);
+            }
+            return;
+        }
         const tool = TOOLS.find(t => t.key === e.key);
         if (tool) { this.setTool(tool.id); return; }
         if (e.key === 'i' || e.key === 'I') { this.openResearch(); return; }
@@ -9280,6 +9588,7 @@ class GameUI {
         if (this.tool === 'cities' && p0 !== null && !g.over) { this.renderMultiCard(); return; }
         if (this.tool === 'op' && p0 !== null && !g.over) { this.renderOpDraftCard(); return; }
         if (this.tool === 'air' && p0 !== null && !g.over) { this.renderAirCard(); return; }
+        if (this.tool === 'command' && p0 !== null && !g.over && this.sel.size > 1) { this.renderSelCard(); return; }
         // En el mar solo hay ficha para un barco propio con la herramienta de mando: no hay provincia, dueño ni reclutas.
         const sea = cell >= 0 && afloat(cell), a = cell >= 0 ? g.armyOn(cell) : null;
         if (p0 === null || g.over || cell < 0 || (sea && (a?.owner !== p0 || this.tool !== 'command')) || (isMobile() && this.tool !== 'command')) { el.hidden = true; return; }
@@ -9315,6 +9624,7 @@ class GameUI {
                 ${supplied ? '' : `<p class="note warn">Sin suministro: lejos de tus ciudades y de la red de carreteras unida a tu capital (por tierra o, de puerto a puerto, por mar) solo avanza una casilla por turno. Construye carreteras hasta el frente para abastecerlo (llegan a ${g.rules(p0).supplyRoad} casillas de la red).</p>`}
                 ${left <= 0 ? '' : sea ? `<p class="note">Haz clic en una casilla ${this.view.isRealistic() ? 'de la zona clara' : 'verde'} para navegar (${r.seaSpeed} casillas por turno) o desembarcar en la costa, o en una roja para el asalto anfibio (ataque ×${decimal(r.amphibious)}). Desembarcar o asaltar gasta el resto del turno.</p>`
                     : `<p class="note">Haz clic en una casilla ${this.view.isRealistic() ? 'de la zona clara' : 'verde'} para mover o en una roja para atacar. Por carretera llegas más lejos; si no se ha movido este turno, siempre puede avanzar al menos una casilla.</p>`}
+                ${this.selTools()}
             </section>`);
             sections.push(this.orderSection(a));
         }
@@ -9418,6 +9728,86 @@ class GameUI {
                     <p class="row">${this.nationChip(o)} ${this.relationChip(o)}${g.isDisputed(cell) ? ` <span class="small warn-text">en disputa con ${g.nm(g.legal[cell])}</span>` : o !== p.country ? ` <span class="small muted">antes de ${g.nm(p.country)}</span>` : ''}</p></div>
                 <button class="btn ghost" data-action="close-card" aria-label="Cerrar" title="Cerrar (Esc)">✕</button>
             </header>${sections.join('')}`;
+    }
+
+    // «Seleccionar zona» (para el dedo, que no tiene Ctrl) y «Sumar a todos los vecinos», en la ficha de un ejército y en
+    // la de varios.
+    selTools() {
+        return `<div class="row" style="margin-top:8px;flex-wrap:wrap">
+                <button class="btn ${this.boxMode ? 'on' : ''}" data-action="box-mode" aria-pressed="${this.boxMode}" title="El siguiente arrastre sobre el mapa traza un rectángulo y elige tus ejércitos de dentro (con ratón: Ctrl + arrastrar)">Seleccionar zona</button>
+                <label class="check small" style="flex:1;min-width:150px" title="Al atacar, también se suman los ejércitos tuyos que no están elegidos y pueden llegar a la casilla">
+                    <input type="checkbox" data-action="joint-all" ${this.jointAll ? 'checked' : ''}> Sumar a todos los vecinos</label>
+            </div>`;
+    }
+    // Ficha de varios ejércitos elegidos a la vez: totales, la lista (un clic centra el mapa, la cruz lo quita) y las
+    // órdenes para todos.
+    renderSelCard() {
+        const g = this.game, p0 = g.player, el = $('#card'), xs = this.selArmies(), r = g.rules(p0), color = g.nations[p0].color;
+        el.hidden = false;
+        el.style.setProperty('--owner', color);
+        const total = emptyUnits();
+        for (const a of xs) for (const k of UNIT_KEYS) total[k] += a.units[k] || 0;
+        const n = countUnits(total), ech = echelonOf(n);
+        const slow = Math.min(...xs.map(a => (afloat(a.cell) ? r.seaSpeed : speedOf(a.units, r))));
+        // ¿Son justo los de una agrupación?
+        const gid = xs[0].group, gr = gid && xs.every(a => a.group === gid) && g.groupMembers(p0, gid).every(a => xs.includes(a)) ? g.groupById(p0, gid) : null;
+        const groups = g.nations[p0].groups, ops = g.opsOf(p0), on = kind => (this.ordering?.kind === kind ? 'on' : '');
+        const DOING = { march: 'marchando', attack: 'va a atacar', hold: 'mantiene la posición', fortify: 'fortificando', follow: 'sigue a otro', join: 'va a juntarse' };
+        const status = a => {
+            const bits = [a.order ? DOING[a.order.kind] ?? 'con orden' : a.op ? 'en operación' : 'sin órdenes', g.mp(a) > 0 ? 'puede moverse' : 'sin movimiento'];
+            if (!afloat(a.cell) && !g.inSupply(p0, a.cell)) bits.push('sin suministro');
+            return bits.join(' · ');
+        };
+        const tag = a => { const x = a.group ? g.groupById(p0, a.group) : null; return x ? `<i class="tag" style="background:${GROUP_COLORS[x.color]}" title="${esc(x.name)}"></i>${x.num}` : ''; };
+        const rows = xs.map(a => `<div class="sel-row" data-sel-row="${a.id}">
+                <button class="sel-go" data-action="sel-center" data-id="${a.id}" title="Centrar el mapa en él">${unitIcon(dominantType(a.units), color)}
+                    <span><b>${countUnits(a.units)}</b> en ${esc(g.placeName(a.cell))} ${tag(a)}<small>${status(a)}</small></span></button>
+                <button class="btn ghost" data-action="sel-remove" data-id="${a.id}" aria-label="Quitar de la selección" title="Quitar de la selección">✕</button>
+            </div>`).join('');
+        const ao = gr?.order;
+        const assault = ao ? `<p class="note">Ataque coordinado contra ${esc(g.placeName(ao.target))}, con ${decimal(ao.ratio)} a 1 o más: ${ao.waitSince
+            ? `el primero llegó a su casilla en el turno ${ao.waitSince}; atacan cuando estén todos o a los ${GROUP_WAIT} turnos, si les da la relación de fuerzas (si no, esperan)`
+            : 'van a sus casillas de partida, una por lado'}.</p>` : '';
+        el.innerHTML = `
+            <header class="card-head">
+                <div><h2>${gr ? esc(gr.name) : 'Selección'}</h2>
+                    <p class="row small muted">${plural(xs.length, 'ejército', 'ejércitos')}, ${n} unidades · ${ech.name} (${ech.mark})</p></div>
+                <button class="btn ghost" data-action="sel-clear" aria-label="Quitar la selección" title="Quitar la selección (Esc)">✕</button>
+            </header>
+            <section class="sec">
+                <h3>En total</h3>
+                <div class="units">${UNIT_KEYS.filter(k => total[k] > 0).map(k => `<div class="unit-row">${unitIcon(k, color)}<div>${total[k]} ${CONFIG.TYPES[k].name.toLowerCase()}</div><span></span></div>`).join('')}</div>
+                <p class="small muted">Ataque ${Math.round(unitPower(total, 'atk', r))}, defensa ${Math.round(unitPower(total, 'def', r))}; el más lento va a ${slow} ${slow === 1 ? 'casilla' : 'casillas'} por turno.</p>
+                <div class="sel-list">${rows}</div>
+                ${this.selTools()}
+                <p class="note">Ctrl + clic suma o quita un ejército; Ctrl + arrastrar elige los de un rectángulo. Con uno elegido, un clic en un enemigo a su alcance lo ataca junto con los demás elegidos que lleguen.</p>
+            </section>
+            <section class="sec">
+                <h3>Agrupación</h3>
+                ${gr ? `<p class="small">Son toda la agrupación ${gr.num}. Alt + ${gr.num} la vuelve a elegir.</p>` : ''}
+                <div class="orders">
+                    <button class="btn" data-action="sel-group-new" title="Una agrupación nueva con estos ejércitos (Alt + Mayúsculas + 1–9: con ese número)">Crear agrupación</button>
+                    ${gr ? `<button class="btn ghost" data-action="sel-disband" data-id="${gr.id}">Disolver la agrupación</button>` : ''}
+                </div>
+                ${groups.length ? `<div class="row" style="margin-top:8px"><select data-sel-group style="flex:1">${groups.map(x => `<option value="${x.id}" ${x.id === gid ? 'selected' : ''}>${x.num} · ${esc(x.name)}</option>`).join('')}</select>
+                    <button class="btn" data-action="sel-group-add">Añadir a…</button></div>` : ''}
+                ${assault}
+            </section>
+            <section class="sec">
+                <h3>Órdenes para todos</h3>
+                <div class="orders">
+                    <button class="btn ${on('group-march')}" data-action="sel-march" title="Elige una casilla: cada uno va a una casilla libre a su alrededor, sin apelotonarse">Marchar a…</button>
+                    <button class="btn ${on('group-gather')}" data-action="sel-gather" title="Elige una casilla: van todos y se funden en un solo ejército">Reunir en…</button>
+                    <button class="btn" data-action="sel-gather-strong" title="Se funden en un solo ejército donde está el más fuerte">Reunir en el más fuerte</button>
+                    <button class="btn ${on('group-assault')}" data-action="sel-assault" title="Elige una casilla enemiga: cada uno va a una casilla de partida a su lado y atacan a la vez cuando estén todos">Ataque coordinado…</button>
+                    <button class="btn" data-action="sel-hold" title="Se quedan donde están">Mantener</button>
+                    <button class="btn" data-action="sel-fortify" title="Cada uno fortifica su casilla (los embarcados, no)">Fortificar</button>
+                    <button class="btn" data-action="sel-reinforce" disabled title="Pronto: reforzar la agrupación hasta una plantilla">Reforzar</button>
+                </div>
+                ${ops.length ? `<div class="row" style="margin-top:8px"><span class="small">Operación</span><select data-sel-op style="flex:1"><option value="0">Ninguna</option>${ops.map(o => `<option value="${o.id}" ${xs.every(a => a.op === o.id) ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select>
+                    <button class="btn" data-action="sel-op">Asignar</button></div>` : ''}
+                <p class="note">Las órdenes valen para cada ejército, como las de uno solo: se cumplen al terminar el turno o con «Ejecutar órdenes» (O).</p>
+            </section>`;
     }
 
     // Qué hace un ejército con orden, en una frase.
@@ -9768,6 +10158,10 @@ class GameUI {
         else if (this.tool === 'air' && this.air.mode === 'sat') text = `Satélite: ${this.touch ? 'toca' : 'haz clic en'} el centro de la región que quieres vigilar.${this.touch ? '' : ' Esc para cancelar.'}`;
         else if (this.tool === 'air' && this.air.mode === 'zone') text = `Orden de zona: ${this.touch ? 'toca' : 'haz clic en'} el centro de la zona del escuadrón ${this.air.zoneSq}.${this.touch ? '' : ' Esc para cancelar.'}`;
         else if (this.tool === 'air') text = 'Aviación: elige uno de tus aeródromos y luego un blanco a su alcance. En tu territorio, construye aeródromos y antiaéreo.';
+        else if (this.boxMode) text = `Seleccionar zona: ${this.touch ? 'arrastra el dedo' : 'arrastra'} sobre el mapa para elegir tus ejércitos de dentro del rectángulo.${this.touch ? '' : ' Esc para cancelar.'}`;
+        else if (this.ordering?.kind?.startsWith('group-')) text = `${{ 'group-march': 'Marchar: haz clic en el destino; cada uno irá a una casilla libre a su alrededor',
+            'group-gather': 'Reunir: haz clic en la casilla donde juntarlos en un solo ejército (o en uno de ellos para que vayan a él)',
+            'group-assault': 'Ataque coordinado: haz clic en la casilla enemiga; irán a sus casillas de partida y atacarán a la vez' }[this.ordering.kind]}.${this.touch ? '' : ' Esc para cancelar.'}`;
         else if (this.ordering) text = this.ordering.kind === 'follow' ? 'Haz clic en el ejército tuyo al que debe seguir. Esc para cancelar.'
             : `Haz clic en el destino: ${this.ordering.kind === 'attack' ? 'irá hasta allí y atacará lo que haya cuando tenga ventaja' : 'irá hasta allí aunque tarde varios turnos'}.${this.touch ? '' : ' Esc para cancelar.'}`;
         else if (this.reachInfo) text = `${this.view.isRealistic() ? 'Zona clara: mover' : 'Verde: mover'}. Rojo: atacar.${this.touch ? ' Más lejos: «Marchar a…» en la ficha.' : ' Mayúsculas + clic más lejos: marchar en varios turnos. Esc para cancelar.'}`;

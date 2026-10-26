@@ -3,7 +3,7 @@
 // Uso: node basicmilitary/tools/smoke-masas.mjs [filtro]   (CHROME=<ruta> para usar otro navegador)
 import { chromium } from 'playwright';
 import { createServer } from 'node:http';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -476,6 +476,163 @@ const CHECKS = [
         T.eq(Object.keys(ks[0].order.slots).length, 2, 'casillas de ejércitos que no existen, fuera');
         return true;
     }],
+    ['A4 · Ctrl+clic suma y quita de la selección', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        const spot = () => T.plainPair(g, es)[1];
+        const xs = [5, 6, 7].map(n => T.army(g, es, spot(), n));
+        const ids = (...a) => a.map(x => x.id).sort((p, q) => p - q), sel = () => [...ui.sel].sort((p, q) => p - q);
+        ui.clickCell(xs[0].cell);
+        T.eq([ui.selectedArmy()?.id, ui.sel.size], [xs[0].id, 0], 'un clic: uno, sin selección múltiple');
+        ui.clickCell(xs[1].cell, false, true);
+        T.eq(sel(), ids(xs[0], xs[1]), 'Ctrl+clic suma al elegido');
+        ui.clickCell(xs[2].cell, false, true);
+        T.eq(sel(), ids(...xs), 'y otro más');
+        T.ok(!$('#card').hidden && document.querySelector('#card [data-action="sel-clear"]'), 'ficha de selección múltiple');
+        T.eq(document.querySelectorAll('#card [data-sel-row]').length, 3, 'una fila por ejército');
+        const foe = T.army(g, fr, T.plainPair(g, fr)[1], 3);
+        ui.clickCell(foe.cell, false, true);
+        T.eq(sel(), ids(...xs), 'un ejército ajeno no entra');
+        ui.clickCell(xs[1].cell, false, true);
+        T.eq(sel(), ids(xs[0], xs[2]), 'Ctrl+clic en uno elegido lo quita');
+        document.querySelector(`#card [data-action="sel-remove"][data-id="${xs[2].id}"]`).click();
+        T.eq([ui.sel.size, ui.selectedArmy()?.id], [0, xs[0].id], 'la cruz lo quita; con uno solo, ficha normal');
+        T.ok(!document.querySelector('#card [data-action="sel-clear"]'), 'sin ficha múltiple');
+        ui.clickCell(xs[1].cell, false, true); ui.clickCell(xs[2].cell, false, true);
+        ui.clickCell(xs[1].cell);
+        T.eq([ui.sel.size, ui.selectedArmy()?.id], [0, xs[1].id], 'un clic sin Ctrl vuelve a uno');
+        return true;
+    }],
+    ['A4 · rectángulo elige los propios de dentro', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        const { target, sides } = T.ring(g, es, fr, 2);
+        const mine = sides.map(c => T.army(g, es, c, 4)), foe = T.army(g, fr, target, 4);
+        ui.view.centerOn(target, 30); ui.render();
+        const pts = [...sides, target].map(c => ui.view.toScreen(G.cx[c], G.cy[c]));
+        const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+        ui.boxSelect(Math.max(...xs) + 3, Math.max(...ys) + 3, Math.min(...xs) - 3, Math.min(...ys) - 3);   // de abajo arriba
+        T.eq([...ui.sel].sort((p, q) => p - q), mine.map(x => x.id).sort((p, q) => p - q), 'los dos propios, no el ajeno');
+        T.ok(!ui.sel.has(foe.id) && mine.some(x => x.cell === ui.selected), 'uno de ellos queda elegido');
+        T.eq([...ui.view.sel].sort(), [...ui.sel].sort(), 'la vista los dibuja');
+        // «Seleccionar zona»: el siguiente arrastre es un rectángulo y luego se apaga.
+        ui.select(-1);
+        ui.clickCell(mine[0].cell);
+        document.querySelector('#card [data-action="box-mode"]').click();
+        T.ok(ui.boxMode, 'modo rectángulo');
+        ui.boxSelect(Math.min(...xs) - 3, Math.min(...ys) - 3, Math.max(...xs) + 3, Math.max(...ys) + 3);
+        T.ok(!ui.boxMode && ui.sel.size === 2, 'tras un rectángulo, se apaga');
+        ui.boxSelect(0, 0, 1, 1);
+        T.eq([ui.sel.size, ui.selected], [0, -1], 'un rectángulo vacío no deja nada elegido');
+        return true;
+    }],
+    ['A4 · Alt+Mayús+2 crea la agrupación 2 y Alt+2 la elige', () => {
+        const g = T.uiStart('es'), es = g.player;
+        const spot = () => T.plainPair(g, es)[1];
+        const xs = [5, 6, 7].map(n => T.army(g, es, spot(), n)), ids = xs.map(x => x.id).sort((p, q) => p - q);
+        ui.clickCell(xs[0].cell); ui.clickCell(xs[1].cell, false, true); ui.clickCell(xs[2].cell, false, true);
+        const key = (k, code, shift) => document.dispatchEvent(new KeyboardEvent('keydown', { key: k, code, altKey: true, shiftKey: shift, bubbles: true, cancelable: true }));
+        key('"', 'Digit2', true);
+        const gr = g.nations[es].groups.find(x => x.num === 2);
+        T.ok(gr, 'agrupación 2');
+        T.eq(g.groupMembers(es, gr.id).map(x => x.id).sort((p, q) => p - q), ids, 'con los tres');
+        T.ok(g.logs[g.logs.length - 1].msg.includes(gr.name), 'lo dice el registro');
+        ui.select(-1);
+        T.eq(ui.sel.size, 0, 'nada elegido');
+        ui.view.ox += 900; const ox = ui.view.ox;
+        key('2', 'Digit2', false);
+        T.eq([...ui.sel].sort((p, q) => p - q), ids, 'Alt+2 la elige');
+        T.eq(ui.tool, 'command', 'no cambia a la herramienta 2');
+        T.ok(ui.view.ox !== ox, 'y centra el mapa');
+        // Doble clic sobre uno de sus ejércitos: toda la agrupación.
+        ui.select(xs[1].cell);
+        ui.view.canvas.dispatchEvent(new MouseEvent('dblclick', { clientX: ui.view.canvas.getBoundingClientRect().left + ui.view.toScreen(G.cx[xs[1].cell], G.cy[xs[1].cell])[0],
+            clientY: ui.view.canvas.getBoundingClientRect().top + ui.view.toScreen(G.cx[xs[1].cell], G.cy[xs[1].cell])[1], bubbles: true }));
+        T.eq(ui.sel.size, 3, 'doble clic elige la agrupación');
+        key('5', 'Digit5', false);
+        T.eq(ui.tool, 'command', 'Alt+5 sin agrupación 5 no hace nada');
+        return true;
+    }],
+    ['A4 · ficha múltiple: crear agrupación desde el botón', () => {
+        const g = T.uiStart('es'), es = g.player;
+        const spot = () => T.plainPair(g, es)[1];
+        const xs = [5, 6, 7, 8].map(n => T.army(g, es, spot(), n));
+        const pick = (...a) => { ui.select(-1); ui.clickCell(a[0].cell); for (const x of a.slice(1)) ui.clickCell(x.cell, false, true); };
+        pick(xs[0], xs[1]);
+        const card = $('#card').textContent;
+        T.ok(card.includes('11') && card.includes('2 ejércitos'), `totales: ${card.slice(0, 200)}`);
+        document.querySelector('#card [data-action="sel-group-new"]').click();
+        const gr = g.nations[es].groups[0];
+        T.ok(gr && xs[0].group === gr.id && xs[1].group === gr.id, 'agrupación creada');
+        T.ok($('#card').textContent.includes(gr.name), 'la ficha la nombra');
+        pick(xs[2], xs[3]);
+        $('#card select[data-sel-group]').value = String(gr.id);
+        document.querySelector('#card [data-action="sel-group-add"]').click();
+        T.eq(g.groupMembers(es, gr.id).length, 4, 'Añadir a…');
+        // Marchar: pide la casilla y reparte.
+        const dest = T.farCell(g, es, xs[2].cell, 25, 60);
+        document.querySelector('#card [data-action="sel-march"]').click();
+        T.eq(ui.ordering?.kind, 'group-march', 'espera el destino');
+        ui.clickCell(dest);
+        T.ok([xs[2], xs[3]].every(x => x.order?.kind === 'march'), 'marchan');
+        T.eq(new Set([xs[2], xs[3]].map(x => x.order.dest)).size, 2, 'cada uno a su casilla');
+        T.ok(ui.sel.size === 2 && !ui.ordering, 'la selección sigue');
+        document.querySelector('#card [data-action="sel-hold"]').click();
+        T.ok([xs[2], xs[3]].every(x => x.order?.kind === 'hold'), 'mantener');
+        T.ok(document.querySelector('#card [data-action="sel-reinforce"]').disabled, 'Reforzar, aún no');
+        // Elegir la agrupación entera da su botón de disolver.
+        ui.selectGroup(gr.id);
+        T.eq(ui.sel.size, 4, 'toda la agrupación');
+        document.querySelector('#card [data-action="sel-disband"]').click();
+        T.ok(!g.groupById(es, gr.id) && xs.every(x => !x.group), 'disuelta');
+        document.querySelector('#card [data-action="sel-clear"]').click();
+        T.eq([ui.sel.size, ui.selected], [0, -1], 'quitar la selección');
+        return true;
+    }],
+    ['A3 · clic de ataque con la selección hace un ataque conjunto', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        const { target, sides } = T.ring(g, es, fr, 3);
+        g.settle(g.newArmy(fr, target, { infantry: 400, tank: 0, artillery: 0 }, 0));
+        const atts = sides.map(c => T.army(g, es, c, 0, 0, 30));
+        ui.clickCell(atts[0].cell);
+        T.eq(ui.jointList(target).length, 1, 'suelto y sin selección: ataca solo');
+        ui.jointAll = true;
+        T.eq(ui.jointList(target).length, 3, '«Sumar a todos los vecinos»');
+        ui.jointAll = false;
+        ui.clickCell(atts[1].cell, false, true); ui.clickCell(atts[2].cell, false, true);
+        ui.select(atts[0].cell, true);   // vuelve a elegir el primero sin perder la selección
+        T.eq(ui.sel.size, 3, 'la selección sigue');
+        T.ok(ui.reachInfo?.attacks.has(target), 'el objetivo está a su alcance');
+        T.eq(ui.jointList(target).length, 3, 'los tres de la selección');
+        const r = ui.view.canvas.getBoundingClientRect(), [sx, sy] = ui.view.toScreen(G.cx[target], G.cy[target]);
+        ui.hover({ clientX: r.left + sx, clientY: r.top + sy });
+        const tip = $('#tooltip').textContent;
+        T.ok(tip.includes('Atacan contigo: 2 ejércitos vecinos') && /\d+ %/.test(tip), `previsión: ${tip}`);
+        ui.clickCell(target);
+        const msg = g.logs[g.logs.length - 1].msg;
+        T.ok(msg.includes('con 3 ejércitos'), `parte: ${msg}`);
+        T.eq(g.owner[target], es, 'toma la casilla');
+        T.ok(atts.every(a => a.used === 999), 'todos gastan el turno');
+        // Sin selección, los de su agrupación.
+        ui.select(-1);
+        return true;
+    }],
+    ['A4 · ejércitos elegidos que mueren en el turno de la IA no rompen la ficha', () => {
+        const g = T.uiStart('es'), es = g.player;
+        const spot = () => T.plainPair(g, es)[1];
+        const xs = [5, 6, 7].map(n => T.army(g, es, spot(), n));
+        ui.clickCell(xs[0].cell); ui.clickCell(xs[1].cell, false, true); ui.clickCell(xs[2].cell, false, true);
+        g.removeArmy(xs[1]);
+        ui.render();
+        T.eq(ui.selArmies().map(x => x.id), [xs[0].id, xs[2].id], 'se purga el muerto');
+        T.eq(document.querySelectorAll('#card [data-sel-row]').length, 2, 'dos filas');
+        g.removeArmy(xs[0]);   // el elegido también
+        ui.render();
+        T.eq([ui.sel.size, ui.selectedArmy()?.id], [0, xs[2].id], 'con uno solo, su ficha normal');
+        g.removeArmy(xs[2]);
+        ui.render();
+        T.eq(ui.selArmies().length, 0, 'nada');
+        return true;
+    }],
     ['A6 · oro de operación hasta 6400 y fondo mayor', () => {
         const g = T.game(), es = T.nation('es');
         g.start(es);
@@ -509,6 +666,42 @@ try {
         else { failed++; console.log(`FALLA ${name}\n      ${String(result).split('\n').slice(0, 3).join('\n      ')}`); }
     }
     if (errors.length) { failed++; console.log(`FALLA errores en la página:\n      ${errors.join('\n      ')}`); }
+    // Captura de la ficha de selección múltiple (cuatro ejércitos, dos de ellos en una agrupación), en el escritorio, con
+    // el rectángulo de selección a medio trazar, y en el móvil.
+    const SEL_SHOTS = 'A4 · captura de la ficha de selección múltiple';
+    if (!filter || SEL_SHOTS.includes(filter)) {
+        ran++;
+        const out = join(root, 'tools/cache/smoke');
+        mkdirSync(out, { recursive: true });
+        const shotPage = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+        const errs = [];
+        shotPage.on('pageerror', e => errs.push(e.message));
+        await shotPage.goto(`http://localhost:${port}/?seed=7`);
+        await shotPage.waitForFunction(() => typeof GameEngine === 'function' && typeof ui === 'object');
+        await shotPage.evaluate(setup);
+        await shotPage.evaluate(() => {
+            const g = T.uiStart('es'), es = g.player;
+            ui.view.setMode('sencilla');
+            const home = T.plainPair(g, es)[1];
+            const xs = T.cellsAt(g, es, home, [0, 1, 2, 3]).map((c, i) => T.army(g, es, c, [30, 12, 20, 8][i], [8, 6, 0, 2][i], [6, 0, 4, 2][i]));
+            g.createGroup(es, [xs[0].id, xs[1].id]);
+            g.setOrder(xs[3], { kind: 'hold' });
+            ui.clickCell(xs[0].cell); for (const x of xs.slice(1)) ui.clickCell(x.cell, false, true);
+            ui.view.centerOn(home, 26); ui.view.ox -= 90;
+            const [x0, y0] = ui.view.toScreen(G.cx[home], G.cy[home]);
+            ui.view.box = { x0: x0 - 120, y0: y0 - 90, x1: x0 + 60, y1: y0 + 40 };
+            ui.render();
+        });
+        await shotPage.waitForTimeout(300);
+        await shotPage.screenshot({ path: join(out, 'seleccion-ficha.png') });
+        await shotPage.setViewportSize({ width: 390, height: 844 });
+        await shotPage.evaluate(() => { ui.drawerOpen = false; ui.view.box = null; ui.setSheet('grande'); ui.render(); });
+        await shotPage.waitForTimeout(300);
+        await shotPage.screenshot({ path: join(out, 'seleccion-ficha-movil.png') });
+        if (errs.length) { failed++; console.log(`FALLA ${SEL_SHOTS}\n      ${errs.join('\n      ')}`); }
+        else console.log(`ok    ${SEL_SHOTS} (${join(out, 'seleccion-ficha.png')}, seleccion-ficha-movil.png)`);
+        await shotPage.close();
+    }
 } finally {
     await browser.close();
     server.close();
