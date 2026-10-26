@@ -836,6 +836,39 @@ const CHECKS = [
         T.ok(!h.armies.has(b.id) && [...h.armies.values()].filter(x => x.op === op.id).reduce((s, x) => s + x.units.infantry, 0) >= 8, 'con su tropa y la del destacamento');
         return true;
     }],
+    ['D3 · logística no rehace un tramo roto: lo repara, y la autovía sigue siendo autovía', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        // La punta, fuera del pasillo, en una casilla propia sin carreteras alrededor.
+        let op = null, P, O;
+        for (let skip = 0; !op && skip < 40; skip++) {
+            const [S, O1] = T.straight(g, es, 10, { m: 1, supply: true, skip });
+            const o = g.createOp(es, 'ofensiva', [S, O1], { doctrine: 'lanza', noCap: true }), lane = g.opCorridor(o);
+            P = G.land.find(c => g.owner[c] === es && T.free(g, c) && !lane.has(c) && Math.abs(g.opPerp(o, c)) >= 4.5 && Math.abs(g.opPerp(o, c)) <= 7
+                && g.opAlong(o, c) > 3 && g.opAlong(o, c) < 7 && [...g.nearCells(c, 2).keys()].every(x => isLand(x) && g.owner[x] === es && g.inSupply(es, x)));
+            if (P === undefined) g.endOp(o); else { op = o; O = O1; }
+        }
+        T.ok(op, 'casilla al lado del pasillo');
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        for (const c of g.nearCells(P, 2).keys()) for (let d = 0; d < 6; d++) { const j = G.nb[c * 6 + d]; if (j >= 0) { g.road[c * 6 + d] = 0; g.road[j * 6 + (d + 3) % 6] = 0; g.broken[c * 6 + d] = 0; g.broken[j * 6 + (d + 3) % 6] = 0; } }
+        g.roadVersion++;
+        const tk = T.army(g, es, P, 0, 4, 0);
+        g.assignArmy(tk, op.id);
+        g.opLaunch(op);
+        // El último tramo del camino hacia la punta, una autovía rota.
+        const net = g.economy(es).seen;
+        T.ok(!net[P], 'la punta, fuera de la red');
+        const plan = g.planRoad(es, P, x => net[x] === 1, 1), u = plan.path[1], v = plan.path[0], d = G.dirTo(u, v);
+        g.broken[u * 6 + d] = 2; g.broken[v * 6 + (d + 3) % 6] = 2; g.roadVersion++;
+        op.workPool = 3000; g.nations[es].gold = 10000;
+        const res = g.opLogistics(op);
+        T.ok(res.built > 0 && res.repaired === 1, `construye hasta el tramo roto y lo repara (${res.built}, ${res.repaired})`);
+        T.eq([g.road[u * 6 + d], g.broken[u * 6 + d], g.roadWork.get(edgeKey(u, d))?.cls], [0, 2, 2], 'no lo rehace: en obra de reparación');
+        for (let t = 0; t < g.rules(es).fortTurns; t++) g.beginNationTurn(es);
+        T.eq([g.road[u * 6 + d], g.broken[u * 6 + d]], [2, 0], 'reparado, vuelve a ser autovía');
+        T.ok(g.economy(es).seen[P] === 1, 'y la punta queda unida a la red');
+        return true;
+    }],
     ['D4 · los miembros se reparten por franjas y ocupan a lo ancho', () => {
         const { g, es, op, xs } = T.wide(4);
         const [tk1, tk2, tk3, inf] = xs;
@@ -1314,6 +1347,49 @@ const CHECKS = [
         g.playerOpSet(op, 'doctrine', 'amplio');
         g.opLanes(op); ui.render(); ui.view.draw();
         T.ok(body().textContent.includes('Franjas') && body().textContent.includes('Frente ('), 'franjas en la ficha');
+        return true;
+    }],
+    ['D2 · la IA separa sus tanques solo donde llegan por tierra; sin sitio, a otra punta o el miembro entero (IA)', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        // Una casilla de un país de la IA con otra suya a 2 casillas o menos al otro lado del agua (sin camino por tierra suya).
+        const landBfs = (o, A, depth) => {
+            const d = new Map([[A, 0]]), q = [A];
+            for (let i = 0; i < q.length; i++) { const u = q[i]; if (d.get(u) < depth) for (let k = 0; k < 6; k++) { const v = G.nb[u * 6 + k]; if (v >= 0 && isLand(v) && !d.has(v) && g.owner[v] === o) { d.set(v, d.get(u) + 1); q.push(v); } } }
+            return d;
+        };
+        let o = -1, A = -1, X = -1;
+        for (let k = 0; k < g.nations.length && X < 0; k++) {
+            if (k === es) continue;
+            for (const c of G.land) {
+                if (g.owner[c] !== k || !T.free(g, c)) continue;
+                const bfs = landBfs(k, c, 14), x = [...g.nearCells(c, 2)].find(([v, d]) => d > 0 && isLand(v) && g.owner[v] === k && T.free(g, v) && !bfs.has(v));
+                if (x) { o = k; A = c; X = x[0]; break; }
+            }
+        }
+        T.ok(X >= 0, 'costa con otra casilla suya al otro lado del agua');
+        // Las demás casillas de tierra a 2 o menos, ocupadas.
+        const fill = [...g.nearCells(A, 2)].filter(([c, d]) => d > 0 && c !== X && isLand(c) && !g.armyAt[c]).map(([c, d]) => [c, d]);
+        for (const [c] of fill) g.settle(g.newArmy(o, c, { infantry: 1, tank: 0, artillery: 0 }, 0));
+        let op = g.createOp(o, 'ofensiva', [A, X], { doctrine: 'lanza', noCap: true });
+        const m = T.army(g, o, A, 4, 4, 0);
+        g.assignArmy(m, op.id);
+        let n = g.armies.size;
+        g.opLaunch(op);
+        T.eq([g.armies.size, m.units.tank, g.opEchelon(op, m)], [n, 4, 'seguimiento'], 'sin sitio por tierra, entero en el seguimiento');
+        T.ok(!g.armyAt[X], 'no salta el agua');
+        // Con una punta de tanques al lado (por tierra), sus tanques se suman a ella.
+        g.endOp(op);
+        const [hc] = fill.find(([, d]) => d === 1);
+        g.removeArmy(g.armyOn(hc));
+        const host = T.army(g, o, hc, 0, 3, 0);
+        op = g.createOp(o, 'ofensiva', [A, X], { doctrine: 'lanza', noCap: true });
+        for (const x of [host, m]) g.assignArmy(x, op.id);
+        n = g.armies.size;
+        g.opLaunch(op);
+        T.eq([g.armies.size, host.units.tank, m.units.tank], [n, 7, 0], 'los tanques se suman a la punta de al lado');
+        T.eq([g.opEchelon(op, host), g.opEchelon(op, m)], ['punta', 'seguimiento'], 'escalones');
+        T.ok(!g.armyAt[X], 'y nada al otro lado del agua');
         return true;
     }],
 ];

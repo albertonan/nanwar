@@ -5255,9 +5255,10 @@ class GameEngine {
     // seguimiento; él decide lo demás (el botón de la ficha). En las de la IA, por tipos de unidad: las unidades rápidas de
     // cada miembro forman la punta y el resto se queda en el seguimiento. Un miembro solo de rápidas va entero a la punta;
     // uno mixto las separa en un ejército nuevo, que se forma en la casilla libre de al lado (propia o aliada, a 2 o menos,
-    // la más adelantada a lo largo de la flecha) o, si no la hay, se suma a una punta ya formada a 2 casillas o menos; si
-    // tampoco, el miembro sigue entero en el seguimiento. Sin ninguno rápido, la punta es el miembro más rápido (a igual
-    // velocidad, el de más ataque). Devuelve cuántos van en cada uno y los ejércitos nuevos.
+    // la más adelantada a lo largo de la flecha) o, si no la hay, se suma a una punta ya formada a 2 casillas o menos; las
+    // dos, solo si las rápidas llegan a ella este turno por tierra (sin cruzar el agua). Si no, el miembro sigue entero en
+    // el seguimiento. Sin ninguno rápido, la punta es el miembro más rápido (a igual velocidad, el de más ataque).
+    // Devuelve cuántos van en cada uno y los ejércitos nuevos.
     opEchelons(op) {
         const id = op.owner, members = this.opMembers(op), rules = this.rules(id), n = { punta: 0, seguimiento: 0, born: [] };
         const fast = this.opFastTypes(id), ai = id !== this.player;
@@ -5272,19 +5273,29 @@ class GameEngine {
             this.orderVersion++;
             return n;
         }
-        const tips = [], free = c => isLand(c) && !this.armyAt[c] && (this.owner[c] === id || this.allied(id, this.owner[c]));
+        // Los rápidos enteros, antes: así un mixto puede sumar sus rápidas a uno de ellos aunque venga después.
+        const tips = members.filter(a => has(a) && this.opSpeedy(a)), free = c => isLand(c) && !this.armyAt[c] && (this.owner[c] === id || this.allied(id, this.owner[c]));
+        for (const a of tips) op.echelon[a.id] = 'punta';
         for (const a of members) {
             if (!has(a)) { op.echelon[a.id] = 'seguimiento'; continue; }
-            if (this.opSpeedy(a)) { op.echelon[a.id] = 'punta'; tips.push(a); continue; }
+            if (this.opSpeedy(a)) continue;
             const send = emptyUnits();
             for (const k of fast) send[k] = a.units[k] || 0;
+            // Solo donde llegarían este turno por tierra (con el movimiento de las rápidas), sin cruzar el agua.
+            const r = this.reach(id, a.cell, this.moveBudget(id, a.cell, send, a.used), a.used === 0);
+            const byLand = c => {
+                const e = isLand(c) ? r.exp.get(c) ?? r.term.get(c) : null;
+                if (!e || e.landing) return false;
+                for (let p = e.prev; p !== r.start; p = r.exp.get(p).prev) if (!isLand(p)) return false;
+                return true;
+            };
             let spot = -1, best = -Infinity;
             for (const [c, d] of this.nearCells(a.cell, 2)) {
-                if (d === 0 || !free(c)) continue;
+                if (d === 0 || !free(c) || !byLand(c)) continue;
                 const v = this.opAlong(op, c) - d * 0.01;
                 if (v > best) { best = v; spot = c; }
             }
-            const host = spot < 0 ? tips.find(t => hexDist(t.cell, a.cell) <= 2) : null;
+            const host = spot < 0 ? tips.find(t => hexDist(t.cell, a.cell) <= 2 && byLand(t.cell)) : null;
             if (spot < 0 && !host) { op.echelon[a.id] = 'seguimiento'; continue; }
             const b = this.split(a, send, true);   // el refuerzo (A7) se queda con el seguimiento
             op.echelon[a.id] = 'seguimiento';
@@ -5787,6 +5798,7 @@ class GameEngine {
     //      construirlos y sus turnos de obra);
     //   b) construye la carretera más corta (planRoad) de la red propia a la casilla propia más cercana a la punta sin
     //      enemigos al lado (opTip), si no está ya en la red: desde la red, los tramos que pague; el resto, otro turno.
+    //      Un tramo roto del camino (también fuera del pasillo) no se rehace: se repara, y se sigue cuando esté listo.
     // No se trabaja con un enemigo al lado (repairBlocked), ni se construye por un tramo que ya se está reparando.
     // Devuelve { repaired, built, cost, why } (why: por qué no ha hecho nada, o ''). Con `tally`, el parte lo dice, sin
     // repetir el porqué. op._work guarda lo último que hizo (no se guarda).
@@ -5836,6 +5848,14 @@ class GameEngine {
                     if (this.road[a * 6 + d] >= 1) continue;
                     if (this.roadWork.has(edgeKey(a, d))) break;
                     if (this.repairBlocked(id, a, b)) { blocked = true; break; }
+                    // Un tramo roto no se rehace (una autovía rota quedaría en carretera): se repara, si llega el oro
+                    // sin lo que ya va a construir, y la carretera se abre más allá cuando esté reparado.
+                    if (this.broken[a * 6 + d]) {
+                        const fix = Math.round(this.roadEdgeCost(a, d, this.broken[a * 6 + d], mult) / 2), before = n.gold;
+                        if (fix > left - Math.round(cost)) short = true;
+                        else if (this.startRepair(id, { edges: [[a, d]], cost: fix, cls: 'repair' })) { left -= before - n.gold; out.cost += before - n.gold; out.repaired++; }
+                        break;
+                    }
                     const c = this.roadEdgeCost(a, d, 1, mult);
                     if (Math.round(cost + c) > left) { short = true; break; }
                     cost += c; fresh++;
