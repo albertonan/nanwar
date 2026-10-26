@@ -835,7 +835,13 @@ const baseRules = () => ({
     blindHit: 0.5,                       // lo que rinde una misión contra un blanco que no se conoce
     mobileAA: false,                     // si puede reclutar la tropa Antiaérea
     satMax: 0, satRangeKm: 400, satTurns: 8,   // satélites a la vez, radio de lo que ven y turnos que duran
-    satLevels: false                     // ver también galones y fortificaciones bajo el satélite
+    satLevels: false,                    // ver también galones y fortificaciones bajo el satélite
+    drones: 0,                           // nivel de Drones (0 a 3): lo fija cada investigación
+    droneRangeKm: 150,                   // radio de acción de un enjambre desde su ciudad
+    droneHit: [0.04, 0.03],              // parte de un ejército que quita un enjambre: base y azar
+    droneEscort: false,                  // los enjambres pueden escoltar ejércitos
+    droneSwarm: false,                   // saturan el antiaéreo y su reconocimiento ve galones y fortificaciones
+    defense: 0                           // nivel de las baterías automáticas (0 a 3)
 });
 
 const BASE_RULES = baseRules();
@@ -856,7 +862,9 @@ const RESEARCH_BRANCHES = [
     { id: 'fortificacion', area: 'Terreno', name: 'Fortificación', sub: 'Fortalezas aún más duras', icon: 'fort' },
     { id: 'reconocimiento', area: 'Inteligencia', name: 'Reconocimiento', sub: 'Ver más sin espías', icon: 'eye' },
     { id: 'espionaje', area: 'Inteligencia', name: 'Espionaje', sub: 'Espías más baratos y duraderos', icon: 'spy' },
-    { id: 'espacio', area: 'Inteligencia', name: 'Espacio', sub: 'Satélites de observación', icon: 'sat' }
+    { id: 'espacio', area: 'Inteligencia', name: 'Espacio', sub: 'Satélites de observación', icon: 'sat' },
+    { id: 'drones', area: 'Inteligencia', name: 'Drones', sub: 'Enjambres para reconocer y atacar', icon: 'uav' },
+    { id: 'defensa', area: 'Inteligencia', name: 'Defensa automática', sub: 'Baterías contra drones y misiles', icon: 'cram' }
 ];
 // Por rama, sus tres niveles: [nombre, efectos, cambios «qué · antes · después» para la interfaz, nota].
 const TECH_TREE = {
@@ -939,6 +947,16 @@ const TECH_TREE = {
         ['Lanzadores', { satMax: 1 }, [['Satélites a la vez', '0', '1']], 'Muy caro: unos 20 turnos de renta por satélite.'],
         ['Óptica de alta resolución', { satLevels: true, satRangeKm: 600 }, [['Lo que ve', 'tipo y número', 'también galones y fortificaciones'], ['Radio', '400 km', '600 km']], 'Sabes si es sacos terreros o casamatas antes de mandar a nadie.'],
         ['Constelación', { satMax: 2, satTurns: 12 }, [['Satélites a la vez', '1', '2'], ['Duración', '8 turnos', '12 turnos']], 'Dos regiones a la vista a la vez, y más tiempo.']
+    ],
+    drones: [
+        ['Drones tácticos', { drones: 1 }, [['Enjambres de drones', 'no', 'sí'], ['Alcance desde su ciudad', '—', '150 km']], 'Baratos y sin aeródromo: reconocen, atacan y patrullan desde cualquier ciudad propia.'],
+        ['Municiones merodeadoras', { drones: 2, droneRangeKm: 300, droneHit: [0.06, 0.04], droneEscort: true }, [['Alcance de los enjambres', '150 km', '300 km'], ['Bajas al atacar un ejército', '4–7 %', '6–10 %'], ['Escoltar ejércitos', 'no', 'sí']], 'Llegan más lejos, pegan más y pueden acompañar a las tropas en su avance.'],
+        ['Enjambres autónomos', { drones: 3, droneSwarm: true }, [['Saturar el antiaéreo', 'no', 'sí'], ['Reconocimiento de los drones', 'tipo y número', 'también galones y fortificaciones']], 'Son tantos que el antiaéreo no da abasto, y lo que ven los drones llega con todo detalle.']
+    ],
+    defensa: [
+        ['Defensa de punto', { defense: 1 }, [['Baterías automáticas', 'no', 'sí'], ['Intercepta', '—', 'drones y cohetes']], 'Cañones y radar que cubren una casilla y sus vecinas sin que nadie los mande.'],
+        ['Interceptores de medio alcance', { defense: 2 }, [['Radio y capacidad de la batería', 'nivel 1', 'nivel 2'], ['Intercepta', 'drones y cohetes', 'también misiles y misiles guiados']], 'Un frente entero bajo una cúpula, a costa de gastar interceptores.'],
+        ['Escudo antimisiles con láser', { defense: 3 }, [['Radio y capacidad de la batería', 'nivel 2', 'nivel 3'], ['Intercepta', 'hasta misiles guiados', 'también misiles pesados y nucleares']], 'Lo único que puede parar un misil pesado antes de que caiga.']
     ]
 };
 const TECHS = RESEARCH_BRANCHES.flatMap(b => TECH_TREE[b.id].map(([name, fx, changes, note], i) => ({ id: `${b.id}${i + 1}`, branch: b.id, tier: i + 1, name, fx, changes, note })));
@@ -6802,7 +6820,7 @@ class GameEngine {
 
     // Qué investigaría la nación ahora: lo que tenga en pausa o la investigación disponible con más peso.
     // En guerra pesan su tipo de tropa, Doctrina y Fortificación; en paz, Ciencia, Industria, Infraestructura y
-    // Movilización; Movilidad si su tierra es abrupta. No investiga Inteligencia (Reconocimiento ni Espionaje): con
+    // Movilización; Drones y Defensa automática en guerra, más si el enemigo ya tiene drones; Movilidad si su tierra es abrupta. No investiga Inteligencia (Reconocimiento ni Espionaje): con
     // niebla, la IA se arregla con lo que ve.
     // El desempate es fijo por nación (no consume azar), así ahorra para el mismo objetivo turno tras turno.
     aiTechChoice(id) {
@@ -6819,6 +6837,8 @@ class GameEngine {
             const wings = new Array(this.nations.length).fill(0);
             for (const q of this.squadrons.values()) wings[q.owner]++;
             const air = wings[id], foeAir = this.enemiesOf(id).some(o => wings[o]), nearAir = [...this.borderSets()[id]].some(o => wings[o]);
+            const hasDrones = o => this.rules(o).drones > 0;
+            const foeDrones = this.enemiesOf(id).some(hasDrones), nearDrones = [...this.borderSets()[id]].some(hasDrones);
             const main = UNIT_BRANCH[UNIT_KEYS.reduce((b, k) => (troops[k] > troops[b] ? k : b), 'infantry')];
             const weight = {
                 infanteria: 1, blindados: 1, artilleria: 1, doctrina: war ? 2 : 0.6,
@@ -6826,7 +6846,10 @@ class GameEngine {
                 movilidad: rough > land * 0.3 ? 2 : 0.5, naval: this.needsSea(id) ? 2 : 0.3, fortificacion: war ? 2 : 0.5, reconocimiento: 0, espionaje: 0,
                 aviacion: air >= 2 ? (war ? 1.5 : 0.5) : 0.1,
                 antiaerea: war && foeAir ? 1.5 : nearAir ? 0.5 : 0.2,
-                espacio: war && air >= 6 ? 0.4 : 0
+                espacio: war && air >= 6 ? 0.4 : 0,
+                // Drones y Defensa automática: en guerra y más si algún enemigo ya tiene drones; la defensa, también si lo tiene un vecino.
+                drones: war ? (foeDrones ? 1.2 : 0.7) : 0.1,
+                defensa: war ? (foeDrones ? 1.5 : 0.6) : nearDrones ? 0.5 : 0.1
             };
             weight[main] += war ? 2 : 0.5;
             if (fierce) for (const b of ['infanteria', 'blindados', 'artilleria', 'doctrina']) weight[b] *= 1.5;
@@ -7361,6 +7384,8 @@ const RS_ICON = {
     plane: RS_FRAME + `<path d="${propellerPath(16, 16, 9.4)}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>`,
     aa: RS_FRAME + '<path d="M8.5 24a7.5 7.5 0 0 1 15 0" fill="none" stroke="currentColor" stroke-width="2.2"/>',
     sat: '<g transform="rotate(-35 16 16)" fill="currentColor"><rect x="11.5" y="11" width="9" height="10" rx="1.5"/><rect x="2" y="12" width="8" height="8" rx=".8"/><rect x="22" y="12" width="8" height="8" rx=".8"/><path d="M16 11V6.5M13 6.5h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></g>',
+    uav: RS_FRAME + '<path d="M6.5 19.5Q11.2 11.6 16 16.2Q20.8 11.6 25.5 19.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M16 16.2V21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>',
+    cram: RS_FRAME + '<path d="M8.5 24a7.5 7.5 0 0 1 15 0" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M16 22V13.5M13.4 16.2L16 13.2l2.6 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
     spy: '<path d="M2.5 20.5c3 3.2 24 3.2 27 0-1.4 4.4-25.6 4.4-27 0z" fill="currentColor"/><path d="M7.5 20.6c.2-6.4 2.3-11.6 5-11.6 1.4 0 2.2 1.3 3.5 1.3S18.1 9 19.5 9c2.7 0 4.8 5.2 5 11.6-5.6 1.3-11.4 1.3-17 0z" fill="currentColor"/><path d="M7.7 17.6c5.5 1.3 11.1 1.3 16.6 0" stroke="#000" stroke-opacity=".32" stroke-width="2.2" fill="none"/>'
 };
 const rsIcon = k => `<svg viewBox="0 0 32 32" aria-hidden="true">${RS_ICON[k]}</svg>`;

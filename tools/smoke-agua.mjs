@@ -299,7 +299,7 @@ const CHECKS = [
     T.eq([g.mp(a), g.rules(es).amphibious], [10 * MOVE, 0.65], 'niveles 2 y 3');
     return true;
 }],
-['4 · el árbol tiene 16 ramas y 48 investigaciones', () => { T.eq([RESEARCH_BRANCHES.length, TECHS.length], [16, 48], 'árbol'); return true; }],
+['4 · el árbol tiene 18 ramas y 54 investigaciones', () => { T.eq([RESEARCH_BRANCHES.length, TECHS.length], [18, 54], 'árbol'); return true; }],
 ['M · una orden de marcha lleva un ejército de la península a Canarias en 5 turnos o menos', () => {
     const g = T.game(), es = T.nation('es');
     g.start(es);

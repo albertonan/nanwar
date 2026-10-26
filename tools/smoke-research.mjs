@@ -84,9 +84,9 @@ const CHECKS = [
         return true;
     }],
 
-    ['F1 · el árbol: 16 ramas de 3 niveles', () => {
-        T.eq(TECHS.length, 48, 'investigaciones');
-        T.eq(RESEARCH_BRANCHES.length, 16, 'ramas');
+    ['F1 · el árbol: 18 ramas de 3 niveles', () => {
+        T.eq(TECHS.length, 54, 'investigaciones');
+        T.eq(RESEARCH_BRANCHES.length, 18, 'ramas');
         for (const b of RESEARCH_BRANCHES) T.eq(TECHS.filter(t => t.branch === b.id).map(t => t.tier), [1, 2, 3], b.id);
         T.ok(TECHS.every(t => TECH_BY_ID.get(t.id) === t), 'índice por id');
         return true;
@@ -360,15 +360,15 @@ const CHECKS = [
         return total > 0 || 'nadie terminó nada';
     }],
 
-    ['F4 · la tecla I abre el diálogo con las 48 investigaciones y sus filtros', () => {
+    ['F4 · la tecla I abre el diálogo con las 54 investigaciones y sus filtros', () => {
         T.uiStart('es');
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'i', bubbles: true }));
         T.ok($('#research-dialog').open, 'diálogo abierto');
-        T.eq(document.querySelectorAll('#research-dialog .rs-node').length, 48, 'casillas');
+        T.eq(document.querySelectorAll('#research-dialog .rs-node').length, 54, 'casillas');
         document.querySelector('#research-dialog [data-action="rs-filter"][data-area="Militar"]').click();
         T.eq(document.querySelectorAll('#research-dialog .rs-node').length, 18, 'filtro Militar');
         document.querySelector('#research-dialog [data-action="rs-filter"][data-area="Todas"]').click();
-        T.eq(document.querySelectorAll('#research-dialog .rs-node.locked').length, 32, 'niveles 2 y 3 cerrados');
+        T.eq(document.querySelectorAll('#research-dialog .rs-node.locked').length, 36, 'niveles 2 y 3 cerrados');
         $('#research-dialog').close();
         return true;
     }],

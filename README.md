@@ -45,12 +45,12 @@ Las partidas se guardan en el propio dispositivo (autoguardado al final de cada 
 
 ## Investigación
 
-Cada país puede investigar mejoras permanentes (botón de la cabecera o tecla I). Hay 48 investigaciones en 16 ramas de tres niveles, agrupadas en cuatro áreas:
+Cada país puede investigar mejoras permanentes (botón de la cabecera o tecla I). Hay 54 investigaciones en 18 ramas de tres niveles, agrupadas en cuatro áreas:
 
 - **Militar:** Infantería, Blindados y Artillería (ataque, defensa y velocidad de cada tipo), Doctrina (menos castigo al estar rodeado, asedios más cortos, menos bajas al ganar), Aviación (más alcance, munición guiada para atacar con más pegada y a ciegas, guerra electrónica contra el derribo) y Defensa aérea (antiaéreo más fuerte, con más radio y autopropulsado).
 - **Estado:** Movilización (más reclutas por turno), Ciencia (investigar más rápido, más barato y dos cosas a la vez) e Industria (yacimientos que rinden más y abaratan más las tropas).
 - **Terreno:** Infraestructura (carreteras más baratas y más rápidas, suministro más lejos), Movilidad (montaña, colinas, bosque, pantano, ríos y lagos), Fortificación (más defensa, obras más cortas, búnkeres y casamatas) y Transporte naval (barcos más rápidos y asalto anfibio más fuerte).
-- **Inteligencia:** Reconocimiento (más visión, tipo y número de los ejércitos enemigos, sus niveles), Espionaje (espías más baratos, que duran más y que informan de más) y Espacio (satélites de observación: Lanzadores deja tener uno en órbita; Óptica de alta resolución sube su radio a 600 km y deja ver también galones y fortificaciones; Constelación deja dos a la vez y alarga su vida de 8 a 12 turnos).
+- **Inteligencia:** Reconocimiento (más visión, tipo y número de los ejércitos enemigos, sus niveles), Espionaje (espías más baratos, que duran más y que informan de más) y Espacio (satélites de observación: Lanzadores deja tener uno en órbita; Óptica de alta resolución sube su radio a 600 km y deja ver también galones y fortificaciones; Constelación deja dos a la vez y alarga su vida de 8 a 12 turnos), Drones (Drones tácticos desbloquea los enjambres con 150 km de alcance; Municiones merodeadoras sube el alcance a 300 km, el daño y permite escoltar; Enjambres autónomos satura el antiaéreo y ve galones y fortificaciones) y Defensa automática (Defensa de punto, Interceptores de medio alcance y Escudo antimisiles con láser: baterías cada vez más capaces contra drones, cohetes y misiles).
 
 Cada investigación se paga al empezar (entre 4 y 12 turnos de renta según el nivel, un 10 % más por cada una ya terminada) y tarda 6, 10 o 15 turnos. Se investiga una cosa a la vez (dos con Ciencia 3); si se cambia, la anterior queda en pausa con su progreso. La IA también investiga, según esté en guerra o en paz, sus tropas y su terreno.
 
