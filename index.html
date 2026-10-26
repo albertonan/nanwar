@@ -687,6 +687,8 @@ const CONFIG = {
     DRONE: { COST: 120, PER_CITY: 4, RECON_KM: 60, AA_DOWN: 1.5, PATROL_KILL: 2, SATURATE: 3, SAT_AA: 0.5, POWER: 0.5 },
     // Baterías automáticas (rama Defensa automática): precio y turnos de obra.
     BATTERY: { COST: 150, TURNS: 2 },
+    // Escolta de escuadrones y enjambres: el «apoyo aéreo» en el combate, por cada pieza en el aire y con su tope.
+    ESCORT: { SQ: 1.1, SQ_CAP: 1.3, SW: 1.05, SW_CAP: 1.15 },
     // Terreno de cada casilla, sacado de datos reales (relieve, bosques, humedales y lagos): coste de entrar y defensa.
     TERRAIN: {
         plain:    { name: "Llanura", cost: 1, def: 1 },
@@ -716,6 +718,8 @@ const AIR_BLOCKED = 'Ese blanco ya ha recibido un acierto este turno.';
 // Aviación en el mando: blancos por operación y turno, casillas que protege como mucho, previsión mínima para
 // arriesgarse (acierto y derribo de cada escuadrón) y radio de una orden de zona.
 const AIR_TARGETS = 8, AIR_PATROLS = 2, AIR_MIN_HIT = 0.5, AIR_MAX_DOWN = 0.2, AIR_ZONE_KM = 170;
+// Escolta: sus modos (en este orden se guardan) y a cuántos ejércitos reparte la suya una operación como mucho.
+const ESCORT_MODES = ['defensa', 'ataque'], OP_ESCORTS = 3;
 // La aviación de la IA: escuadrones por operación, los que quiere por cada uno enemigo (y cuántos más), parte de la
 // renta que aparta para comprarlos y probabilidad de poner un antiaéreo cada turno.
 const AI_WINGS = 6, AI_AIR_RATIO = 0.8, AI_AIR_EXTRA = 2, AI_AIR_SHARE = 0.25, AI_AA_CHANCE = 0.35;
@@ -1333,6 +1337,7 @@ class GameEngine {
         // turno de cada país: todo se repone al empezar (defenseRound).
         this.batteries = new Map();   // casilla → { owner, left, known, used }: left, turnos de obra; used, armas atendidas
         this.defUsed = new Map();
+        this.splitFrom = new Map();   // id de la parte → [id del ejército del que sale, turno] (su escolta de ataque la apoya ese turno)
         this.seedAir();
         this.configure({ aggression: 'normal', alliances: 'reales', victory: 0.5, fog: true });
         for (const nat of this.nations) nat.gold = this.income(nat.id) * CONFIG.START_GOLD_TURNS;
@@ -1367,6 +1372,10 @@ class GameEngine {
             return out;
         };
         const runs = compress(this.owner);
+        // El encargo de un escuadrón: la orden de zona en sus campos 7 y 8; la escolta, al final ([ejército, agrupación,
+        // modo]), como la de un enjambre. Sin escolta, no se escribe nada (como antes).
+        const zone = q => !!q.task && q.task.kind !== 'escort';
+        const escort = q => (q.task?.kind === 'escort' ? [[q.task.army, q.task.group, ESCORT_MODES.indexOf(q.task.mode)]] : []);
         const relations = [];
         for (let a = 0; a < this.nations.length; a++) for (let b = a + 1; b < this.nations.length; b++) {
             const r = this.relations[a][b];
@@ -1403,13 +1412,13 @@ class GameEngine {
             orders: [...this.armies.values()].filter(a => a.order).map(a => [a.id, a.order.kind, a.order.dest, a.order.target, a.order.ratio, a.order.flee ? 1 : 0, a.order.since, a.order.stuck, a.order.gather ? 1 : 0]),
             blocs: this.blocs.map(b => ({ id: b.id, name: b.name, founder: b.founder, secret: b.secret, since: b.since, members: [...b.members] })),
             nextBlocId: this.nextBlocId,
-            air: { sq: [...this.squadrons.values()].map(q => [q.id, q.owner, q.base, q.ready, q.flown, q.patrol, q.op, q.task ? q.task.cell : -1, q.task ? q.task.aims : [], q.damaged ? 1 : 0]), nextSq: this.nextSquadronId,
+            air: { sq: [...this.squadrons.values()].map(q => [q.id, q.owner, q.base, q.ready, q.flown, q.patrol, q.op, zone(q) ? q.task.cell : -1, zone(q) ? q.task.aims : [], q.damaged ? 1 : 0, ...escort(q)]), nextSq: this.nextSquadronId,
                 fields: [...this.airfields].map(([c, f]) => [c, f.owner, f.left, f.downUntil]),
                 aa: [...this.aaSites].map(([c, s]) => [c, s.owner, s.left, s.hits, [...s.known]]),
                 hits: [...this.airHits].filter(([, t]) => t === this.turn).map(([k]) => k),
                 seen: [...this.airSeen].filter(([, t]) => t === this.turn).map(([k]) => k),
                 sats: this.sats.map(s => [s.owner, s.cell, s.left]) },
-            drones: { sw: [...this.swarms.values()].map(q => [q.id, q.owner, q.base, q.ready, q.flown, q.patrol, q.op, q.damaged ? 1 : 0]), next: this.nextSwarmId,
+            drones: { sw: [...this.swarms.values()].map(q => [q.id, q.owner, q.base, q.ready, q.flown, q.patrol, q.op, q.damaged ? 1 : 0, ...escort(q)]), next: this.nextSwarmId,
                 hits: [...this.droneHits].filter(([, t]) => t === this.turn).map(([k]) => k),
                 seen: [...this.droneSeen].filter(([, t]) => t >= this.turn) },
             defense: { bat: [...this.batteries].map(([c, b]) => [c, b.owner, b.left, [...b.known], b.used]), used: [...this.defUsed] }
@@ -1748,6 +1757,17 @@ class GameEngine {
                 const id = +m[2];
                 if (m[1] === 's' ? !g.swarms.has(id) : m[1] === 'mobile' ? !g.armies.has(id) : id >= G.N) continue;
                 g.defUsed.set(m[0], n);
+            }
+        }
+        // Escoltas (el campo 10 de un escuadrón y el 8 de un enjambre): a un ejército o a una agrupación de su dueño que
+        // existan, en un modo que exista; la de un enjambre, con Municiones merodeadoras (escortTask). La de una operación
+        // sigue en ella. Las partidas de antes, sin escolta.
+        for (const [rows, map, k] of [[list(data.air?.sq), g.squadrons, 10], [list(data.drones?.sw), g.swarms, 8]]) {
+            for (const x of rows) {
+                const q = map.get(int(x?.[0], 1, 1e9, 0)), e = x?.[k];
+                if (!q || q.owner !== nat(x?.[1]) || !Array.isArray(e)) continue;
+                const t = g.escortTask(q, { army: int(e[0], 0, 1e9, 0), group: int(e[1], 0, 1e9, 0) }, ESCORT_MODES[int(e[2], -1, 9, -1)]);
+                if (t) q.task = t;
             }
         }
         g.airVersion++;
@@ -2668,13 +2688,15 @@ class GameEngine {
         return best;
     }
     // Los escuadrones que salen al paso de una misión de `owner` contra `cell`: los de países en guerra con él que
-    // protegen esa casilla y, contra un aeródromo, los que tienen allí su base, están listos y no protegen otra.
+    // protegen esa casilla o escoltan en defensa lo que hay en ella (escortCovers) y, contra un aeródromo, los que tienen
+    // allí su base, están listos y no protegen otra.
     interceptors(owner, kind, cell) {
         const out = [];
         for (const q of this.squadrons.values()) {
             if (!this.atWar(owner, q.owner)) continue;
             if (q.patrol === cell || (kind === 'airfield' && q.base === cell && q.patrol < 0 && this.turn >= q.ready)) out.push(q);
         }
+        for (const q of this.escortCovers(cell)) if (!this.isSwarm(q) && this.atWar(owner, q.owner) && !out.includes(q)) out.push(q);
         return out.sort((a, b) => a.id - b.id);
     }
     // Motivo por el que `owner` no puede proteger `cell` ('' si puede): solo la suya, la de un aliado o el mar.
@@ -2998,10 +3020,11 @@ class GameEngine {
     // la mitad (saturación).
     droneSaturation(owner, n) { return this.rules(owner).droneSwarm && n >= CONFIG.DRONE.SATURATE ? CONFIG.DRONE.SAT_AA : 1; }
     // Enjambres que defienden `cell` de las armas de `owner`: los de países en guerra con él que patrullan esa casilla o
-    // una vecina, por id. (La escolta, tarea 4, añade aquí los que escoltan al ejército de la casilla.)
+    // una vecina, o que escoltan en defensa lo que hay en ella (escortCovers), por id.
     defenseSwarms(owner, cell) {
         const out = [];
         for (const q of this.swarms.values()) if (q.patrol >= 0 && this.atWar(owner, q.owner) && hexDist(q.patrol, cell) <= 1) out.push(q);
+        for (const q of this.escortCovers(cell)) if (this.isSwarm(q) && this.atWar(owner, q.owner) && !out.includes(q)) out.push(q);
         return out.sort((a, b) => a.id - b.id);
     }
     // Capas de defensa contra `n` armas de la clase `cls` (DEFENSE_CLASSES) de `owner` que llegan a `cell`. Cada arma
@@ -3031,9 +3054,10 @@ class GameEngine {
         // Quien puede atender cada capa: casilla, probabilidad, lo que le queda (`left`) y cómo lo gasta de verdad.
         const swarms = [];
         if (SWARM_STOP[cls]) for (const q of this.defenseSwarms(owner, cell)) {
-            if (simulate && viewer !== q.owner && !this.allied(viewer, q.owner) && !this.knownCell(viewer, q.patrol)) continue;
+            const at = q.patrol >= 0 && hexDist(q.patrol, cell) <= 1 ? q.patrol : cell;   // la patrulla o, si escolta, la casilla
+            if (simulate && viewer !== q.owner && !this.allied(viewer, q.owner) && !this.knownCell(viewer, at)) continue;
             const key = `s:${q.id}`, p = cls !== 'guided' && this.rules(q.owner).droneSwarm ? SWARM_STOP_AUTO : SWARM_STOP[cls];
-            swarms.push({ cell: q.patrol, p: p * mult, left: SWARM_STOP_PER - used(key), spend: () => this.defUsed.set(key, used(key) + 1) });
+            swarms.push({ cell: at, p: p * mult, left: SWARM_STOP_PER - used(key), spend: () => this.defUsed.set(key, used(key) + 1) });
         }
         const bats = [], bk = batteryKey(cls);
         for (const [c, b] of this.batteries) {
@@ -3257,17 +3281,19 @@ class GameEngine {
     }
 
     // --- Aviación en el mando: escuadrones en las operaciones, con sus fines, y órdenes de zona ---
-    // sq.op = operación a la que vuela cada turno; sq.task = { cell, aims }, la orden de zona de un escuadrón suelto. Son
-    // encargos excluyentes. Una misión a mano gasta el turno del escuadrón; al siguiente vuelve a su encargo.
+    // sq.op = operación a la que vuela cada turno; sq.task = { cell, aims }, la orden de zona de un escuadrón suelto, o
+    // { kind: 'escort', ... }, su escolta (ver «Escolta»). Son encargos excluyentes, salvo la escolta que reparte una
+    // operación a sus escuadrones (opEscorts). Una misión a mano gasta el turno del escuadrón; al siguiente vuelve a su encargo.
     // Punto clave de una operación: el objetivo de la ofensiva, el centro de la línea o la zona de la reserva.
     opKey(op) { return op.kind === 'ofensiva' ? op.cells[op.cells.length - 1] : op.cells[Math.floor(op.cells.length / 2)]; }
-    // Mete un escuadrón en una operación de su mismo dueño (0: en ninguna); deja su orden de zona.
+    // Mete un escuadrón en una operación de su mismo dueño (0: en ninguna); deja su orden de zona o su escolta (y, al
+    // salir de una operación, la escolta que ella le había dado).
     assignSquadron(sq, opId) {
         if (!sq) return false;
         const op = opId ? this.ops.get(opId) : null;
         if (opId && (!op || op.owner !== sq.owner)) return false;
+        if (op || sq.op) sq.task = null;
         sq.op = op ? op.id : 0;
-        if (op) sq.task = null;
         this.orderVersion++;
         return true;
     }
@@ -3360,11 +3386,13 @@ class GameEngine {
     // zona. Ofensiva: a 3 casillas de su objetivo y a 2 de sus ejércitos (lo que defiende el objetivo y el camino), y
     // protege a sus ejércitos. Línea: a 3 casillas de la línea, y protege sus casillas más amenazadas. En manual, en pausa
     // o en la reserva no vuela. Las de la IA no atacan ejércitos de menos de AI_MIN_ARMY unidades.
+    // Con «Proteger y escoltar», antes reparte escoltas (opEscorts); las que escoltan no vuelan aquí.
     opAir(op) {
-        const id = op.owner, aims = op.aims ?? [];
-        if (op.kind === 'reserva' || op.auto === 'manual' || op.paused || !aims.length || this.over) return { flown: 0, hits: 0, strikes: 0, notes: [] };
+        const id = op.owner, aims = op.aims ?? [], idle = op.kind === 'reserva' || op.auto === 'manual' || op.paused || !aims.length || this.over;
+        this.opEscorts(op, !idle && aims.includes('patrol'));
+        if (idle) return { flown: 0, hits: 0, strikes: 0, notes: [] };
         const pool = [];
-        for (const q of this.squadrons.values()) if (q.op === op.id && q.owner === id && this.canFly(q)) pool.push(q);
+        for (const q of this.squadrons.values()) if (q.op === op.id && q.owner === id && !q.task && this.canFly(q)) pool.push(q);
         if (!pool.length) return { flown: 0, hits: 0, strikes: 0, notes: [] };
         const members = this.opMembers(op), zone = new Set(), obj = op.kind === 'ofensiva' ? op.cells[op.cells.length - 1] : -1;
         const around = (c, k) => { for (const x of this.nearCells(c, k).keys()) zone.add(x); };
@@ -3378,7 +3406,7 @@ class GameEngine {
     stepAirTasks(id) {
         const groups = new Map();
         for (const q of this.squadrons.values()) {
-            if (q.owner !== id || q.op || !q.task || !this.canFly(q)) continue;
+            if (q.owner !== id || q.op || !q.task || q.task.kind === 'escort' || !this.canFly(q)) continue;
             const k = `${q.task.cell}:${q.task.aims.join()}`;
             if (!groups.has(k)) groups.set(k, []);
             groups.get(k).push(q);
@@ -3406,6 +3434,207 @@ class GameEngine {
         if (!op || op.owner !== this.player || op.kind === 'reserva' || !Object.hasOwn(OP_AIMS, aim)) return false;
         op.aims = op.aims.includes(aim) ? op.aims.filter(k => k !== aim) : [...op.aims, aim];
         this.orderVersion++;
+        return true;
+    }
+
+    // --- Escolta: escuadrones (y enjambres, con Municiones merodeadoras) que acompañan a un ejército o a una agrupación ---
+    // q.task = { kind: 'escort', army, group, mode }: escolta al ejército `army` o a los miembros de la agrupación `group`
+    // (el otro es 0), en modo 'defensa' o 'ataque'. Es un encargo como la orden de zona: deja la operación. La que reparte
+    // una operación con «Proteger y escoltar» (opEscorts) es la excepción: la pieza la cumple sin salir de ella.
+    // - Lo escoltado que queda más lejos que el alcance de la pieza desde su base la suspende: no hace nada (escortsOf).
+    // - Defensa: lista y sin haber gastado el vuelo de su turno en otra misión (escortGuarding), cuenta como «Proteger
+    //   casilla» en las casillas de lo escoltado hasta el próximo turno de su dueño: los escuadrones salen al paso de las
+    //   misiones enemigas (interceptors) y los enjambres están en la primera capa de defensa (defenseSwarms). En el combate
+    //   en que lo escoltado defiende, «apoyo aéreo» en la defensa.
+    // - Ataque: la primera vez en el turno que lo escoltado ataca (en una agrupación, el primero que ataque), las que aún
+    //   pueden volar despegan y gastan su vuelo: golpe previo gratis contra el defensor (escortStrike) y «apoyo aéreo» en
+    //   el ataque con las que siguen en el aire. La que ya ha volado ese turno no golpea ni apoya.
+    // - Si el ejército escoltado se funde con otro, la escolta pasa a ese (settle); si desaparece, queda libre al empezar
+    //   el turno de su dueño (pruneEscorts).
+    isSwarm(q) { return this.swarms.get(q.id) === q; }
+    // Escuadrones y enjambres con encargo de escolta (los escuadrones primero, por id).
+    escortPieces() {
+        const c = this.escortCache, av = this.airVersion, ov = this.orderVersion;
+        if (c && c.av === av && c.ov === ov) return c.list;
+        const list = [];
+        for (const m of [this.squadrons, this.swarms]) for (const q of m.values()) if (q.task?.kind === 'escort') list.push(q);
+        this.escortCache = { av, ov, list };
+        return list;
+    }
+    // Lista para escoltar: no dañada y con su base en servicio (el aeródromo o, la de un enjambre, su ciudad).
+    escortUp(q) { return this.turn >= q.ready && (this.isSwarm(q) ? this.owner[q.base] === q.owner : this.airfieldUp(q.base)); }
+    // ¿Escolta `q` al ejército `a`? El suyo o un miembro de su agrupación (y, la de una operación, si sigue en ella).
+    escorts(q, a) {
+        const t = q.task;
+        if (t?.kind !== 'escort' || a.owner !== q.owner || (q.op && !this.ops.has(q.op))) return false;
+        return t.army ? t.army === a.id : !!t.group && t.group === a.group;
+    }
+    // ¿Tiene `q` al ejército `a` a su alcance desde su base?
+    escortReach(q, a) { return hexDist(q.base, a.cell) <= (this.isSwarm(q) ? this.droneRange(q.owner) : this.airRange(q.owner)); }
+    // Escolta del ejército `armyId` de `owner`: escuadrones y enjambres que lo tienen a su alcance y, aparte, los que no
+    // (suspendidos).
+    escortsOf(owner, armyId) {
+        const out = { squadrons: [], swarms: [], suspended: [] }, list = this.escortPieces(), a = list.length ? this.armies.get(armyId) : null;
+        if (!a || a.owner !== owner) return out;
+        for (const q of list) {
+            if (!this.escorts(q, a)) continue;
+            if (!this.escortReach(q, a)) out.suspended.push(q);
+            else (this.isSwarm(q) ? out.swarms : out.squadrons).push(q);
+        }
+        return out;
+    }
+    // ¿Defiende ahora la escolta `q`? En modo defensa, lista y sin haber volado a otra misión desde que empezó el último
+    // turno de su dueño (una misión a mano gasta su turno; al siguiente vuelve a escoltar).
+    escortGuarding(q) {
+        return q.task?.kind === 'escort' && q.task.mode === 'defensa' && this.escortUp(q) && !(q.flown > 0 && q.flown === this.nations[q.owner].lastTurn);
+    }
+    // Piezas que defienden ahora `cell` como escolta: las que escoltan en defensa el ejército de esa casilla a su alcance.
+    escortCovers(cell) {
+        const out = [], list = this.escortPieces(), a = list.length ? this.armyOn(cell) : null;
+        if (!a) return out;
+        for (const q of list) if (this.escorts(q, a) && this.escortReach(q, a) && this.escortGuarding(q)) out.push(q);
+        return out;
+    }
+    // Ejércitos cuya escolta de ataque acompaña al ejército `id`: él y, si es una parte que ha salido este turno de otro
+    // (split), también ese.
+    supportIds(id) {
+        const s = this.splitFrom.get(id);
+        return s && s[1] === this.turn ? [id, s[0]] : [id];
+    }
+    // Las escoltas de ataque que despegarían ya con un ataque de los ejércitos `ids` de `owner` (sin repetir): a su
+    // alcance y con el vuelo de este turno sin gastar.
+    escortSupport(owner, ids) {
+        const out = [];
+        if (!this.escortPieces().length) return out;
+        for (const id of new Set(ids.flatMap(x => this.supportIds(x)))) {
+            const e = this.escortsOf(owner, id);
+            for (const q of [...e.squadrons, ...e.swarms]) {
+                if (q.task.mode === 'ataque' && !out.includes(q) && (this.isSwarm(q) ? this.canFlySwarm(q) : this.canFly(q))) out.push(q);
+            }
+        }
+        return out;
+    }
+    // «Apoyo aéreo» de las piezas `list` (en el aire): ESCORT.SQ por escuadrón, con el tope SQ_CAP, por ESCORT.SW por
+    // enjambre, con el tope SW_CAP. null sin ninguna.
+    airSupport(list) {
+        if (!list?.length) return null;
+        const E = CONFIG.ESCORT, sw = list.filter(q => this.isSwarm(q)).length;
+        return ['apoyo aéreo', Math.min(E.SQ_CAP, E.SQ ** (list.length - sw)) * Math.min(E.SW_CAP, E.SW ** sw)];
+    }
+    // Factor de la escolta del ejército `armyId` de `owner` en un combate: en el ataque ('atk'), la de ataque que
+    // despegaría ahora (la previsión; el combate usa las que de verdad siguen en el aire tras el golpe previo, `pieces`);
+    // en la defensa ('def'), la de defensa que defiende ahora. [nombre, factor] o null.
+    escortFactor(owner, armyId, side, pieces = null) {
+        if (pieces) return this.airSupport(pieces);
+        if (side === 'atk') return this.airSupport(this.escortSupport(owner, [armyId]));
+        const e = this.escortsOf(owner, armyId);
+        return this.airSupport([...e.squadrons, ...e.swarms].filter(q => this.escortGuarding(q)));
+    }
+    // Golpe previo de la escolta de ataque cuando los ejércitos `ids` de `owner` atacan `cell`: las que pueden volar
+    // despegan y gastan su vuelo. Primero los enjambres, que dejan el defensor conocido para `owner` este turno (el golpe
+    // de los escuadrones no va a ciegas y el parte lo cuenta entero), y luego los escuadrones, cada grupo en una misión
+    // «Atacar ejército» con sus reglas (cazas, capas de defensa, antiaéreo, fracaso). Si la misión no se puede (ya hay un
+    // acierto este turno), vuelan igual, como apoyo. Devuelve las que siguen en el aire (ni derribadas ni dañadas): el
+    // «apoyo aéreo» del combate. Sin escolta de ataque no hace nada ni tira dados.
+    escortStrike(owner, ids, cell) {
+        const fly = this.escortSupport(owner, ids);
+        if (!fly.length) return fly;
+        const sws = fly.filter(q => this.isSwarm(q)), sqs = fly.filter(q => !this.isSwarm(q));
+        if (sws.length) {
+            const k = owner * G.N + cell;
+            if (!(this.droneSeen.get(k) >= this.turn)) this.droneSeen.set(k, this.turn);
+            this.airVersion++;
+            if (this.armyOn(cell)) this.droneMission(owner, sws.map(q => q.id), 'army', cell);
+        }
+        if (sqs.length && this.armyOn(cell)) this.airMission(owner, sqs.map(q => q.id), 'army', cell);
+        for (const q of fly) q.flown = this.turn;
+        return fly.filter(q => (sws.includes(q) ? this.swarms : this.squadrons).get(q.id) === q && q.ready <= this.turn);
+    }
+    // El encargo de escolta de `q` sobre `ref` ({ army } o { group } de su dueño, o el id de un ejército) en `mode`, o
+    // null si no vale: lo escoltado tiene que existir y ser suyo, y un enjambre necesita Municiones merodeadoras.
+    escortTask(q, ref, mode) {
+        if (!q || !ESCORT_MODES.includes(mode) || (this.isSwarm(q) && !this.rules(q.owner).droneEscort)) return null;
+        const army = Number.isInteger(ref) ? ref : Number.isInteger(ref?.army) ? ref.army : 0, group = Number.isInteger(ref?.group) ? ref.group : 0;
+        if (army ? this.armies.get(army)?.owner !== q.owner : !group || !this.groupById(q.owner, group)) return null;
+        return { kind: 'escort', army, group: army ? 0 : group, mode };
+    }
+    // Encarga a `q` (escuadrón o enjambre) la escolta de `ref` en `mode`; deja su operación y su orden de zona.
+    setEscort(q, ref, mode) {
+        const t = this.escortTask(q, ref, mode);
+        if (!t) return false;
+        q.task = t;
+        q.op = 0;
+        this.orderVersion++;
+        return true;
+    }
+    clearEscort(q) {
+        if (q?.task?.kind !== 'escort') return false;
+        q.task = null;
+        this.orderVersion++;
+        return true;
+    }
+    // El ejército `from` se ha fundido en `to`: su escolta pasa a `to`.
+    escortFollow(from, to) {
+        let n = 0;
+        for (const q of this.escortPieces()) if (q.task.army === from && q.owner === to.owner) { q.task.army = to.id; n++; }
+        if (n) this.orderVersion++;
+    }
+    // Al empezar el turno de `id`: su escolta de un ejército o una agrupación que ya no existe (o de una operación que ya
+    // no la tiene) queda libre; el parte lo dice.
+    pruneEscorts(id) {
+        let n = 0;
+        for (const q of this.escortPieces()) {
+            if (q.owner !== id) continue;
+            const t = q.task;
+            if ((q.op && !this.ops.has(q.op)) || (t.group ? !this.groupById(id, t.group) : this.armies.get(t.army)?.owner !== id)) { q.task = null; n++; }
+        }
+        for (const [k, s] of this.splitFrom) if (s[1] < this.turn) this.splitFrom.delete(k);
+        if (!n) return;
+        this.orderVersion++;
+        if (id === this.player) this.log(`${n === 1 ? 'Una escolta queda libre' : `${n} escoltas quedan libres`}: lo que acompañaba${n === 1 ? '' : 'n'} ya no existe.`);
+    }
+    // Las escoltas que reparte una operación con «Proteger y escoltar» (`on`), de nuevo cada vez que vuela (y, sin el fin,
+    // las deshace): la mitad de sus escuadrones listos (los de id más alto; con uno solo, protege como siempre) y todos sus
+    // enjambres listos que puedan escoltar. La línea, en defensa, a sus ejércitos amenazados (threat), el más amenazado
+    // primero; la ofensiva, en ataque, a los más cercanos a su objetivo, que son los que van a asaltar. Hasta
+    // OP_ESCORTS ejércitos, cada pieza al siguiente de la lista que tenga a su alcance, por turnos.
+    opEscorts(op, on) {
+        const id = op.owner, sqs = [], sws = [];
+        for (const [m, list] of [[this.squadrons, sqs], [this.swarms, sws]]) for (const q of m.values()) {
+            if (q.op !== op.id || q.owner !== id) continue;
+            if (q.task) { q.task = null; this.orderVersion++; }
+            if (on && this.escortUp(q) && (list === sqs || this.rules(id).droneEscort)) list.push(q);
+        }
+        if (!on || (!sws.length && sqs.length < 2)) return;
+        const attack = op.kind === 'ofensiva', obj = op.cells[op.cells.length - 1];
+        const ranked = this.opMembers(op).map(a => [a, attack ? -hexDist(a.cell, obj) : this.threat(id, a.cell)])
+            .filter(([, s]) => attack || s > 0).sort((x, y) => y[1] - x[1] || x[0].id - y[0].id).slice(0, OP_ESCORTS).map(([a]) => a);
+        if (!ranked.length) return;
+        sqs.sort((x, y) => y.id - x.id);
+        let i = 0;
+        for (const q of [...sqs.slice(0, Math.floor(sqs.length / 2)), ...sws]) {
+            for (let k = 0; k < ranked.length; k++) {
+                const a = ranked[(i + k) % ranked.length];
+                if (!this.escortReach(q, a)) continue;
+                q.task = { kind: 'escort', army: a.id, group: 0, mode: attack ? 'ataque' : 'defensa' };
+                this.orderVersion++;
+                i = (i + k + 1) % ranked.length;
+                break;
+            }
+        }
+    }
+    // El jugador encarga la escolta a su escuadrón o enjambre (`kind` 'squadron' o 'swarm'); sin `ref`, la quita. El
+    // parte lo confirma y avisa si lo escoltado está fuera de su alcance.
+    playerEscort(kind, id, ref, mode) {
+        const q = (kind === 'swarm' ? this.swarms : this.squadrons).get(id);
+        if (!q || q.owner !== this.player || this.over) return false;
+        if (!ref) return this.clearEscort(q);
+        if (kind === 'swarm' && !this.rules(q.owner).droneEscort) { this.log('Para escoltar con drones hace falta investigar Municiones merodeadoras (Drones 2).'); return false; }
+        if (!this.setEscort(q, ref, mode)) return false;
+        const t = q.task, members = t.group ? this.groupMembers(q.owner, t.group) : [this.armies.get(t.army)];
+        const what = t.group ? this.groupById(q.owner, t.group).name : `el ejército de ${this.placeName(members[0].cell)}`;
+        const far = members.length > 0 && members.every(a => !this.escortReach(q, a));
+        this.log(`${kind === 'swarm' ? 'El enjambre' : 'El escuadrón'} ${q.id} escolta a ${what} en ${mode}${far ? ', pero está fuera de su alcance: no hará nada hasta que vuelva a él' : ''}.`);
         return true;
     }
 
@@ -3665,6 +3894,7 @@ class GameEngine {
         if (!o.group && a.group) o.group = a.group;   // y lo mismo con la agrupación
         if (!o.reinforce && a.reinforce) o.reinforce = a.reinforce;   // y con su refuerzo (A7)
         this.armies.delete(a.id);
+        this.escortFollow(a.id, o);   // su escolta pasa al ejército en el que se funde
         if (this.watched.has(a.id)) this.redirectArmy(a.id, o);
         return o;
     }
@@ -3674,6 +3904,7 @@ class GameEngine {
         if (sameUnits(a.units, send)) return a;
         for (const k of UNIT_KEYS) if (send[k]) a.units[k] -= send[k];
         const b = this.newArmy(a.owner, a.cell, send, a.used);
+        this.splitFrom.set(b.id, [a.id, this.turn]);   // la escolta de ataque de `a` apoya a la parte este turno
         b.disorgUntil = a.disorgUntil || 0;
         if (a.op) b.op = a.op;
         b.group = a.group || 0;
@@ -4572,7 +4803,7 @@ class GameEngine {
     endOp(op, why = '') {
         if (!this.ops.has(op.id)) return;
         for (const a of this.armies.values()) { if (a.op === op.id) a.op = 0; if (a.form === op.id) a.form = 0; if (a.from === op.id) a.from = 0; }
-        for (const q of this.squadrons.values()) if (q.op === op.id) q.op = 0;
+        for (const m of [this.squadrons, this.swarms]) for (const q of m.values()) if (q.op === op.id) { q.op = 0; if (q.task?.kind === 'escort') q.task = null; }
         this.ops.delete(op.id);
         this.orderVersion++;
         if (op.owner === this.player) this.log(`${op.name}: ${why || 'operación terminada'}. Sus ejércitos quedan sin operación.`);
@@ -5972,9 +6203,13 @@ class GameEngine {
     attack(army, from, target, r) {
         // Un destacamento que ataca desde su propia casilla aún no está registrado en ella: battle() lo asienta al final.
         if (from !== army.cell) army = this.moveArmy(army, from, r);
-        const def = this.armyOn(target);
+        let def = this.armyOn(target);
         if (!def) { this.settle(army); return; }
-        this.battle(army, def, target);
+        // Antes, el golpe de su escolta de ataque, que puede acabar con el defensor.
+        const support = this.escortStrike(army.owner, [army.id], target);
+        def = this.armyOn(target);
+        if (!def) { this.settle(army); return; }
+        this.battle(army, def, target, support);
     }
     // Ejércitos de `owner` que pueden atacar `target` este turno (está entre sus ataques, les queda movimiento y no han
     // atacado ya), cada uno con la casilla desde la que atacaría y su alcance. Con `ids` (un Set), solo esos.
@@ -5998,19 +6233,22 @@ class GameEngine {
     }
     // Factores de un ataque conjunto: cada parte ({ units, from, id }) ataca con su estado, su asalto anfibio si sale del
     // mar y, si cruza un río sin Pontoneros, ÷ CONFIG.RIVER_DEFENSE (lo que hoy es la defensa ×1,25, pero solo para él).
-    // El ataque es la suma; la defensa, la de combatFactors sin el río.
-    jointFactors(owner, parts, def, cell) {
+    // El ataque es la suma, con el «apoyo aéreo» de la escolta de ataque de todos (`air`) una vez para el conjunto: las
+    // piezas `support` que siguen en el aire o, sin ellas, las que despegarían ahora (de cada parte, o del ejército `src`
+    // del que sale). La defensa, la de combatFactors sin el río.
+    jointFactors(owner, parts, def, cell, support = undefined) {
         const sea = afloat(cell), ignore = this.rules(owner).ignoreRiver;
-        const all = parts.map(p => this.combatFactors(owner, p.units, p.from, def, cell, p.id));
+        const all = parts.map(p => this.combatFactors(owner, p.units, p.from, def, cell, p.id, p.id, null));
+        const air = this.airSupport(support ?? this.escortSupport(owner, parts.map(p => p.src ?? p.id).filter(Boolean)));
         const members = parts.map((p, i) => {
             const d = G.dirTo(p.from, cell), river = !sea && !ignore && d >= 0 && !!RIVER[p.from * 6 + d];
             return { id: p.id, atk: all[i].atk / (river ? CONFIG.RIVER_DEFENSE : 1), attState: all[i].attState, attParts: all[i].attParts, river };
         });
         const f = all[0], fparts = f.parts.filter(([n]) => n !== 'río');
         const raw = fparts.reduce((m, [, x]) => m * x, 1), bonus = Math.min(raw, f.cap);
-        return { atk: members.reduce((s, m) => s + m.atk, 0), dfn: Math.max(0.5, f.baseDef * bonus * f.defState.mult),
+        return { atk: members.reduce((s, m) => s + m.atk, 0) * (air ? air[1] : 1), dfn: Math.max(0.5, f.baseDef * bonus * f.defState.mult),
             baseAtk: all.reduce((s, x) => s + x.baseAtk, 0), baseDef: f.baseDef, parts: fparts, bonus, cap: f.cap, capped: raw > bonus,
-            defState: f.defState, members };
+            defState: f.defState, members, air };
     }
     // Ataque de varios ejércitos a la vez ([{ army, from, r }], como jointCandidates). Uno solo ataca como siempre; varios
     // van cada uno a su casilla de ataque y combaten juntos.
@@ -6022,17 +6260,24 @@ class GameEngine {
             const a = from !== army.cell ? this.moveArmy(army, from, r) : army;
             if (!atts.includes(a)) atts.push(a);
         }
-        const def = this.armyOn(target);
+        let def = this.armyOn(target);
         if (!def) { for (const a of atts) this.settle(a); return; }
-        if (atts.length === 1) this.battle(atts[0], def, target);
-        else this.jointBattle(atts, def, target);
+        // La escolta de ataque de todos golpea antes y apoya al conjunto.
+        const support = this.escortStrike(atts[0].owner, atts.map(a => a.id), target);
+        def = this.armyOn(target);
+        if (!def) { for (const a of atts) this.settle(a); return; }
+        if (atts.length === 1) this.battle(atts[0], def, target, support);
+        else this.jointBattle(atts, def, target, support);
     }
 
     // Factores de un combate, sin azar: sirven para resolverlo, preverlo y explicarlo.
     // `attId` es el ejército que ataca, para no contarlo como su propio apoyo; `def.id`, el que defiende. Para prever el
     // ataque de una parte de un ejército (attId 0: el resto se queda y sí apoya), `attFrom` es ese ejército, del que la
-    // parte se lleva la desorganización, como en split.
-    combatFactors(attOwner, attUnits, fromCell, def, cell, attId = 0, attFrom = attId) {
+    // parte se lleva la desorganización, como en split, y su escolta de ataque.
+    // La escolta da «apoyo aéreo» (escortFactor): en la defensa, la del defensor que defiende ahora (sin el tope del
+    // terreno); en el ataque, las piezas `support` que siguen en el aire tras el golpe previo (null: ninguna) o, sin
+    // `support`, las que despegarían ahora (la previsión).
+    combatFactors(attOwner, attUnits, fromCell, def, cell, attId = 0, attFrom = attId, support = undefined) {
         const sea = afloat(cell), ra = this.rules(attOwner), rd = this.rules(def.owner);
         const terrain = sea ? null : terrainOf(cell), d = G.dirTo(fromCell, cell);
         const parts = [];
@@ -6047,10 +6292,14 @@ class GameEngine {
         const cap = fx ? fx.fortCap : CONFIG.MAX_DEFENSE_BONUS;
         const bonus = Math.min(raw, cap);
         const attState = this.armyState(attOwner, fromCell, attUnits, attId, attFrom);
-        const defState = this.armyState(def.owner, cell, def.units, def.id ?? 0);
+        let defState = this.armyState(def.owner, cell, def.units, def.id ?? 0);
+        const dAir = def.id ? this.escortFactor(def.owner, def.id, 'def') : null;
+        if (dAir) defState = { mult: defState.mult * dAir[1], parts: [...defState.parts, dAir] };
         const baseAtk = unitPower(attUnits, 'atk', ra), baseDef = unitPower(def.units, 'def', rd);
         // Desde un barco se ataca con asalto anfibio; un ejército en el mar solo cuenta con el casco (sin terreno ni tope).
         const attParts = afloat(fromCell) ? [['asalto anfibio', ra.amphibious]] : [];
+        const aAir = support !== undefined ? this.airSupport(support) : attFrom ? this.escortFactor(attOwner, attFrom, 'atk') : null;
+        if (aAir) attParts.push(aAir);
         return { baseAtk, baseDef, parts, bonus, cap, capped: raw > bonus, attState, defState, attParts,
             atk: baseAtk * attState.mult * attParts.reduce((m, [, x]) => m * x, 1), dfn: Math.max(0.5, baseDef * bonus * defState.mult) };
     }
@@ -6061,10 +6310,11 @@ class GameEngine {
         for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) if (atk * (0.8 + 0.4 * (i + 0.5) / N) > dfn * (0.8 + 0.4 * (j + 0.5) / N)) wins++;
         return wins / (N * N);
     }
-    battle(att, def, cell) {
+    // `support`: la escolta de ataque que sigue en el aire tras el golpe previo (escortStrike); sin ella, ninguna.
+    battle(att, def, cell, support = null) {
         const roll = () => 0.8 + this.rng() * 0.4;
         const sea = afloat(cell), p = PROVINCES[sea ? SEA_PROV[cell] : G.prov[cell]];
-        const fx = this.combatFactors(att.owner, att.units, att.cell, def, cell, att.id);
+        const fx = this.combatFactors(att.owner, att.units, att.cell, def, cell, att.id, att.id, support);
         const nA0 = countUnits(att.units), nD0 = countUnits(def.units);
         const from = att.cell;
         this.note({ kind: 'battle', att: att.id, def: def.id, from, cell, attOwner: att.owner, defOwner: def.owner,
@@ -6118,10 +6368,10 @@ class GameEngine {
     // por bando. Todos pierden la misma fracción y gastan el turno; si ganan una casilla de tierra, entra el de más ataque
     // que esté en tierra (si todos salen del mar, el de más ataque, que desembarca como el atacante suelto de battle) y los
     // demás se quedan donde están; en una de mar no entra nadie.
-    jointBattle(atts, def, cell) {
+    jointBattle(atts, def, cell, support = null) {
         const roll = () => 0.8 + this.rng() * 0.4;
         const owner = atts[0].owner, sea = afloat(cell), p = PROVINCES[sea ? SEA_PROV[cell] : G.prov[cell]];
-        const fx = this.jointFactors(owner, atts.map(a => ({ units: a.units, from: a.cell, id: a.id })), def, cell);
+        const fx = this.jointFactors(owner, atts.map(a => ({ units: a.units, from: a.cell, id: a.id })), def, cell, support ?? []);
         const n0 = atts.map(a => countUnits(a.units)), nA0 = n0.reduce((s, n) => s + n, 0), nD0 = countUnits(def.units);
         const strongest = list => list.reduce((b, i) => (b < 0 || fx.members[i].atk > fx.members[b].atk ? i : b), -1);
         const idx = atts.map((_, i) => i), li = sea ? -1 : strongest(idx.filter(i => !afloat(atts[i].cell)));
@@ -6163,7 +6413,7 @@ class GameEngine {
         let atkTxt;
         if (fx.members) {
             const one = m => { const s = state({ parts: [...m.attState.parts, ...m.attParts] }) + (m.river ? ` ÷${num(CONFIG.RIVER_DEFENSE)} río` : ''); return s ? `${Math.round(m.atk)} (${s.trim()})` : `${Math.round(m.atk)}`; };
-            atkTxt = `${fx.members.map(one).join(' + ')} = ${Math.round(fx.atk)}`;
+            atkTxt = `${fx.members.map(one).join(' + ')}${fx.air ? ` ×${num(fx.air[1])} ${fx.air[0]}` : ''} = ${Math.round(fx.atk)}`;
         } else {
             const attParts = { parts: [...fx.attState.parts, ...fx.attParts] };
             atkTxt = `${Math.round(fx.baseAtk)}${state(attParts)}${attParts.parts.length ? ` = ${Math.round(fx.atk)}` : ''}`;
@@ -6610,6 +6860,7 @@ class GameEngine {
         for (const a of this.armies.values()) if (a.owner === id) a.used = 0;
         this.feedArmies(id);
         this.pruneGroups(id);   // agrupaciones sin nadie, fuera; nombres según su tamaño
+        this.pruneEscorts(id);  // y la escolta de lo que ya no existe
         this.advanceResearch(id);
         // Obras de fortificación: la nueva termina al nivel máximo de su dueño; la reparación sube un nivel y no avanza
         // con el enemigo al lado. Las dos se pierden si la casilla cambia de dueño.
@@ -9673,14 +9924,14 @@ class GameUI {
         } else if (this.reachInfo?.attacks.has(cell) && a && this.jointList(cell).length > 1) {
             // Ataque conjunto: la fuerza de todos sumada contra la defensa, sin el río (cada uno lleva el suyo).
             const list = this.jointList(cell), mine = list[0].army;
-            const fx = g.jointFactors(g.player, list.map(x => ({ units: x.send ?? x.army.units, from: x.from, id: x === list[0] && !sameUnits(this.send, mine.units) ? 0 : x.army.id })), a, cell);
+            const fx = g.jointFactors(g.player, list.map(x => ({ units: x.send ?? x.army.units, from: x.from, id: x === list[0] && !sameUnits(this.send, mine.units) ? 0 : x.army.id, src: x.army.id })), a, cell);
             const defParts = this.isolationHidden(a) ? fx.defState.parts.filter(([k]) => k !== 'aislado') : fx.defState.parts;
             const dfn = defParts === fx.defState.parts ? fx.dfn : Math.max(0.5, fx.baseDef * fx.bonus * defParts.reduce((m, [, x]) => m * x, 1));
             const chance = g.winChance(fx.atk, dfn), color = chance >= 0.7 ? '#a8e38a' : chance >= 0.35 ? '#ffd166' : '#ff8a78';
             const factors = fx.parts.map(([nm, x]) => `${nm} ×${decimal(x)}`).concat(fx.capped ? [`tope ×${decimal(fx.cap)}`] : [], defParts.map(([nm, x]) => `${nm} ×${decimal(x)}`)).join(', ');
             lines.push(`<b style="color:${color}">Clic para atacar: ${Math.round(chance * 100)} % de victoria</b>`);
             lines.push(`Atacan contigo: ${plural(list.length - 1, 'ejército vecino', 'ejércitos vecinos')}${this.jointAll ? ' (todos los que llegan)' : ''}`);
-            lines.push(`Fuerza sumada ${Math.round(fx.atk)} (${fx.members.map(m => `${Math.round(m.atk)}${m.river ? ' tras un río' : ''}`).join(' + ')}) contra su defensa ${Math.round(dfn)}${factors ? ` (${factors})` : ''}`);
+            lines.push(`Fuerza sumada ${Math.round(fx.atk)} (${fx.members.map(m => `${Math.round(m.atk)}${m.river ? ' tras un río' : ''}`).join(' + ')}${fx.air ? `, ${fx.air[0]} ×${decimal(fx.air[1])}` : ''}) contra su defensa ${Math.round(dfn)}${factors ? ` (${factors})` : ''}`);
         } else if (this.reachInfo?.attacks.has(cell) && a) {
             const mine = this.selectedArmy();
             const fx = g.combatFactors(g.player, this.send, this.reachInfo.from.get(cell) ?? mine.cell, a, cell, sameUnits(this.send, mine.units) ? mine.id : 0, mine.id);
@@ -10018,10 +10269,12 @@ class GameUI {
         if (g.turn < q.ready) return q.damaged ? `Dañado: vuelve a volar el turno ${q.ready}` : `Nuevo: vuela a partir del turno ${q.ready}`;
         return q.flown === g.turn ? 'Ya ha volado' : 'Listo';
     }
-    // El encargo de un escuadrón, en pocas palabras ('' si no tiene).
+    // El encargo de un escuadrón, en pocas palabras ('' si no tiene): su operación (y la escolta que le da), su escolta o
+    // su orden de zona.
     squadronTask(q) {
-        const g = this.game, op = q.op ? g.ops.get(q.op) : null;
-        return op ? esc(op.name) : q.task ? `Orden de zona: ${esc(g.placeName(q.task.cell))}` : '';
+        const g = this.game, op = q.op ? g.ops.get(q.op) : null, t = q.task, mode = t?.kind === 'escort' ? t.mode : '';
+        if (op) return `${esc(op.name)}${mode ? ` · escolta en ${mode}` : ''}`;
+        return mode ? `Escolta en ${mode}` : t ? `Orden de zona: ${esc(g.placeName(t.cell))}` : '';
     }
     renderAirCard() {
         const g = this.game, el = $('#card'), p0 = g.player, A = this.air;
@@ -10068,7 +10321,8 @@ class GameUI {
         const rows = sqs.map(q => `<label class="air-task"><span>Escuadrón ${q.id}</span><select data-air-task="${q.id}" aria-label="Encargo del escuadrón ${q.id}">
             <option value="0" ${!q.op && !q.task && A.zoneSq !== q.id ? 'selected' : ''}>Sin encargo</option>
             ${ops.map(o => `<option value="${o.id}" ${q.op === o.id ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}
-            <option value="zone" ${q.task || A.zoneSq === q.id ? 'selected' : ''}>Orden de zona${q.task ? `: ${esc(g.placeName(q.task.cell))}` : '…'}</option></select></label>`).join('');
+            ${!q.op && q.task?.kind === 'escort' ? `<option value="escort" selected>Escolta en ${q.task.mode}</option>` : ''}
+            <option value="zone" ${(q.task && q.task.kind !== 'escort') || A.zoneSq === q.id ? 'selected' : ''}>Orden de zona${q.task && q.task.kind !== 'escort' ? `: ${esc(g.placeName(q.task.cell))}` : '…'}</option></select></label>`).join('');
         const zone = A.mode === 'zone' ? `<div class="note" style="margin:2px 0 10px"><p class="small"><b>Orden de zona del escuadrón ${A.zoneSq}</b>: ${this.touch ? 'toca' : 'haz clic en'} el centro de la zona en el mapa. Cada turno atacará a ${plural(kmCells(AIR_ZONE_KM), 'casilla', 'casillas')} (${AIR_ZONE_KM} km) alrededor:</p>
             <div class="air-aims">${Object.entries(OP_AIMS).map(([k, v]) => `<label class="check small"><input type="checkbox" data-action="zone-aim" data-aim="${k}" ${A.zoneAims.includes(k) ? 'checked' : ''}><span>${v}</span></label>`).join('')}</div>
             <div class="row" style="margin-top:6px"><button class="btn ghost" data-action="zone-cancel">Cancelar</button></div></div>` : '';

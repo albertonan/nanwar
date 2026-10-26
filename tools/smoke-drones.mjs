@@ -563,6 +563,196 @@ const CHECKS = [
     T.eq([old.batteries.size, old.defUsed.size], [0, 0], 'partida vieja');
     return true;
 }],
+['B4 · escolta de defensa intercepta la misión enemiga', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'drones1'); T.learn(g, fr, 'drones1');
+    const [c] = T.border(g, es, fr), base = T.baseFor(g, es, c, g.droneRange(es));
+    T.airfield(g, es, base); const qs = T.squad(g, es, base, 2), [w] = T.swarm(g, es, base);
+    const army = T.army(g, es, c, 20);
+    T.eq(g.setEscort(w, { army: army.id }, 'defensa'), false, 'el enjambre necesita Municiones merodeadoras');
+    T.learn(g, es, 'drones2');
+    T.eq([...qs, w].map(q => g.setEscort(q, { army: army.id }, 'defensa')), [true, true, true], 'encargos');
+    T.eq(qs[0].task, { kind: 'escort', army: army.id, group: 0, mode: 'defensa' }, 'el encargo');
+    T.eq(g.escortCovers(c).map(q => q.id), [qs[0].id, qs[1].id, w.id], 'cubren su casilla');
+    T.eq(g.interceptors(fr, 'army', c), qs, 'los escuadrones salen al paso');
+    T.eq(g.defenseSwarms(fr, c), [w], 'y el enjambre está en la primera capa');
+    T.near(g.incomingDefense(fr, 'drone', c, 1, { simulate: true }).stopped.drones, 0.5, 1e-9, 'para la mitad de los drones');
+    // Una misión aérea francesa contra el ejército: el doble de cazas la para.
+    const fb = T.baseFor(g, fr, c); T.airfield(g, fr, fb); const [f] = T.squad(g, fr, fb);
+    T.luck(g, 0.99);
+    const res = g.airMission(fr, [f.id], 'army', c);
+    T.eq([res.result, countUnits(army.units)], ['intercepted', 20], 'interceptada');
+    // Una misión a mano gasta su turno: hasta el próximo de su dueño no escolta.
+    qs[0].flown = g.turn; qs[1].flown = g.turn;
+    T.eq(g.interceptors(fr, 'army', c), [], 'han volado a otra cosa');
+    g.turn++;
+    T.eq(g.interceptors(fr, 'army', c), [], 'aún no ha empezado su turno');
+    g.nations[es].lastTurn = g.turn;
+    T.eq(g.interceptors(fr, 'army', c), qs, 'en su turno nuevo vuelven a escoltar');
+    return true;
+}],
+['B4 · apoyo aéreo ×1,1 por escuadrón con tope ×1,3 en el desglose', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr); T.learn(g, es, 'drones1', 'drones2');
+    const [c, e] = T.border(g, es, fr), base = T.baseFor(g, es, c, g.droneRange(es));
+    T.airfield(g, es, base); const sqs = T.squad(g, es, base, 4), sws = T.swarm(g, es, base, 4);
+    const mine = T.army(g, es, c, 10), foe = g.armyOn(e) ?? T.army(g, fr, e, 10);
+    T.eq(g.escortFactor(es, mine.id, 'atk'), null, 'sin escolta');
+    const fx0 = g.combatFactors(es, mine.units, c, foe, e, mine.id);
+    const f = [];
+    for (const q of sqs) { g.setEscort(q, { army: mine.id }, 'ataque'); f.push(g.escortFactor(es, mine.id, 'atk')[1]); }
+    T.near(f, [1.1, 1.21, 1.3, 1.3], 1e-9, '×1,1 por escuadrón, tope ×1,3');
+    T.eq(g.escortFactor(es, mine.id, 'def'), null, 'la de ataque no defiende');
+    const h = [];
+    for (const q of sws) { g.setEscort(q, { army: mine.id }, 'ataque'); h.push(g.escortFactor(es, mine.id, 'atk')[1] / 1.3); }
+    T.near(h, [1.05, 1.1025, 1.15, 1.15], 1e-9, '×1,05 por enjambre, tope ×1,15');
+    const fx = g.combatFactors(es, mine.units, c, foe, e, mine.id);
+    T.near(fx.atk, fx0.atk * 1.3 * 1.15, 1e-9, 'en el ataque');
+    T.eq(fx.attParts.map(([n]) => n), ['apoyo aéreo'], 'en el desglose del ataque');
+    // Una parte del ejército que ataca (attId 0, sale de él) también lo lleva; un ejército sin escolta, no.
+    T.near(g.combatFactors(es, { infantry: 5, tank: 0, artillery: 0 }, c, foe, e, 0, mine.id).attParts[0][1], 1.3 * 1.15, 1e-9, 'una parte');
+    // La que ya ha volado este turno no apoya.
+    for (const q of [...sqs, ...sws]) q.flown = g.turn;
+    T.eq(g.escortFactor(es, mine.id, 'atk'), null, 'ya han volado');
+    // En la defensa: escolta francesa del defensor.
+    const fb = T.baseFor(g, fr, e); T.airfield(g, fr, fb); const [d] = T.squad(g, fr, fb);
+    g.setEscort(d, { army: foe.id }, 'defensa');
+    const fx2 = g.combatFactors(es, mine.units, c, foe, e, mine.id);
+    T.eq(fx2.defState.parts.filter(([n]) => n === 'apoyo aéreo'), [['apoyo aéreo', 1.1]], 'en el desglose de la defensa');
+    T.near(fx2.dfn, fx0.dfn * 1.1, 1e-9, 'defensa ×1,1');
+    // El parte del combate lo cuenta.
+    T.luck(g, 0.5);
+    const n = g.logs.length;
+    g.attack(mine, c, e, g.reach(es, c, g.mp(mine), true));
+    T.ok(g.logs.slice(n).some(l => /×1,1 apoyo aéreo/.test(l.msg)), 'en el parte');
+    return true;
+}],
+['B4 · escolta de ataque golpea antes del combate', () => {
+    const run = (mode, { drones = false, fog = false } = {}) => {
+        const g = T.game(7, fog), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'drones1', 'drones2');
+        const [c, e] = T.border(g, es, fr), base = T.baseFor(g, es, c, g.droneRange(es));
+        T.airfield(g, es, base); const [q] = drones ? T.swarm(g, es, base) : T.squad(g, es, base);
+        const mine = T.army(g, es, c, 40), foe = g.armyOn(e) ?? T.army(g, fr, e, 20);
+        if (mode) g.setEscort(q, { army: mine.id }, mode);
+        const n = g.logs.length, before = countUnits(foe.units);
+        g.attack(mine, c, e, g.reach(es, c, g.mp(mine), true));
+        return { g, q, es, e, before, logs: g.logs.slice(n).map(l => l.msg), state: g.rng.state };
+    };
+    const none = run(null), idle = run('defensa');
+    T.eq([idle.state, idle.logs], [none.state, none.logs], 'sin escolta de ataque, el combate de siempre');
+    const att = run('ataque');
+    T.ok(/^Tu escuadrón ataca el ejército/.test(att.logs[0]), `primero el golpe: ${att.logs[0]}`);
+    T.ok(/apoyo aéreo/.test(att.logs[att.logs.length - 1]), `luego el combate: ${att.logs[att.logs.length - 1]}`);
+    T.eq(att.q.flown, att.g.turn, 'gasta su vuelo');
+    // Con drones, el defensor queda conocido: sin niebla para el golpe y para el parte.
+    const dr = run('ataque', { drones: true, fog: true });
+    T.ok(/^Tu enjambre ataca el ejército/.test(dr.logs[0]), `golpe de drones: ${dr.logs[0]}`);
+    T.ok(dr.g.droneRevealed(dr.es, dr.e), 'el defensor, conocido');
+    return true;
+}],
+['B4 · al fundirse, la escolta sigue al ejército nuevo', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es); T.bare(g);
+    const [c, n] = T.plainPair(g, es), base = T.baseFor(g, es, c);
+    T.airfield(g, es, base); const [q] = T.squad(g, es, base);
+    const a = T.army(g, es, c, 5), b = T.army(g, es, n, 5);
+    g.setEscort(q, { army: a.id }, 'defensa');
+    g.moveArmy(a, n, g.reach(es, c, g.mp(a), true));
+    T.eq([g.armies.has(a.id), q.task.army], [false, b.id], 'pasa al ejército con el que se funde');
+    T.eq(g.escortsOf(es, b.id).squadrons, [q], 'y lo escolta');
+    // Si se parte, se queda con el que tenía.
+    const part = g.split(b, { infantry: 2, tank: 0, artillery: 0 });
+    T.eq([q.task.army, g.escortsOf(es, part.id).squadrons.length], [b.id, 0], 'la parte va sin escolta');
+    // Si desaparece sin fundirse, queda libre al empezar su turno.
+    g.removeArmy(b);
+    T.eq(g.escortsOf(es, b.id).squadrons, [], 'sin ejército no escolta');
+    g.turn++; g.beginNationTurn(es);
+    T.eq(q.task, null, 'libre');
+    return true;
+}],
+['B4 · fuera de alcance queda suspendida', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [c] = T.border(g, es, fr), base = T.baseFor(g, es, c), R = g.airRange(es);
+    T.airfield(g, es, base); const [q] = T.squad(g, es, base);
+    const far = G.land.find(x => hexDist(base, x) > R + 1 && T.free(g, x));
+    const a = T.army(g, es, far, 5);
+    g.setEscort(q, { army: a.id }, 'defensa');
+    T.eq(g.escortsOf(es, a.id), { squadrons: [], swarms: [], suspended: [q] }, 'suspendida');
+    T.eq([g.escortFactor(es, a.id, 'def'), g.escortCovers(far)], [null, []], 'no hace nada');
+    // Vuelve a su alcance: escolta otra vez.
+    g.removeArmy(a); a.cell = c; g.armies.set(a.id, a); g.settle(a);
+    T.eq(g.escortsOf(es, a.id), { squadrons: [q], swarms: [], suspended: [] }, 'de nuevo');
+    T.eq(g.escortFactor(es, a.id, 'def'), ['apoyo aéreo', 1.1], 'y apoya');
+    return true;
+}],
+['B4 · escolta de una agrupación cubre a todos sus miembros', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [c1, e] = T.border(g, es, fr), [c2] = T.border(g, es, fr, 3), base = T.baseFor(g, es, c1);
+    T.airfield(g, es, base); const [q] = T.squad(g, es, base);
+    const a1 = T.army(g, es, c1, 5), a2 = T.army(g, es, c2, 5), lone = T.army(g, es, T.plainPair(g, es)[1], 5);
+    const gr = g.createGroup(es, [a1.id, a2.id]);
+    T.eq(g.setEscort(q, { group: gr.id }, 'defensa'), true, 'encargo');
+    T.eq(q.task, { kind: 'escort', army: 0, group: gr.id, mode: 'defensa' }, 'a la agrupación');
+    T.eq([g.interceptors(fr, 'army', c1), g.interceptors(fr, 'army', c2)], [[q], [q]], 'cubre a los dos');
+    T.eq([g.escortsOf(es, a1.id).squadrons, g.escortsOf(es, a2.id).squadrons, g.escortsOf(es, lone.id).squadrons], [[q], [q], []], 'solo a sus miembros');
+    // En ataque, apoya al primero que ataca en el turno.
+    g.setEscort(q, { group: gr.id }, 'ataque');
+    const foe = g.armyOn(e) ?? T.army(g, fr, e, 5);
+    T.luck(g, 0.5);
+    g.attack(a1, c1, e, g.reach(es, c1, g.mp(a1), true));
+    T.eq([q.flown, g.escortFactor(es, a2.id, 'atk')], [g.turn, null], 'el segundo ya no lo tiene');
+    T.ok(foe, 'había defensor');
+    return true;
+}],
+['B4 · la operación con «Proteger y escoltar» reparte escoltas', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    // Línea: la escolta va a defender al ejército más expuesto; el otro escuadrón protege como siempre.
+    const [c, e] = T.border(g, es, fr), base = T.baseFor(g, es, c);
+    T.airfield(g, es, base); const sqs = T.squad(g, es, base, 2);
+    const line = g.createOp(es, 'defensa', [c], { auto: 'auto' }); line.aims = ['patrol'];
+    const a = T.army(g, es, c, 8); g.assignArmy(a, line.id);
+    for (const q of sqs) g.assignSquadron(q, line.id);
+    if (!g.armyOn(e)) T.army(g, fr, e, 8);
+    g.opAir(line);
+    const esc = sqs.filter(q => q.task?.kind === 'escort');
+    T.eq(esc.map(q => [q.task.army, q.task.mode, q.op]), [[a.id, 'defensa', line.id]], 'una escolta de defensa, sin salir de la operación');
+    T.ok(sqs.some(q => q.task === null && q.patrol === c), 'el otro protege la casilla');
+    T.eq(g.interceptors(fr, 'army', c).length, 2, 'los dos salen al paso');
+    // Ofensiva: la escolta va en ataque con quien va a asaltar.
+    const [b2, t2] = T.pair(g, es, fr), off = g.createOp(es, 'ofensiva', [b2, t2], { auto: 'auto' }); off.aims = ['patrol'];
+    T.airfield(g, es, b2); const more = T.squad(g, es, b2, 2);
+    const near = G.land.filter(x => g.owner[x] === es && T.free(g, x)).sort((x, y) => hexDist(x, t2) - hexDist(y, t2))[0];
+    const m = T.army(g, es, near, 8); g.assignArmy(m, off.id);
+    for (const q of more) g.assignSquadron(q, off.id);
+    g.opAir(off);
+    T.eq(more.filter(q => q.task?.kind === 'escort').map(q => [q.task.army, q.task.mode]), [[m.id, 'ataque']], 'una escolta de ataque');
+    // Sin el fin, o al salir de la operación, la escolta se deshace.
+    off.aims = ['army']; g.opAir(off);
+    T.eq(more.map(q => q.task), [null, null], 'sin el fin, nada');
+    g.assignSquadron(esc[0], 0);
+    T.eq(esc[0].task, null, 'fuera de la operación, libre');
+    return true;
+}],
+['B4 · guardar y cargar la escolta', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es); T.bare(g); T.learn(g, es, 'drones1', 'drones2');
+    const [c, n] = T.plainPair(g, es), base = T.baseFor(g, es, c);
+    T.airfield(g, es, base); const [q, z] = T.squad(g, es, base, 2), [w] = T.swarm(g, es, base);
+    const a = T.army(g, es, c, 5), b = T.army(g, es, n, 5), gr = g.createGroup(es, [b.id]);
+    g.setEscort(q, { army: a.id }, 'ataque'); g.setEscort(w, { group: gr.id }, 'defensa'); g.setAirTask(z, { cell: c, aims: ['army'] });
+    const data = JSON.parse(JSON.stringify(g.serialize())), h = GameEngine.load(JSON.parse(JSON.stringify(data)));
+    T.eq([h.squadrons.get(q.id).task, h.swarms.get(w.id).task, h.squadrons.get(z.id).task], [q.task, w.task, z.task], 'encargos');
+    // Basura: ejército que no existe o ajeno, modo imposible.
+    data.air.sq.find(x => x[0] === q.id)[10] = [999999, 0, 1];
+    data.drones.sw.find(x => x[0] === w.id)[8] = [a.id, 0, 7];
+    const k = GameEngine.load(data);
+    T.eq([k.squadrons.get(q.id).task, k.swarms.get(w.id).task], [null, null], 'sin basura');
+    return true;
+}],
 ];
 
 const exe = process.env.CHROME ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome'].find(existsSync);
