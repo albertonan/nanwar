@@ -1139,6 +1139,45 @@ const CHECKS = [
     T.ok(s.logs.some(l => /el defensor cae antes del asalto: a tu ejército no le queda movimiento/.test(l)), `en el parte: ${s.logs.join(' | ')}`);
     return true;
 }],
+['Rev M4 · al cargar, enjambres y baterías solo en lo de su dueño', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); T.learn(g, es, 'drones1', 'defensa1');
+    const city = PROVINCES.find(p => g.owner[p.city] === es).city, theirs = PROVINCES.find(p => g.owner[p.city] === fr).city;
+    const [w] = T.swarm(g, es, city), bc = T.clear(g, es, 1); T.battery(g, es, bc);
+    const data = JSON.parse(JSON.stringify(g.serialize()));
+    data.drones.sw.find(x => x[0] === w.id)[2] = theirs;
+    data.defense.bat.find(x => x[0] === bc)[1] = fr;
+    const h = GameEngine.load(data), hw = h.swarms.get(w.id);
+    T.ok(hw && h.owner[hw.base] === es && CITY_OF[hw.base] >= 0, `el enjambre, en una ciudad suya: ${hw && hw.base}`);
+    T.eq(h.batteries.has(bc), false, 'la batería en tierra ajena, fuera');
+    T.eq(GameEngine.load(JSON.parse(JSON.stringify(g.serialize()))).batteries.has(bc), true, 'la buena se carga');
+    return true;
+}],
+['Rev M5 · un enjambre suelto recibe una operación desde su ficha', () => {
+    const g = T.uiStart('es'), es = g.player;
+    T.bare(g); T.learn(g, es, 'drones1');
+    const cap = g.nations[es].capitalCell, [w] = T.swarm(g, es, cap), op = g.createOp(es, 'defensa', [cap], { auto: 'auto' });
+    ui.setTool('air'); ui.clickCell(cap);
+    const sel = () => document.querySelector(`#card select[data-swarm-task="${w.id}"]`);
+    T.ok(sel() && /Encargo de los enjambres/.test(document.querySelector('#card').textContent), 'el selector');
+    sel().value = String(op.id); sel().dispatchEvent(new Event('change', { bubbles: true }));
+    T.eq(w.op, op.id, 'en la operación');
+    sel().value = '0'; sel().dispatchEvent(new Event('change', { bubbles: true }));
+    T.eq([w.op, w.task], [0, null], 'sin encargo');
+    return true;
+}],
+['Rev M6 · la ficha de una agrupación entera tiene su escolta', () => {
+    const g = T.uiStart('es'), es = g.player;
+    T.bare(g);
+    const [n, c] = T.plainPair(g, es), base = T.baseFor(g, es, c);
+    T.airfield(g, es, base); T.squad(g, es, base);
+    const a = T.army(g, es, c, 5), b = T.army(g, es, n, 5), gr = g.createGroup(es, [a.id, b.id]);
+    ui.setTool('command'); ui.select(c);
+    ui.onKey({ key: String(gr.num), code: `Digit${gr.num}`, altKey: true, shiftKey: false, ctrlKey: false, metaKey: false, preventDefault() {}, target: document.body });
+    T.ok(ui.sel.size === 2 && /Son toda la agrupación/.test(document.querySelector('#card').textContent), 'la agrupación elegida');
+    T.ok(document.querySelector(`#card select[data-escort-pick="g${gr.id}"]`), 'sección Escolta');
+    return true;
+}],
 ['Rev M7 · un ala con escuadrones y enjambres dibuja los dos alcances', () => {
     const g = T.uiStart('es'), es = g.player;
     T.bare(g); T.learn(g, es, 'drones1');
@@ -1148,6 +1187,31 @@ const CHECKS = [
     ui.setTool('air'); ui.pickWing(wing.id); ui.render();
     T.eq(ui.view.airPick.rings?.map(x => [x.bases, x.range]), [[[cap], g.airRange(es)], [[cap], g.droneRange(es)]], 'los dos alcances');
     ui.view.draw();
+    return true;
+}],
+['Rev M9 · escoltar desde una operación lo dice el parte', () => {
+    const g = T.game(), es = T.nation('es');
+    g.start(es); T.bare(g);
+    const [, c] = T.plainPair(g, es), base = T.baseFor(g, es, c);
+    T.airfield(g, es, base); const [q] = T.squad(g, es, base);
+    const op = g.createOp(es, 'defensa', [c], { auto: 'auto' }), a = T.army(g, es, c, 5);
+    g.assignSquadron(q, op.id);
+    g.playerEscort('squadron', q.id, { army: a.id }, 'defensa');
+    T.ok(g.logs[g.logs.length - 1].msg.includes(`deja ${op.name} y escolta`), g.logs[g.logs.length - 1].msg);
+    return true;
+}],
+['Rev M10 · la saturación de Drones 3 sale en la previsión y en el parte', () => {
+    const g = T.uiStart('es'), es = g.player, fr = T.nation('fr'), card = () => document.querySelector('#card').textContent;
+    g.declareWar(es, fr); T.bare(g); T.noIntegrated(g); T.learn(g, es, 'drones1', 'drones2', 'drones3');
+    const [base, target] = T.pair(g, es, fr, () => true, 3, g.droneRange(es));
+    T.swarm(g, es, base, 3);
+    if (g.armyOn(target)) g.removeArmy(g.armyOn(target));
+    T.army(g, fr, target, 5); T.site(g, fr, target).known.add(es);
+    ui.setTool('air'); ui.clickCell(base); ui.clickCell(target);
+    T.ok(/saturan el antiaéreo, ×0,5/.test(card()), 'en la previsión');
+    T.luck(g, 0.99);
+    document.querySelector('#card [data-action="drone-mission"][data-kind="army"]').click();
+    T.ok(g.logs.some(l => /saturan el antiaéreo, ×0,5/.test(l.msg)), `en el parte: ${g.logs[g.logs.length - 1].msg}`);
     return true;
 }],
 ];

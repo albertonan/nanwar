@@ -1755,6 +1755,7 @@ class GameEngine {
                     op: op && op.owner === owner ? op.id : 0, task: null, damaged: x?.[7] === 1, group: 0 });
             }
             g.nextSwarmId = Math.max(int(data.drones.next, 1, 1e9, 1), ...[...g.swarms.keys()].map(x => x + 1), 1);
+            g.droneSweep(true);   // los de una ciudad que ya no es de su dueño se mudan (o se pierden), sin parte
             for (const k of list(data.drones.hits)) if (Number.isInteger(k) && k >= 0 && k < G.N * 8) g.droneHits.set(k, g.turn);
             for (const x of list(data.drones.seen)) {
                 const k = x?.[0];
@@ -1768,7 +1769,7 @@ class GameEngine {
             const top = BATTERY_LEVELS[BATTERY_LEVELS.length - 1].cap;
             for (const x of list(data.defense.bat)) {
                 const c = int(x?.[0], -1, G.N - 1, -1);
-                if (c < 0 || !isLand(c) || g.batteries.has(c)) continue;
+                if (c < 0 || !isLand(c) || g.batteries.has(c) || g.owner[c] !== nat(x?.[1])) continue;   // en tierra de su dueño
                 const known = new Set(list(x?.[3]).filter(k => Number.isInteger(k) && k >= 0 && k < NN));
                 g.batteries.set(c, { owner: nat(x?.[1]), left: int(x?.[2], 0, CONFIG.BATTERY.TURNS, 0), known, used: int(x?.[4], 0, top, 0) });
             }
@@ -3029,7 +3030,8 @@ class GameEngine {
     }
     // Enjambres en una ciudad que ya no es de su dueño sin combate (un tratado, una provincia que cae entera...): vuelan a
     // la ciudad propia más cercana con sitio (la de casilla menor si empatan) y, si no hay ninguna, se pierden. Como airSweep.
-    droneSweep() {
+    // `quiet`: sin parte (al cargar una partida).
+    droneSweep(quiet = false) {
         let moved = 0, lost = 0;
         for (const q of [...this.swarms.values()]) {
             if (this.owner[q.base] === q.owner) continue;
@@ -3044,7 +3046,7 @@ class GameEngine {
         }
         const parts = [moved ? `${moved === 1 ? 'un enjambre vuela' : `${moved} enjambres vuelan`} a otra ciudad tuya` : '',
             lost ? `${lost === 1 ? 'uno se pierde' : `${lost} se pierden`} por no tener dónde ir` : ''].filter(Boolean);
-        if (parts.length) this.log(`Pierdes ciudades con drones: ${parts.join(' y ')}.`);
+        if (parts.length && !quiet) this.log(`Pierdes ciudades con drones: ${parts.join(' y ')}.`);
     }
     // ¿Sigue desvelada `cell` para `viewer` por un reconocimiento de sus drones? Dura ese turno y el siguiente.
     droneRevealed(viewer, cell) {
@@ -3255,7 +3257,7 @@ class GameEngine {
         const ev = { kind: 'air', drone: true, owner, from: [...new Set(fly.map(q => q.base))], cell, mission: kind, result: null };   // la vista lo anima
         this.note(ev);
         this.airVersion++;
-        let result = 'hit', effect = '', guards = [];
+        let result = 'hit', effect = '', guards = [], sat = false;   // sat: los que pasan saturan el antiaéreo que dispara
         if (kind === 'patrol') for (const q of fly) q.patrol = cell;
         else {
             guards = this.interceptors(owner, 'drone', cell);
@@ -3269,6 +3271,7 @@ class GameEngine {
                     const c = this.aaCover(owner, [...new Set(pass.map(q => q.base))], cell, { range: this.droneRange(owner) });
                     const S = pass.length * this.dronePower(owner), k = this.droneSaturation(owner, pass.length);
                     const o = this.airOdds(c.fire * k / S, c.loss * k / S, D.AA_DOWN);
+                    sat = k < 1 && (c.fire > 0 || c.loss > 0);
                     for (const x of c.sources) { const site = this.aaSites.get(x); if (site && site.left === 0) site.known.add(owner); }   // quien dispara se delata
                     for (const q of pass) {
                         const x = this.rng();
@@ -3284,19 +3287,19 @@ class GameEngine {
         ev.result = result;
         this.airVersion++;
         const down = fly.filter(q => !this.swarms.has(q.id)).length, damaged = fly.filter(q => this.swarms.has(q.id) && q.ready > this.turn).length;
-        const text = this.droneReport(owner, victim, kind, cell, fly.length, result, effect, down, damaged, guards);
+        const text = this.droneReport(owner, victim, kind, cell, fly.length, result, effect, down, damaged, guards, sat);
         if (owner === this.player) this.log(text);
         else this.droneDefenseReport(owner, victim, kind, cell, result, effect, down, guards);
         return { result, down, damaged, text };
     }
-    // Parte de una misión de enjambres para quien la manda.
-    droneReport(owner, victim, kind, cell, n, result, effect, down, damaged, guards) {
+    // Parte de una misión de enjambres para quien la manda. `sat`: los que pasaron saturaron el antiaéreo (Drones 3).
+    droneReport(owner, victim, kind, cell, n, result, effect, down, damaged, guards, sat = false) {
         const X = this.placeName(cell), many = n > 1, subj = many ? `Tus ${n} enjambres` : 'Tu enjambre', v = (one, more) => (many ? more : one);
         if (kind === 'patrol') return `${subj} ${v('patrulla', 'patrullan')} ${X} hasta tu próximo turno: ${v('sale', 'salen')} al paso de los drones enemigos contra esa casilla y sus vecinas.`;
         const what = kind === 'recon' ? `${v('reconoce', 'reconocen')} ${X}` : `${v('ataca', 'atacan')} el ejército de ${this.nm(victim)} en ${X}`;
         const outcome = result === 'hit' ? effect : result === 'miss' ? 'fracasa'
             : guards.length ? `los cazas de ${this.nm(guards[0].owner)} ${v('lo', 'los')} interceptan` : `las defensas ${v('lo', 'los')} interceptan`;
-        return `${subj} ${what}: ${outcome}. ${this.airFate(n, down, damaged)}`;
+        return `${subj} ${what}: ${outcome}.${sat ? ` Juntos saturan el antiaéreo, ×${decimal(CONFIG.DRONE.SAT_AA)}.` : ''} ${this.airFate(n, down, damaged)}`;
     }
     // Parte de una misión de enjambres enemiga para el jugador, si va contra lo suyo o sus cazas han salido a pararla.
     droneDefenseReport(owner, victim, kind, cell, result, effect, down, guards) {
@@ -3480,6 +3483,13 @@ class GameEngine {
     playerAssignSquadron(sqId, opId) {
         const q = this.squadrons.get(sqId);
         return !!q && q.owner === this.player && !this.over && this.assignSquadron(q, opId);
+    }
+    // Un enjambre suelto del jugador a la operación `opId` (0: a ninguna, y sin escolta).
+    playerAssignSwarm(swId, opId) {
+        const q = this.swarms.get(swId);
+        if (!q || q.owner !== this.player || this.over || !this.assignSquadron(q, opId)) return false;
+        if (!opId) this.clearEscort(q);
+        return true;
     }
     // Orden de zona del jugador (null la quita); el parte la confirma.
     playerAirTask(sqId, task) {
@@ -3695,17 +3705,18 @@ class GameEngine {
         }
     }
     // El jugador encarga la escolta a su escuadrón o enjambre (`kind` 'squadron' o 'swarm'); sin `ref`, la quita. El
-    // parte lo confirma y avisa si lo escoltado está fuera de su alcance.
+    // parte lo confirma, dice la operación que deja (si estaba en una) y avisa si lo escoltado está fuera de su alcance.
     playerEscort(kind, id, ref, mode) {
         const q = (kind === 'swarm' ? this.swarms : this.squadrons).get(id);
         if (!q || q.owner !== this.player || this.over) return false;
         if (!ref) return this.clearEscort(q);
         if (kind === 'swarm' && !this.rules(q.owner).droneEscort) { this.log('Para escoltar con drones hace falta investigar Municiones merodeadoras (Drones 2).'); return false; }
+        const was = q.op ? this.ops.get(q.op) : null;
         if (!this.setEscort(q, ref, mode)) return false;
         const t = q.task, members = t.group ? this.groupMembers(q.owner, t.group) : [this.armies.get(t.army)];
         const what = t.group ? this.groupById(q.owner, t.group).name : `el ejército de ${this.placeName(members[0].cell)}`;
         const far = members.length > 0 && members.every(a => !this.escortReach(q, a));
-        this.log(`${kind === 'swarm' ? 'El enjambre' : 'El escuadrón'} ${q.id} escolta a ${what} en ${mode}${far ? ', pero está fuera de su alcance: no hará nada hasta que vuelva a él' : ''}.`);
+        this.log(`${kind === 'swarm' ? 'El enjambre' : 'El escuadrón'} ${q.id}${was ? ` deja ${was.name} y` : ''} escolta a ${what} en ${mode}${far ? ', pero está fuera de su alcance: no hará nada hasta que vuelva a él' : ''}.`);
         return true;
     }
 
@@ -10821,12 +10832,12 @@ class GameUI {
         const base = A.base >= 0 ? this.airBaseSection() : '', task = A.base >= 0 ? this.airTaskSection() : '', nest = this.nestShown() ? this.droneNestSection() : '';
         // Contra el blanco, una sección para los escuadrones y otra para los enjambres, cada una si van o si no van los otros.
         const sqT = A.target >= 0 && A.base >= 0 && (A.picked.size > 0 || !A.drones.size), drT = A.target >= 0 && !!nest && (A.drones.size > 0 || !sqT);
-        const target = sqT ? this.airTargetSection() : '', drones = drT ? this.droneTargetSection() : '';
+        const target = sqT ? this.airTargetSection() : '', drones = drT ? this.droneTargetSection() : '', dtask = nest ? this.droneTaskSection() : '';
         // Un ala elegida tiene su ficha y su sección contra el blanco; si no, la lista de las alas (y guardar lo elegido).
         const wing = A.wing ? this.wingSection() : '', wingT = A.wing && A.target >= 0 ? this.wingTargetSection() : '', wings = A.wing ? '' : this.wingsSection();
         // En el móvil, el blanco va primero (o la orden de zona que se está dando): es lo que se ve en la hoja a media altura.
-        const order = isMobile() ? (A.mode === 'zone' ? [task, target, drones, base, nest, wings] : [wingT, wing, target, drones, base, nest, task, wings])
-            : [wing, wingT, base, task, nest, target, drones, wings];
+        const order = isMobile() ? (A.mode === 'zone' ? [task, target, drones, base, nest, wings] : [wingT, wing, target, drones, base, nest, task, dtask, wings])
+            : [wing, wingT, base, task, nest, dtask, target, drones, wings];
         const sections = [...order, focus >= 0 && isLand(focus) && g.owner[focus] === p0 ? this.airBuildSection(focus) : ''].filter(Boolean);
         // Los satélites, al final y solo con la ficha ya abierta (en el móvil no se abre la hoja por ellos); mientras se
         // elige su centro, en el móvil van primero.
@@ -10934,6 +10945,18 @@ class GameUI {
             <p class="note">Vuela a partir del turno que viene, con la mitad de la fuerza de un escuadrón y sin aeródromo. Caben ${D.PER_CITY} por ciudad${full ? ' y esta ya está llena' : ''}; si toman la ciudad, se pierden.</p>`
                 : '<p class="note">Para comprar más hace falta investigar Drones tácticos.</p>'}</section>`;
     }
+    // «Encargo de los enjambres»: lo que hace cada enjambre de la ciudad por su cuenta, como el de los escuadrones: volar
+    // con una operación o nada (la escolta se da en la ficha de lo escoltado). Una misión a mano gana a su encargo ese turno.
+    droneTaskSection() {
+        const g = this.game, p0 = g.player, A = this.air, ops = g.opsOf(p0), sws = g.swarmsAt(A.nest).filter(q => q.owner === p0).sort((a, b) => a.id - b.id);
+        if (!sws.length) return '';
+        const rows = sws.map(q => `<label class="air-task"><span>Enjambre ${q.id}</span><select data-swarm-task="${q.id}" aria-label="Encargo del enjambre ${q.id}">
+            <option value="0" ${!q.op && !q.task ? 'selected' : ''}>Sin encargo</option>
+            ${ops.map(o => `<option value="${o.id}" ${q.op === o.id ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}
+            ${!q.op && q.task?.kind === 'escort' ? `<option value="escort" selected disabled>Escolta en ${q.task.mode}</option>` : ''}</select></label>`).join('');
+        return `<section class="sec"><h3>Encargo de los enjambres</h3>${rows}
+            <p class="note">Con una operación vuela solo cada turno con ella: reconoce antes sus blancos y, con Municiones merodeadoras, escolta a sus ejércitos si la operación protege y escolta. Una misión a mano gana a su encargo ese turno; al siguiente vuelve a él.</p></section>`;
+    }
     // «Drones contra X»: las misiones de los enjambres elegidos con su previsión, hecha solo con lo que sabes (también las
     // baterías y los drones que patrullan y conoces), y sus avisos.
     droneTargetSection() {
@@ -10942,8 +10965,8 @@ class GameUI {
         const head = `<section class="sec"><h3>Drones contra ${esc(afloat(c) ? `el mar junto a ${PROVINCES[SEA_PROV[c]].name}` : g.placeName(c))}</h3>`;
         if (!sws.length) return `${head}<p class="small muted">Ningún enjambre listo: marca en ${esc(g.placeName(A.nest))} los que pueden volar.</p></section>`;
         if (!fly.length) return `${head}<p class="note warn">Fuera de alcance: está a ${plural(hexDist(A.nest, c), 'casilla', 'casillas')} y tus enjambres llegan a ${g.droneRange(p0)}.</p></section>`;
-        const rows = [], warn = new Set(), R = kmCells(CONFIG.DRONE.RECON_KM);
-        let seen = '', stop = '';
+        const rows = [], warn = new Set(), R = kmCells(CONFIG.DRONE.RECON_KM), sat = g.droneSaturation(p0, fly.length);
+        let seen = '', stop = '', satNote = '';
         for (const kind of Object.keys(DRONE_KINDS)) {
             const o = g.droneOdds(p0, sws, kind, c);
             if (o.why && o.why !== AIR_BLOCKED) continue;   // la misión no cabe en esta casilla
@@ -10961,12 +10984,13 @@ class GameUI {
                 if (o.patrol) warn.add(`Lo protegen cazas enemigos: ${Math.round(o.patrol)} de fuerza contra los ${Math.round(o.power)} de tus enjambres.`);
                 if (o.through < fly.length - 0.05) stop = `Las defensas que conoces pararían unos ${decimal(Math.round((fly.length - o.through) * 10) / 10)} de tus ${fly.length} enjambres (baterías automáticas y drones que patrullan).`;
                 if (o.fire || o.loss) seen = `Antiaéreo que conoces: ${Math.round(o.fire)} de fuerza sobre el blanco${o.loss > o.fire ? ' y más en el camino' : ''}, contra los ${Math.round(o.power)} de tus enjambres. A los drones los derriba con más facilidad que a los aviones.`;
+                if (sat < 1) satNote = `Tus ${fly.length} enjambres juntos saturan el antiaéreo, ×${decimal(sat)} (Enjambres autónomos): ya va en la previsión.`;
             }
             rows.push(`<div class="air-mission"><button class="btn" data-action="drone-mission" data-kind="${kind}" ${o.why ? 'disabled' : ''}>${DRONE_KINDS[kind]}</button>${what}</div>`);
         }
         if (!rows.length) rows.push(`<p class="small muted">${isLand(c) && g.owner[c] !== p0 && !g.allied(p0, g.owner[c]) && !g.atWar(p0, g.owner[c]) ? 'Solo contra un país con el que estás en guerra.' : 'Aquí no hay nada que hacer con drones.'}</p>`);
         const away = fly.length < sws.length ? `<p class="note">Va${fly.length === 1 ? '' : 'n'} ${fly.length}: los demás no llegan.</p>` : '';
-        const notes = [seen, stop].filter(Boolean).map(x => `<p class="note">${x}</p>`).join('') + [...warn].map(w => `<p class="note warn">${w}</p>`).join('');
+        const notes = [seen, satNote, stop].filter(Boolean).map(x => `<p class="note">${x}</p>`).join('') + [...warn].map(w => `<p class="note warn">${w}</p>`).join('');
         return `${head}${rows.join('')}${away}${notes}</section>`;
     }
     // «Alas»: las del jugador (un clic elige una entera) y, con algo elegido fuera de un ala, guardarlo como ala nueva o
@@ -11063,7 +11087,8 @@ class GameUI {
         }
         if (!rows.length) rows.push(`<p class="small muted">${isLand(c) && g.owner[c] !== p0 && !g.allied(p0, g.owner[c]) && !g.atWar(p0, g.owner[c]) ? 'Solo contra un país con el que estás en guerra.' : 'No hay nada que conozcas que atacar aquí.'}</p>`);
         const away = fq.length + fw.length < sqs.length + sws.length ? `<p class="note">Van ${fq.length + fw.length} de ${sqs.length + sws.length}: los demás no llegan.</p>` : '';
-        return `${head}${rows.join('')}${away}${[...warn].map(w => `<p class="note warn">${w}</p>`).join('')}</section>`;
+        const k = g.droneSaturation(p0, fw.length), sat = k < 1 ? `<p class="note">Sus ${fw.length} enjambres juntos saturan el antiaéreo, ×${decimal(k)} (Enjambres autónomos): ya va en la previsión.</p>` : '';
+        return `${head}${rows.join('')}${away}${sat}${[...warn].map(w => `<p class="note warn">${w}</p>`).join('')}</section>`;
     }
     // «Satélites» (con Espacio): los tuyos en órbita, con los turnos que les quedan, y el lanzamiento de otro; el siguiente
     // clic en el mapa elige el centro de lo que vigila.
@@ -11878,6 +11903,7 @@ class GameUI {
         if (e.target.id === 'peace-keep') { this.peace.keep = e.target.checked; this.renderPeaceDialog(); }
         if (e.target.dataset.opAssign !== undefined) { this.game.assignArmy(this.selectedArmy(), +e.target.value); this.render(); }
         if (e.target.dataset.airTask !== undefined) this.airTaskChange(+e.target.dataset.airTask, e.target.value);
+        if (e.target.dataset.swarmTask !== undefined && e.target.value !== 'escort') { this.game.playerAssignSwarm(+e.target.dataset.swarmTask, +e.target.value); this.render(); }
         if (e.target.dataset.wingTask !== undefined) this.wingTaskChange(+e.target.dataset.wingTask, e.target.value);
         if (e.target.dataset.wingName !== undefined) {   // nombre de un ala; vacío, vuelve al automático
             const g = this.game, gr = g.player === null ? null : g.wingById(g.player, +e.target.dataset.wingName);
@@ -12296,7 +12322,7 @@ class GameUI {
                     <span><b>${countUnits(a.units)}</b> en ${esc(g.placeName(a.cell))} ${tag(a)}<small>${status(a)}</small></span></button>
                 <button class="btn ghost" data-action="sel-remove" data-id="${a.id}" aria-label="Quitar de la selección" title="Quitar de la selección">✕</button>
             </div>`).join('');
-        const ao = gr?.order;
+        const ao = gr?.order, escort = gr ? this.escortBox({ group: gr.id }) : '';
         const assault = ao ? `<p class="note">Ataque coordinado contra ${esc(g.placeName(ao.target))}, con ${decimal(ao.ratio)} a 1 o más: ${ao.waitSince
             ? `el primero llegó a su casilla en el turno ${ao.waitSince}; atacan cuando estén todos o a los ${GROUP_WAIT} turnos, si les da la relación de fuerzas (si no, esperan)`
             : 'van a sus casillas de partida, una por lado'}.</p>` : '';
@@ -12340,7 +12366,7 @@ class GameUI {
                 ${ops.length ? `<div class="row" style="margin-top:8px"><span class="small">Operación</span><select data-sel-op style="flex:1"><option value="0">Ninguna</option>${ops.map(o => `<option value="${o.id}" ${xs.every(a => a.op === o.id) ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select>
                     <button class="btn" data-action="sel-op">Asignar</button></div>` : ''}
                 <p class="note">Las órdenes valen para cada ejército, como las de uno solo: se cumplen al terminar el turno o con «Ejecutar órdenes» (O).</p>
-            </section>`;
+            </section>${escort ? `<section class="sec"><h3>Escolta</h3>${escort}</section>` : ''}`;
     }
 
     // Qué hace un ejército con orden, en una frase.
