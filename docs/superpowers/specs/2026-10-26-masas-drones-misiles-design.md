@@ -410,21 +410,22 @@ Dos ramas nuevas en el área Militar:
 
 ### E1 · Cada guerra tiene un motivo
 - **(Decisión mía)** Al declarar una guerra se guarda en la relación (`rel`):
-  - `war = { by, goal, since, start }`;
+  - `war = { by, goal, since, gain }`;
   - `by` es quien la declaró;
   - `goal` es su objetivo:
-    - **conquista**: las provincias fronterizas del atacado que tocan al atacante, las que elige la IA para su ataque;
+    - **conquista**: las provincias fronterizas del atacado que tocan al atacante, las que elige la IA para su ataque. Son las suyas de derecho (`legal`) y en su poder: lo que el atacado solo ocupa de un tercero no entra;
     - **defensa**: para el atacado;
     - **alianza**: para quien entra a defender a un aliado;
     - **señor**: para el satélite que entra por su señor;
-  - `start` es cuántas casillas legales tenía cada bando al empezar, para medir lo ganado y lo perdido.
+  - `gain` es lo más que ha llegado a ocupar cada bando del otro y en qué turno, para saber si la guerra se estanca. Se apunta una vez por turno, al empezar la fase de la IA; mirar la guerra no cambia nada.
+  - **(Revisión final)** Lo ganado y lo perdido se mide por lo ocupado entre los dos bandos, no con las casillas legales al empezar: el campo `start` que se pensó para eso se quita (las paces con terceros lo falseaban).
 - Las guerras de partidas viejas cargan sin `by`, porque no se sabe quién empezó, y se tratan como si ninguno la hubiera empezado.
 
 ### E2 · Los aliados deciden si entran
 - **(Usuario)** El aliado que no quiere entrar no declara la guerra.
 - **(Decisión mía)** Cuando atacan a un miembro de su bloque, cada aliado de la IA decide si entra:
   - **Entra seguro** si comparte frontera con el atacante o con el atacado y el bando defensor, con él dentro, suma al menos el 70 % de la fuerza del bando atacante.
-  - **Si no**, entra con una probabilidad que crece con la fuerza del bando defensor frente al atacante (de 0 a 0,8). Si el aliado es mucho más débil que el atacante (menos de un 15 % de su fuerza), no entra.
+  - **Si no**, entra con una probabilidad que crece con la fuerza del bando defensor frente al atacante (de 0 a 0,8). Si el aliado es mucho más débil que el atacante (menos de un 15 % de su fuerza, la del país atacante solo, sin sus aliados ni satélites), no entra.
   - **El que no entra** no está en guerra. El registro dice «X no acude en defensa de Y». Si el bloque es público, pierde la confianza del atacado: deja el bloque con un 30 % de probabilidad.
 - Los satélites siguen entrando siempre en las guerras de su señor, como hoy.
 - El jugador aliado sigue recibiendo la llamada y decidiendo él, como hoy.
@@ -433,17 +434,19 @@ Dos ramas nuevas en el área Militar:
 - **(Decisión mía)** La fuerza se mide **por bandos**: cada uno con sus aliados en esa misma guerra y sus satélites. Ya no se compara un país contra otro solo.
 - **(Decisión mía)** Hay un **mínimo de 8 turnos de guerra** antes de proponer o aceptar la paz. Solo hay una salida antes: estar **vencido** (capital ocupada, el 40 % de su tierra ocupada o menos de un tercio de la fuerza del otro bando). El vencido puede pedirla en cualquier momento.
 - **(Usuario)** Pasado ese mínimo, un país quiere la paz (proponerla o aceptarla) si se cumple al menos una de estas condiciones:
-  1. **Objetivo cumplido**: el atacante tiene ocupadas todas las provincias de su objetivo, o la mitad si lleva más de `peaceAfter` turnos. Entonces quiere la paz quedándose lo ocupado.
+  1. **Objetivo cumplido**: el atacante tiene ocupadas todas las provincias de su objetivo, o la mitad si lleva más de `peaceAfter` turnos. Entonces quiere la paz quedándose lo ocupado. **(Revisión final)** Las provincias del objetivo que dejan de ser de derecho del atacado (otro país se las anexiona en otra paz) salen del objetivo: ya no se le pueden quitar a él. Si no queda ninguna, el objetivo está cumplido.
   2. **Se ve igual o inferior**: la fuerza de su bando es menos de 1,25 veces la del otro.
   3. **Ha perdido territorio**: el otro bando le ocupa más casillas de las que él le ocupa.
-  4. **No la empezó él** (defensa, alianza o señor), y la guerra lleva más de `peaceAfter` turnos sin que gane terreno en los últimos 6.
-- **(Usuario)** Si es muy superior (su bando tiene 1,25 veces la fuerza del otro o más), no ha perdido territorio, la empezó él y aún no ha cumplido su objetivo, **ni propone ni acepta** la paz.
+  4. **Ha pasado un tiempo** (para todos, también para quien la empezó): la guerra lleva más de `peaceAfter` turnos y no ha ganado terreno en los últimos 6 (**estancada**); o lleva `2 × peaceAfter` turnos o más (**dura ya demasiado**), en cuyo caso la quiere siempre.
+- **(Usuario)** Si es muy superior (su bando tiene 1,25 veces la fuerza del otro o más), no ha perdido territorio, la empezó él y aún no ha cumplido su objetivo, **ni propone ni acepta** la paz, hasta que «ha pasado un tiempo» (condición 4).
+- **(Revisión final)** Antes, la condición 4 valía solo para quien no la empezó. Así, un objetivo que se volvía imposible (una provincia que el atacado solo ocupaba y que volvía a su dueño, o que tomaba un tercero) dejaba a los dos países en guerra para siempre; con el jugador como defensor, sin salida. La salida por tiempo es la de las palabras del usuario: «solo si ha pasado un tiempo». Coste: alguna guerra larga termina sin que el fuerte cumpla su objetivo.
 - **(Decisión mía)** Fuera el azar: dos IA firman la paz solo si las dos la quieren según estas reglas. Ya no hay un 30 % al azar.
 - **(Decisión mía)** Una paz firmada da la tregua de siempre (`TRUCE_TURNS`). Después de una guerra, la IA no vuelve a declarar la guerra al mismo país hasta pasados otros 10 turnos.
 - **Con el jugador:**
   - La IA propone la paz al jugador con las mismas reglas.
-  - Acepta la del jugador con las mismas reglas.
-  - Además acepta, como hoy, «quedarse lo ocupado» si va ganando, y ser satélite solo si está vencida.
+  - Acepta la del jugador con las mismas reglas, pero una **paz blanca** solo si está vencida o si no pierde nada con ella (no ocupa más del bando del jugador de lo que este le ocupa). **(Revisión final)** Con el objetivo cumplido quiere la paz quedándose lo ocupado: si aceptase la blanca, bastaría con dejarla cumplir su objetivo para que lo devolviera todo. Cuando propone la paz por eso, el diálogo dice que aceptará anexionar lo ocupado y no una paz blanca.
+  - Además acepta, como hoy, «quedarse lo ocupado» si va ganando y no la empezó ella, y ser satélite solo si está vencida. Vencida se mide por bandos, así que al jugador le cuentan sus aliados en esa guerra; el diálogo de paz lo dice («su bando está vencido: el tuyo…»).
+  - El aliado de la IA al que el jugador llama a su guerra no acude contra un país con el que firmó la paz hace menos de `TRUCE_TURNS` + 10 turnos (la misma tregua extra que al declarar).
 
 ### E4 · Declarar la guerra
 - **(Decisión mía)** La IA declara la guerra con un objetivo y contando con lo que pasará:
@@ -454,10 +457,11 @@ Dos ramas nuevas en el área Militar:
 ### E5 · Que se vea
 - **En el cajón de Países, para cada guerra del jugador:**
   - quién la empezó, el motivo, cuántos turnos lleva y la fuerza de cada bando;
-  - y lo que hace falta para que el otro acepte la paz, por ejemplo: «No aceptará la paz: se ve muy superior y aún no ha cumplido su objetivo. Lo hará si pierde territorio, si se igualan fuerzas o dentro de 4 turnos si se estanca».
+  - y lo que hace falta para que el otro acepte la paz, por ejemplo: «No aceptará la paz: se ve muy superior y aún no ha cumplido su objetivo. Lo hará si pierde territorio, si se igualan fuerzas, cuando cumpla su objetivo, dentro de 4 turnos si se estanca y, en todo caso, dentro de 18 turnos».
+  - Con niebla la frase no deja ver la fuerza del otro bando: si aceptaría por verse inferior o vencido, dice solo «Aceptaría la paz»; si no, «no sabes cuánta fuerza reúne su bando» y las vías (sin la del objetivo si no la empezó él). Si no la empezó él y te ocupa más de lo que le ocupas, dice que aún puede aceptar que cada uno se quede lo ocupado.
 - **En el registro:**
   - «X no acude en defensa de Y»;
-  - «X propone la paz: ha cumplido su objetivo» (o «se ve inferior», «ha perdido territorio», «la guerra se ha estancado»).
+  - «X propone la paz: ha cumplido su objetivo» (o «se ve inferior», «ha perdido territorio», «la guerra se ha estancado», «la guerra dura ya demasiado», «está vencido»). La primera vez y luego cada 5 turnos mientras la propuesta siga en pie; la propuesta y el aviso, cada turno.
 - **Medida de éxito:** en 30 turnos de Europa y del mundo con «Caos total», casi ninguna guerra dura 1 o 2 turnos. Solo valen las de un país vencido de verdad.
 
 ---
