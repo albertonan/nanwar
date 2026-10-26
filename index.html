@@ -1112,6 +1112,9 @@ const ECHELONS = [
     { max: Infinity, mark: 'XXXXX', name: 'grupo de ejércitos', range: '1500 o más' }
 ];
 const echelonOf = n => ECHELONS.find(e => n <= e.max);
+// Lo más que puede ser un ejército de n unidades que no se conoce (niebla de guerra): el tope de su escalón; el último
+// no tiene tope, así que se supone de 3000.
+const echelonCeil = n => Math.min(echelonOf(n).max, 3000);
 const FORT_LEVELS = ['sacos terreros', 'hormigón armado', 'búnkeres', 'casamatas'];
 // Cómo se dibuja la fortificación de cada nivel: relleno, muro (oscuro y claro) y sus grosores.
 const FORT_STYLE = {
@@ -3060,8 +3063,7 @@ class GameEngine {
     // supone lo peor de su escalón en infantería, para que la orden no use información que el jugador no tiene.
     expectedRatio(owner, units, from, def, cell, attId = 0) {
         if (this.intel(owner, def.owner, cell).exact) { const fx = this.combatFactors(owner, units, from, def, cell, attId); return fx.atk / fx.dfn; }
-        const n = countUnits(def.units), guess = n <= 3 ? 3 : n <= 9 ? 9 : n <= 24 ? 24 : 40;
-        const fx = this.combatFactors(owner, units, from, { owner: def.owner, units: { infantry: guess, tank: 0, artillery: 0 } }, cell, attId);
+        const fx = this.combatFactors(owner, units, from, { owner: def.owner, units: { infantry: echelonCeil(countUnits(def.units)), tank: 0, artillery: 0 } }, cell, attId);
         return fx.atk / fx.dfn;
     }
     orderTarget(a) {
@@ -3356,8 +3358,7 @@ class GameEngine {
     seenPower(viewer, a, kind) {
         const r = this.rules(a.owner);
         if (this.intel(viewer, a.owner, a.cell).exact) return unitPower(a.units, kind, r);
-        const n = countUnits(a.units);
-        return unitPower({ infantry: n <= 3 ? 3 : n <= 9 ? 9 : n <= 24 ? 24 : 40, tank: 0, artillery: 0 }, kind, r);
+        return unitPower({ infantry: echelonCeil(countUnits(a.units)), tank: 0, artillery: 0 }, kind, r);
     }
     // Unidades que `viewer` sabe seguro que tiene el ejército `a`: todas si lo conoce; si no, las menos de su escalón
     // (un batallón, II, puede ser una sola).
@@ -4471,6 +4472,57 @@ class GameEngine {
         if (!def) { this.settle(army); return; }
         this.battle(army, def, target);
     }
+    // Ejércitos de `owner` que pueden atacar `target` este turno (está entre sus ataques, les queda movimiento y no han
+    // atacado ya), cada uno con la casilla desde la que atacaría y su alcance. Con `ids` (un Set), solo esos.
+    jointCandidates(owner, target, ids = null) {
+        const out = [];
+        for (const a of this.armies.values()) {
+            if (a.owner !== owner || a.used >= 999 || (ids && !ids.has(a.id)) || !this.inStrike(a, target)) continue;
+            const r = this.reach(owner, a.cell, this.mp(a), a.used === 0), from = r.attacks.get(target);
+            if (from !== undefined) out.push({ army: a, from, r });
+        }
+        return out;
+    }
+    // ¿Puede quedar `target` al alcance de un ataque de `a` este turno? Cota sin calcular el camino: le queda movimiento y
+    // no está más lejos de lo que da el paso más barato (carretera o terreno), más el paso mínimo de un ejército fresco y
+    // la casilla del ataque.
+    inStrike(a, target) {
+        const mp = this.mp(a);
+        if (mp <= 0) return false;
+        const rl = this.rules(a.owner), step = Math.min(MOVE * Math.min(...Object.values(rl.terrainCost)), ...Object.values(rl.roadMove));
+        return hexDist(a.cell, target) <= Math.floor(mp / step) + 2;
+    }
+    // Factores de un ataque conjunto: cada parte ({ units, from, id }) ataca con su estado, su asalto anfibio si sale del
+    // mar y, si cruza un río sin Pontoneros, ÷ CONFIG.RIVER_DEFENSE (lo que hoy es la defensa ×1,25, pero solo para él).
+    // El ataque es la suma; la defensa, la de combatFactors sin el río.
+    jointFactors(owner, parts, def, cell) {
+        const sea = afloat(cell), ignore = this.rules(owner).ignoreRiver;
+        const all = parts.map(p => this.combatFactors(owner, p.units, p.from, def, cell, p.id));
+        const members = parts.map((p, i) => {
+            const d = G.dirTo(p.from, cell), river = !sea && !ignore && d >= 0 && !!RIVER[p.from * 6 + d];
+            return { id: p.id, atk: all[i].atk / (river ? CONFIG.RIVER_DEFENSE : 1), attState: all[i].attState, attParts: all[i].attParts, river };
+        });
+        const f = all[0], fparts = f.parts.filter(([n]) => n !== 'río');
+        const raw = fparts.reduce((m, [, x]) => m * x, 1), bonus = Math.min(raw, f.cap);
+        return { atk: members.reduce((s, m) => s + m.atk, 0), dfn: Math.max(0.5, f.baseDef * bonus * f.defState.mult),
+            baseAtk: all.reduce((s, x) => s + x.baseAtk, 0), baseDef: f.baseDef, parts: fparts, bonus, cap: f.cap, capped: raw > bonus,
+            defState: f.defState, members };
+    }
+    // Ataque de varios ejércitos a la vez ([{ army, from, r }], como jointCandidates). Uno solo ataca como siempre; varios
+    // van cada uno a su casilla de ataque y combaten juntos.
+    attackJoint(list, target) {
+        if (list.length === 1) { const [{ army, from, r }] = list; this.attack(army, from, target, r); return; }
+        const atts = [];
+        for (const { army, from, r } of list) {
+            if (!this.armies.has(army.id)) continue;   // se juntó con otro participante al llegar
+            const a = from !== army.cell ? this.moveArmy(army, from, r) : army;
+            if (!atts.includes(a)) atts.push(a);
+        }
+        const def = this.armyOn(target);
+        if (!def) { for (const a of atts) this.settle(a); return; }
+        if (atts.length === 1) this.battle(atts[0], def, target);
+        else this.jointBattle(atts, def, target);
+    }
 
     // Factores de un combate, sin azar: sirven para resolverlo, preverlo y explicarlo.
     // `attId` es el ejército que ataca, para no contarlo como su propio apoyo; `def.id`, el que defiende. Para prever el
@@ -4524,47 +4576,100 @@ class GameEngine {
         att.used = 999;
         let retreatNote = '';
         if (attWins) {
-            this.removeArmy(def);
-            const retreat = countUnits(def.units) > 0 ? this.retreatCell(def, cell) : -1;
-            if (sea && retreat < 0) {   // sin costa propia a la que arrimarse, el barco vencido se va a pique entero
-                retreatNote = countUnits(def.units) > 0 ? '; sus supervivientes se hunden' : '; el barco se hunde';
-                if (this.involvesPlayer(def.owner)) this.log(`Hundido frente a ${p.name}: se pierden ${nD0} unidades.`);
-            } else if (countUnits(def.units) > 0) {
-                if (retreat >= 0) {
-                    const joins = !!this.armyOn(retreat);
-                    this.note({ kind: 'move', id: def.id, owner: def.owner, type: dominantType(def.units), n: countUnits(def.units), cells: [cell, retreat] });
-                    def.cell = retreat; def.used = 999; this.armies.set(def.id, def); this.settle(def);
-                    retreatNote = joins ? `; sus ${countUnits(def.units)} supervivientes se retiran y se unen a otro ejército suyo` : '; sus supervivientes se retiran a una casilla vecina';
-                } else retreatNote = '; sin sitio para retirarse, sus supervivientes se rinden';
-            }
+            retreatNote = this.rout(def, cell, sea, p, nD0);
             if (sea) this.settle(att);   // el mar no se ocupa: el atacante se queda donde estaba
-            else {
-                if (this.armyAt[att.cell] === att.id) this.armyAt[att.cell] = 0;
-                this.note({ kind: 'move', id: att.id, owner: att.owner, type: dominantType(att.units), n: countUnits(att.units), cells: [from, cell] });
-                att.cell = cell;
-                this.settle(att);
-                if (this.owner[cell] !== att.owner) this.capture(cell, att.owner, true);
-            }
+            else this.occupy(att, from, cell);
         } else {
             if (countUnits(att.units) === 0) this.removeArmy(att);
             else this.settle(att);
         }
         if (this.involvesPlayer(att.owner, def.owner)) this.log(this.battleReport(att.owner, def.owner, p, fx, atk, dfn, attWins, nA0, nD0, nA0 - countUnits(lostA), nD0 - countUnits(lostD), retreatNote));
     }
+    // El defensor vencido deja la casilla: se retira a una vecina propia o aliada libre, se rinde si no la hay o, en el mar
+    // sin costa propia al lado, se hunde. Devuelve la coletilla del parte.
+    rout(def, cell, sea, p, nD0) {
+        this.removeArmy(def);
+        const left = countUnits(def.units), retreat = left > 0 ? this.retreatCell(def, cell) : -1;
+        if (sea && retreat < 0) {   // sin costa propia a la que arrimarse, el barco vencido se va a pique entero
+            if (this.involvesPlayer(def.owner)) this.log(`Hundido frente a ${p.name}: se pierden ${nD0} unidades.`);
+            return left > 0 ? '; sus supervivientes se hunden' : '; el barco se hunde';
+        }
+        if (!left) return '';
+        if (retreat < 0) return '; sin sitio para retirarse, sus supervivientes se rinden';
+        const joins = !!this.armyOn(retreat);
+        this.note({ kind: 'move', id: def.id, owner: def.owner, type: dominantType(def.units), n: left, cells: [cell, retreat] });
+        def.cell = retreat; def.used = 999; this.armies.set(def.id, def); this.settle(def);
+        return joins ? `; sus ${countUnits(def.units)} supervivientes se retiran y se unen a otro ejército suyo` : '; sus supervivientes se retiran a una casilla vecina';
+    }
+    // El atacante vencedor entra en la casilla de tierra ganada (desde `from`) y la toma.
+    occupy(att, from, cell) {
+        if (this.armyAt[att.cell] === att.id) this.armyAt[att.cell] = 0;
+        this.note({ kind: 'move', id: att.id, owner: att.owner, type: dominantType(att.units), n: countUnits(att.units), cells: [from, cell] });
+        att.cell = cell;
+        this.settle(att);
+        if (this.owner[cell] !== att.owner) this.capture(cell, att.owner, true);
+    }
+    // Combate de varios atacantes contra un defensor: como battle, con su ataque sumado (jointFactors) y una sola tirada
+    // por bando. Todos pierden la misma fracción y gastan el turno; si ganan, entra el de más ataque que esté en tierra
+    // (ninguno si todos salen del mar o la casilla es de mar) y los demás se quedan donde están.
+    jointBattle(atts, def, cell) {
+        const roll = () => 0.8 + this.rng() * 0.4;
+        const owner = atts[0].owner, sea = afloat(cell), p = PROVINCES[sea ? SEA_PROV[cell] : G.prov[cell]];
+        const fx = this.jointFactors(owner, atts.map(a => ({ units: a.units, from: a.cell, id: a.id })), def, cell);
+        const n0 = atts.map(a => countUnits(a.units)), nA0 = n0.reduce((s, n) => s + n, 0), nD0 = countUnits(def.units);
+        const strongest = list => list.reduce((b, i) => (b < 0 || fx.members[i].atk > fx.members[b].atk ? i : b), -1);
+        const idx = atts.map((_, i) => i), li = sea ? -1 : strongest(idx.filter(i => !afloat(atts[i].cell)));
+        const lead = li >= 0 ? atts[li] : null, head = atts[li >= 0 ? li : strongest(idx)], from = head.cell;
+        const total = emptyUnits();
+        for (const a of atts) for (const k of UNIT_KEYS) total[k] += a.units[k] || 0;
+        this.note({ kind: 'battle', att: head.id, def: def.id, from, cell, attOwner: owner, defOwner: def.owner,
+            attType: dominantType(total), defType: dominantType(def.units), attN: nA0, defN: nD0, joint: atts.map(a => a.id) });
+        const atk = fx.atk * roll();
+        const dfn = fx.dfn * roll();
+        const attWins = atk > dfn;
+        const [w, l] = attWins ? [atk, dfn] : [dfn, atk];
+        const winnerLoss = 0.3 * l / w * this.rules(attWins ? owner : def.owner).winnerLoss;
+        const loserLoss = Math.min(1, 0.35 + 0.35 * (w / l - 1));
+        let lostA = 0;
+        for (const a of atts) lostA += countUnits(this.applyLosses(a.units, attWins ? winnerLoss : loserLoss, attWins));
+        const lostD = this.applyLosses(def.units, attWins ? loserLoss : winnerLoss, !attWins);
+        for (const a of atts) a.used = 999;
+        let retreatNote = '';
+        if (attWins) {
+            retreatNote = this.rout(def, cell, sea, p, nD0);
+            for (const a of atts) if (a !== lead) this.settle(a);
+            if (lead) this.occupy(lead, from, cell);
+        } else {
+            for (const a of atts) { if (countUnits(a.units) === 0) this.removeArmy(a); else this.settle(a); }
+        }
+        if (this.involvesPlayer(owner, def.owner)) {
+            const who = `${atts.length} ejércitos (${n0.slice(0, -1).join(', ')} y ${n0[n0.length - 1]} unidades)`;
+            this.log(this.battleReport(owner, def.owner, p, fx, atk, dfn, attWins, nA0, nD0, nA0 - lostA, nD0 - countUnits(lostD), retreatNote, who));
+        }
+    }
     // Parte de combate para el registro, contado desde el lado del jugador.
-    battleReport(a, d, p, fx, atk, dfn, attWins, nA0, nD0, nA1, nD1, retreatNote) {
+    // En un ataque conjunto, `who` dice quiénes atacan («3 ejércitos (30, 30 y 30 unidades)») y el ataque es la suma de
+    // cada uno, con su estado (y ÷1,25 el que cruza un río).
+    battleReport(a, d, p, fx, atk, dfn, attWins, nA0, nD0, nA1, nD1, retreatNote, who = null) {
         const num = x => String(Math.round(x * 100) / 100).replace('.', ',');
         const state = s => s.parts.map(([n, x]) => ` ×${num(x)} ${n}`).join('');
         const factors = fx.parts.map(([n, x]) => ` ×${num(x)} ${n}`).join('') + (fx.capped ? ` (tope ×${num(fx.cap)})` : '') + state(fx.defState);
-        const attParts = { parts: [...fx.attState.parts, ...fx.attParts] };
-        const atkTxt = `${Math.round(fx.baseAtk)}${state(attParts)}${attParts.parts.length ? ` = ${Math.round(fx.atk)}` : ''}`;
+        let atkTxt;
+        if (fx.members) {
+            const one = m => { const s = state({ parts: [...m.attState.parts, ...m.attParts] }) + (m.river ? ` ÷${num(CONFIG.RIVER_DEFENSE)} río` : ''); return s ? `${Math.round(m.atk)} (${s.trim()})` : `${Math.round(m.atk)}`; };
+            atkTxt = `${fx.members.map(one).join(' + ')} = ${Math.round(fx.atk)}`;
+        } else {
+            const attParts = { parts: [...fx.attState.parts, ...fx.attParts] };
+            atkTxt = `${Math.round(fx.baseAtk)}${state(attParts)}${attParts.parts.length ? ` = ${Math.round(fx.atk)}` : ''}`;
+        }
         const defTxt = `${Math.round(fx.baseDef)}${factors}${factors ? ` = ${Math.round(fx.dfn)}` : ''}`;
         const luck = `con el azar, ${Math.round(atk)} contra ${Math.round(dfn)}`;
+        const force = who ?? `${nA0} unidades`;
         if (a === this.player) {
-            return `Atacas ${p.name} (${this.nm(d)}) con ${nA0} unidades contra ${nD0}. Tu ataque ${atkTxt} contra su defensa ${defTxt}; ${luck}. ` +
+            return `Atacas ${p.name} (${this.nm(d)}) con ${force} contra ${nD0}. Tu ataque ${atkTxt} contra su defensa ${defTxt}; ${luck}. ` +
                 `${attWins ? 'VICTORIA' : 'DERROTA'}: te quedan ${nA1} y a ${this.nm(d)} ${nD1}${attWins ? retreatNote : ''}.`;
         }
-        return `${this.nm(a)} ataca ${p.name} con ${nA0} unidades contra tus ${nD0}. Su ataque ${atkTxt} contra tu defensa ${defTxt}; ${luck}. ` +
+        return `${this.nm(a)} ataca ${p.name} con ${force} contra tus ${nD0}. Su ataque ${atkTxt} contra tu defensa ${defTxt}; ${luck}. ` +
             `${attWins ? `PIERDES la posición: te quedan ${nD1}${retreatNote.replace('sus', 'tus').replace('suyo', 'tuyo')}` : `RESISTES: te quedan ${nD1}`} y a ${this.nm(a)} ${nA1}.`;
     }
 
@@ -5722,11 +5827,16 @@ class GameEngine {
             for (const [target, from] of r.attacks) {
                 const def = this.armyOn(target);
                 const fx = this.combatFactors(id, army.units, from, def, target, army.id);
-                const ratio = fx.atk / fx.dfn;
                 // Rodeada, le basta una ventaja menor para atacar y prefiere romper el cerco antes que huir.
-                if (ratio < (trapped >= CONFIG.FLANKED_SIDES ? 1.1 : 1.3)) continue;
+                const need = trapped >= CONFIG.FLANKED_SIDES ? 1.1 : 1.3;
+                let ratio = fx.atk / fx.dfn, list = null;
+                if (ratio < need) {   // sola no llega: prueba con los suyos libres que también llegan a esa casilla
+                    const j = this.aiJoint(id, army, from, r, def, target, need, fx);
+                    if (!j) continue;
+                    ({ list, ratio } = j);
+                }
                 const score = 1000 + Math.min(ratio, 5) * 20 + (CITY_OF[target] >= 0 ? 300 : 0) + (trapped >= CONFIG.FLANKED_SIDES ? 200 : 0);
-                if (score > bestScore) { bestScore = score; best = { kind: 'attack', target, from }; }
+                if (score > bestScore) { bestScore = score; best = { kind: 'attack', target, from, list }; }
             }
             for (const v of this.destinations(r)) {
                 if (afloat(v) && (byLand || this.exposedAtSea(id, v))) continue;   // por tierra no embarca; al mar expuesto, no
@@ -5738,9 +5848,36 @@ class GameEngine {
                 if (score > bestScore) { bestScore = score; best = { kind: 'move', target: v }; }
             }
             if (!best) { this.settle(army); continue; }
-            if (best.kind === 'attack') this.attack(army, best.from, best.target, r);
+            if (best.kind === 'attack' && best.list) this.attackJoint(best.list, best.target);
+            else if (best.kind === 'attack') this.attack(army, best.from, best.target, r);
             else this.moveArmy(army, best.target, r);
         }
+    }
+    // Ataque conjunto de la IA: a `army`, que sola no llega a `need` contra `def`, le suma sus ejércitos libres (sin
+    // operación, formación ni orden; no los que guardan una ciudad o mantienen un asedio) que también pueden atacar
+    // `target`, de más a menos ataque, hasta llegar. Devuelve { list, ratio } (list, para attackJoint), o null si ni con todos llega.
+    // `fx` son los factores de `army` sola: antes de calcular alcances, descarta lo que ni sumando todo el ataque de los
+    // libres que quizá lleguen (inStrike) podría llegar.
+    aiJoint(id, army, from, r, def, target, need, fx) {
+        const ids = new Set();
+        let most = fx.atk;
+        for (const a of this.armies.values()) {
+            if (a.owner !== id || a === army || a.used >= 999 || a.op || a.form || a.order) continue;
+            if (CITY_OF[a.cell] >= 0 || this.sieges.get(a.cell)?.by === id || this.armyOn(a.cell) !== a || !this.inStrike(a, target)) continue;
+            ids.add(a.id); most += unitPower(a.units, 'atk', this.rules(id));
+        }
+        if (!ids.size || most < need * fx.dfn / CONFIG.RIVER_DEFENSE) return null;
+        const part = x => ({ units: x.army.units, from: x.from, id: x.army.id });
+        const others = this.jointCandidates(id, target, ids);
+        const solo = new Map(others.map(x => [x, this.jointFactors(id, [part(x)], def, target).members[0].atk]));
+        others.sort((x, y) => solo.get(y) - solo.get(x));
+        const list = [{ army, from, r }];
+        for (const x of others) {
+            list.push(x);
+            const j = this.jointFactors(id, list.map(part), def, target), ratio = j.atk / j.dfn;
+            if (ratio >= need) return { list, ratio };
+        }
+        return null;
     }
 
     // Sin enemigos a los que ir, los ejércitos que han quedado en el mar navegan hacia la costa propia libre más cercana.
