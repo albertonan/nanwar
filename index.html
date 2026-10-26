@@ -5184,6 +5184,7 @@ class GameEngine {
         let msg = `Sale de ${this.placeName(op.zone ?? op.cells[0])} con ${plural(op.body.length, 'ejército', 'ejércitos')}${left ? `, sin ${plural(left, 'ejército que no ha llegado', 'ejércitos que no han llegado')} en ${st.waited} turnos` : ''}`;
         if (op.doctrine === 'lanza') {
             const n = this.opEchelons(op);
+            for (const [from, b] of n.born) if (op.body.includes(from)) op.body.push(b);   // la punta que sale del grueso, en el grueso
             msg += `: ${n.punta} en la punta y ${n.seguimiento} en el seguimiento`;
         } else if (op.doctrine === 'amplio') {
             op.lanes = null;   // se reparten de nuevo
@@ -5196,7 +5197,9 @@ class GameEngine {
     }
     // --- Doctrina recomendada (D5) ---
     // La misma regla para la IA y para la propuesta al jugador: { key, why }. Asalto contra una capital o un objetivo
-    // fortificado; punta de lanza si un tercio o más del ataque de sus ejércitos (`members`) es rápido (velocidad 6 o más)
+    // fortificado; punta de lanza si un tercio o más del ataque de sus ejércitos (`members`) es rápido (velocidad 6 o más):
+    // para la IA, por tipos de unidad (al lanzarla separa las rápidas: opEchelons); para el jugador, por ejércitos enteros,
+    // que es como irán (un ejército va a la velocidad de su unidad más lenta)
     // y el enemigo no tiene en el pasillo una masa mayor que la mayor de las suyas; frente amplio si la fuerza enemiga del
     // pasillo es la mitad de la suya o menos; asalto en los demás casos. Fuerza: ataque más defensa, del enemigo lo que se
     // sabe (seenPower) de los ejércitos a la vista. El pasillo es siempre el estrecho, para que la anchura de la doctrina
@@ -5207,12 +5210,17 @@ class GameEngine {
         if (theirs && CAPITAL_OF[obj] >= 0) return { key: 'asalto', why: `${place} es una capital: hace falta toda la fuerza junta` };
         if (theirs && this.fort[obj]) return { key: 'asalto', why: `${place} está fortificada: hace falta toda la fuerza junta` };
         if (!members.length) return { key: 'asalto', why: 'aún no tiene ejércitos' };
-        let atk = 0, fast = 0, own = 0, big = 0;
+        let atk = 0, fast = 0, typed = 0, own = 0, big = 0;
+        const quick = this.opFastTypes(id), ai = id !== this.player;
         for (const a of members) {
             const x = unitPower(a.units, 'atk', rules), f = x + unitPower(a.units, 'def', rules);
             atk += x; own += f; big = Math.max(big, f);
-            if (this.opSpeedy(a)) fast += x;
+            for (const k of quick) typed += (a.units[k] || 0) * rules.types[k].atk;   // las unidades rápidas de cada uno
+            if (this.opSpeedy(a)) fast += x;   // los ejércitos rápidos enteros
         }
+        if (ai) fast = typed;
+        // Al jugador, si sus tanques solo darían punta separándolos, se lo dice.
+        const mixed = !ai && atk > 0 && fast / atk < 1 / 3 && typed / atk >= 1 / 3 ? '; tus ejércitos mixtos van a la velocidad de su unidad más lenta, así que sus tanques no forman una punta' : '';
         let narrow = op;
         if (op.width !== 'estrecha') { narrow = op._narrow ??= { kind: 'ofensiva', owner: id, width: 'estrecha' }; narrow.cells = op.cells; }
         const lane = this.opCorridor(narrow);
@@ -5224,10 +5232,10 @@ class GameEngine {
         }
         const share = atk > 0 ? fast / atk : 0, pct = x => `${Math.round(x * 100)} %`;
         if (share >= 1 / 3 && mass <= big) return { key: 'lanza', why: `el ${pct(share)} del ataque es rápido (velocidad 6 o más) y el enemigo no tiene en el pasillo masas mayores que las tuyas` };
-        if (foe <= own * 0.5) return { key: 'amplio', why: foe ? `el enemigo es mucho más débil en el pasillo (${pct(foe / own)} de tu fuerza): conviene ocupar terreno a lo ancho`
-            : 'no hay enemigos a la vista en el pasillo: conviene ocupar terreno a lo ancho' };
-        return { key: 'asalto', why: share >= 1 / 3 ? 'el enemigo tiene en el pasillo una masa mayor que las tuyas: mejor avanzar juntos y atacar en masa'
-            : `poco ataque rápido (el ${pct(share)}) y el enemigo no es débil en el pasillo: mejor avanzar juntos y atacar en masa` };
+        if (foe <= own * 0.5) return { key: 'amplio', why: (foe ? `el enemigo es mucho más débil en el pasillo (${pct(foe / own)} de tu fuerza): conviene ocupar terreno a lo ancho`
+            : 'no hay enemigos a la vista en el pasillo: conviene ocupar terreno a lo ancho') + mixed };
+        return { key: 'asalto', why: (share >= 1 / 3 ? 'el enemigo tiene en el pasillo una masa mayor que las tuyas: mejor avanzar juntos y atacar en masa'
+            : `poco ataque rápido (el ${pct(share)}) y el enemigo no es débil en el pasillo: mejor avanzar juntos y atacar en masa`) + mixed };
     }
     // La recomendada para una ofensiva aún por crear (herramienta Operación), con los ejércitos que se le asignarían.
     draftDoctrine(owner, cells) {
@@ -5241,17 +5249,58 @@ class GameEngine {
     opSpeedy(a) { return speedOf(a.units, this.rules(a.owner)) >= OP_SPEAR_SPEED; }
     // Escalón de un miembro: el que se le dio al lanzar o en la ficha; quien entra después, al seguimiento.
     opEchelon(op, a) { return op.echelon?.[a.id] === 'punta' ? 'punta' : 'seguimiento'; }
-    // Reparto al lanzar: los rápidos a la punta y el resto al seguimiento; sin ninguno rápido, la punta es el más rápido
-    // (a igual velocidad, el de más ataque). Devuelve cuántos van en cada uno.
+    // Tipos de unidad rápidos de `owner` (velocidad 6 o más con su investigación): los tanques y, si llegan, los demás.
+    opFastTypes(owner) { const r = this.rules(owner); return UNIT_KEYS.filter(k => r.types[k].speed >= OP_SPEAR_SPEED); }
+    // Reparto al lanzar. En las del jugador, por ejércitos enteros: los rápidos (opSpeedy) a la punta y el resto al
+    // seguimiento; él decide lo demás (el botón de la ficha). En las de la IA, por tipos de unidad: las unidades rápidas de
+    // cada miembro forman la punta y el resto se queda en el seguimiento. Un miembro solo de rápidas va entero a la punta;
+    // uno mixto las separa en un ejército nuevo, que se forma en la casilla libre de al lado (propia o aliada, a 2 o menos,
+    // la más adelantada a lo largo de la flecha) o, si no la hay, se suma a una punta ya formada a 2 casillas o menos; si
+    // tampoco, el miembro sigue entero en el seguimiento. Sin ninguno rápido, la punta es el miembro más rápido (a igual
+    // velocidad, el de más ataque). Devuelve cuántos van en cada uno y los ejércitos nuevos.
     opEchelons(op) {
-        const members = this.opMembers(op), rules = this.rules(op.owner), n = { punta: 0, seguimiento: 0 };
-        let tip = members.filter(a => this.opSpeedy(a));
-        if (!tip.length && members.length) {
-            const speed = a => speedOf(a.units, rules), power = a => unitPower(a.units, 'atk', rules);
-            tip = [members.reduce((b, a) => (speed(a) > speed(b) || (speed(a) === speed(b) && (power(a) > power(b) || (power(a) === power(b) && a.id < b.id))) ? a : b))];
-        }
+        const id = op.owner, members = this.opMembers(op), rules = this.rules(id), n = { punta: 0, seguimiento: 0, born: [] };
+        const fast = this.opFastTypes(id), ai = id !== this.player;
+        const has = ai ? a => fast.some(k => a.units[k] > 0) : a => this.opSpeedy(a);
         op.echelon = {};
-        for (const a of members) n[op.echelon[a.id] = tip.includes(a) ? 'punta' : 'seguimiento']++;
+        if (!members.some(has)) {
+            if (members.length) {
+                const speed = a => speedOf(a.units, rules), power = a => unitPower(a.units, 'atk', rules);
+                const tip = members.reduce((b, a) => (speed(a) > speed(b) || (speed(a) === speed(b) && (power(a) > power(b) || (power(a) === power(b) && a.id < b.id))) ? a : b));
+                for (const a of members) n[op.echelon[a.id] = a === tip ? 'punta' : 'seguimiento']++;
+            }
+            this.orderVersion++;
+            return n;
+        }
+        const tips = [], free = c => isLand(c) && !this.armyAt[c] && (this.owner[c] === id || this.allied(id, this.owner[c]));
+        for (const a of members) {
+            if (!has(a)) { op.echelon[a.id] = 'seguimiento'; continue; }
+            if (this.opSpeedy(a)) { op.echelon[a.id] = 'punta'; tips.push(a); continue; }
+            const send = emptyUnits();
+            for (const k of fast) send[k] = a.units[k] || 0;
+            let spot = -1, best = -Infinity;
+            for (const [c, d] of this.nearCells(a.cell, 2)) {
+                if (d === 0 || !free(c)) continue;
+                const v = this.opAlong(op, c) - d * 0.01;
+                if (v > best) { best = v; spot = c; }
+            }
+            const host = spot < 0 ? tips.find(t => hexDist(t.cell, a.cell) <= 2) : null;
+            if (spot < 0 && !host) { op.echelon[a.id] = 'seguimiento'; continue; }
+            const b = this.split(a, send, true);   // el refuerzo (A7) se queda con el seguimiento
+            op.echelon[a.id] = 'seguimiento';
+            if (host) {
+                for (const k of fast) host.units[k] = (host.units[k] || 0) + send[k];
+                this.armies.delete(b.id); this.splitFrom.delete(b.id);
+                this.armyVersion++;
+                continue;
+            }
+            b.cell = spot;
+            this.settle(b);
+            op.echelon[b.id] = 'punta';
+            tips.push(b);
+            n.born.push([a.id, b.id]);
+        }
+        for (const x of Object.values(op.echelon)) n[x]++;
         this.orderVersion++;
         return n;
     }

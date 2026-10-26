@@ -1079,6 +1079,85 @@ const CHECKS = [
         T.eq(g.suggestDoctrine(op).key, 'asalto', 'contra una masa mayor, asalto');
         return true;
     }],
+    ['D2 · al lanzar, los tanques de cada miembro forman la punta y el resto el seguimiento (IA)', () => {
+        // España es de la IA (juega Portugal).
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(T.nation('pt')); g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 12, { m: 2 });
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O], { doctrine: 'lanza', gold: 100 });
+        const cs = T.cellsAt(g, es, S, [0, 1, 1]);
+        const xs = [[8, 6, 2], [10, 4, 0], [12, 0, 3]].map(([i, t, r], k) => T.army(g, es, cs[k], i, t, r));
+        for (const a of xs) g.assignArmy(a, op.id);
+        const total = () => { const u = emptyUnits(); for (const a of g.armies.values()) if (a.owner === es && a.op === op.id) for (const k of UNIT_KEYS) u[k] += a.units[k]; return u; };
+        const before = total();
+        g.opLaunch(op);
+        const ms = g.opMembers(op), tips = ms.filter(a => g.opEchelon(op, a) === 'punta'), rest = ms.filter(a => g.opEchelon(op, a) === 'seguimiento');
+        T.eq(total(), before, 'no se pierde ni se gana nada');
+        T.eq(tips.length, 2, 'una punta por cada miembro con tanques');
+        T.ok(tips.every(a => a.units.tank > 0 && countUnits(a.units) === a.units.tank && g.opSpeedy(a)), 'solo tanques, rápidas');
+        T.eq(tips.map(a => a.units.tank).sort(), [4, 6], 'los de cada uno');
+        T.eq(rest.map(a => a.id).sort(), xs.map(a => a.id).sort(), 'los de siempre, en el seguimiento');
+        T.ok(rest.every(a => !a.units.tank), 'sin tanques');
+        T.ok(tips.every(a => g.armyAt[a.cell] === a.id && !xs.some(x => x.cell === a.cell) && hexDist(a.cell, xs.find(x => g.splitFrom.get(a.id)?.[0] === x.id)?.cell ?? a.cell) <= 2), 'cada una en su casilla, al lado');
+        T.ok(tips.every(a => op.body.includes(a.id)), 'en el grueso');
+        // La punta sale por delante; el seguimiento, a su paso.
+        T.turns(g, es, 2);
+        const al = list => Math.max(...list.filter(a => g.armies.has(a.id)).map(a => g.opAlong(op, a.cell)));
+        T.ok(al(tips) > al(rest), `la punta va delante (${al(tips).toFixed(1)} y ${al(rest).toFixed(1)})`);
+        return true;
+    }],
+    ['D2 · en una ofensiva del jugador no se parte ningún ejército', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        for (const a of [...g.armies.values()]) if (a.owner === es || a.owner === fr) g.removeArmy(a);
+        const [S, O] = T.straight(g, es, 12, { m: 2 });
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O], { doctrine: 'lanza' });
+        const cs = T.cellsAt(g, es, S, [0, 1, 1]);
+        const xs = [[8, 6, 2], [10, 4, 0], [0, 5, 0]].map(([i, t, r], k) => T.army(g, es, cs[k], i, t, r));
+        for (const a of xs) g.assignArmy(a, op.id);
+        const units = () => xs.map(a => JSON.stringify(a.units));
+        const before = units(), n = g.armies.size;
+        g.opLaunch(op);
+        T.eq([g.armies.size, units()], [n, before], 'ni ejércitos nuevos ni unidades movidas');
+        T.eq(xs.map(a => g.opEchelon(op, a)), ['seguimiento', 'seguimiento', 'punta'], 'por ejércitos enteros: solo el de tanques va en la punta');
+        // Solo mixtos: la punta es el más rápido, entero.
+        const op2 = g.createOp(es, 'ofensiva', [S, O], { doctrine: 'lanza', noCap: true });
+        const ys = T.cellsAt(g, es, S, [3, 3]).map((c, k) => T.army(g, es, c, 8, 6, k * 2));
+        for (const a of ys) g.assignArmy(a, op2.id);
+        g.opLaunch(op2);
+        T.eq([g.armies.size, ys.map(a => g.opEchelon(op2, a))], [n + 2, ['punta', 'seguimiento']], 'el más rápido, sin partirlo');
+        // La recomendación mira lo mismo: con mixtos con muchos tanques no promete una punta, y dice por qué.
+        g.endOp(op2);
+        const s = g.suggestDoctrine(op2, ys);
+        T.ok(s.key !== 'lanza', `no recomienda la punta (${s.key})`);
+        T.ok(s.why.includes('tus ejércitos mixtos van a la velocidad de su unidad más lenta'), `y lo dice (${s.why})`);
+        T.eq(g.suggestDoctrine(op, [xs[2]]).key, 'lanza', 'con un ejército de tanques, sí');
+        return true;
+    }],
+    ['D5 · con ejércitos mixtos con muchos tanques, la IA elige punta de lanza', () => {
+        const { g, es, fr, S, O } = T.aiFront();
+        // Ningún ejército llega a velocidad 6 (todos llevan infantería), pero los tanques son la mayor parte del ataque.
+        for (const c of T.cellsAt(g, es, S, [1, 1, 2])) T.army(g, es, c, 10, 6, 2);
+        const probe = g.createOp(es, 'ofensiva', [S, O], { noCap: true });
+        const mixed = [...g.armies.values()].filter(a => a.owner === es);
+        T.ok(mixed.every(a => !g.opSpeedy(a)), 'ninguno es rápido entero');
+        T.eq(g.suggestDoctrine(probe, mixed).key, 'lanza', 'el ataque rápido se cuenta por tipos de unidad');
+        g.endOp(probe);
+        g.aiCommand(es);
+        const op = g.opsOf(es).find(o => o.kind === 'ofensiva');
+        T.ok(op, 'la IA crea la ofensiva');
+        T.eq(op.doctrine, 'lanza', 'punta de lanza');
+        if (op.phase !== 'avance') g.opLaunch(op);
+        const tips = g.opMembers(op).filter(a => g.opEchelon(op, a) === 'punta');
+        T.ok(tips.length >= 1 && tips.every(a => countUnits(a.units) === a.units.tank), 'la punta, de tanques');
+        T.ok(g.opMembers(op).filter(a => g.opEchelon(op, a) === 'seguimiento').every(a => !a.units.tank), 'el seguimiento, sin tanques');
+        // Pocos tanques: no llega al tercio.
+        const few = [...g.armies.values()].filter(a => a.owner === es).map(a => ({ ...a, units: { infantry: 20, tank: 1, artillery: 2, antiair: 0 } }));
+        T.ok(g.suggestDoctrine(op, few).key !== 'lanza', 'con pocos tanques, no');
+        return true;
+    }],
     ['D5 · frente amplio contra un vecino débil', () => {
         const { g, es, fr, S, O } = T.aiFront();
         for (const c of T.cellsAt(g, es, S, [1, 1, 2, 2])) T.army(g, es, c, 12, 0, 0);   // solo infantería
