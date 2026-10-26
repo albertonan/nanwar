@@ -645,6 +645,86 @@ const CHECKS = [
         const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
         T.eq([...h.ops.values()][0].gold, 6400, 'el oro sobrevive a guardar y cargar');
         return true;
+    }],
+    ['A4 · el cajón lista agrupaciones y sin agrupar', () => {
+        const g = T.uiStart('es'), es = g.player, spot = () => T.plainPair(g, es)[1];
+        const xs = [5, 6, 7, 8, 9].map(n => T.army(g, es, spot(), n));
+        const gr = g.createGroup(es, [xs[0].id, xs[1].id, xs[2].id]);
+        ui.tab = 'batalla'; ui.drawerOpen = true; ui.render();
+        const body = $('#drawer-body');
+        T.ok(body.querySelector(`[data-ob-group="${gr.id}"]`), 'la agrupación sale');
+        T.ok(body.textContent.includes('3 ejércitos') && body.textContent.includes('Sin agrupar'), `texto: ${body.textContent.slice(0, 200)}`);
+        const own = [...g.armies.values()].filter(a => a.owner === es).length;
+        T.eq(body.querySelectorAll('[data-ob-army]').length, own - 3, 'sin desplegar: solo los sueltos');
+        body.querySelector('[data-action="ob-toggle"]').click();
+        T.eq($('#drawer-body').querySelectorAll('[data-ob-army]').length, own, 'desplegada: sus tres ejércitos también');
+        // Botones: elegir pone la selección; color cicla; disolver suelta.
+        $('#drawer-body').querySelector('[data-action="ob-select"]').click();
+        T.eq(ui.sel.size, 3, 'ob-select elige a los tres');
+        const c0 = gr.color;
+        $('#drawer-body').querySelector('[data-action="ob-color"]').click();
+        T.eq(gr.color, (c0 + 1) % GROUP_COLORS.length, 'ob-color cicla la paleta');
+        $('#drawer-body').querySelector('[data-action="ob-disband"]').click();
+        T.ok(!g.groupById(es, gr.id) && !xs[0].group, 'ob-disband');
+        // Foco al pasar el ratón.
+        const g2 = g.createGroup(es, [xs[3].id, xs[4].id]); ui.render();
+        const row = $('#drawer-body').querySelector(`[data-ob-group="${g2.id}"]`);
+        row.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        T.eq(ui.view.groupFocus, g2.id, 'groupFocus al pasar el ratón');
+        row.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body }));
+        T.ok(!ui.view.groupFocus, 'y se quita al salir');
+        return true;
+    }],
+    ['A4 · marcar dos sin agrupar y crear agrupación desde el cajón', () => {
+        const g = T.uiStart('es'), es = g.player, spot = () => T.plainPair(g, es)[1];
+        const xs = [5, 6, 7, 8].map(n => T.army(g, es, spot(), n));
+        const first = g.createGroup(es, [xs[0].id]);
+        ui.tab = 'batalla'; ui.drawerOpen = true; ui.render();
+        const tick = a => { const i = $('#drawer-body').querySelector(`[data-ob-army="${a.id}"]`); i.checked = true; i.dispatchEvent(new Event('change', { bubbles: true })); };
+        tick(xs[1]); tick(xs[2]);
+        T.ok(!$('#ob-bar').hidden && $('#ob-bar').textContent.includes('2'), 'la barra cuenta las marcadas');
+        $('#drawer-body').querySelector('[data-action="ob-new"]').click();
+        const gr = g.nations[es].groups.find(x => x.id !== first.id);
+        T.ok(gr && xs[1].group === gr.id && xs[2].group === gr.id && !xs[3].group, 'nueva agrupación con las dos');
+        T.eq(ui.obSel.size, 0, 'se borran las marcas');
+        tick(xs[3]);
+        $('#drawer-body').querySelector('[data-ob-pick]').value = String(gr.id);
+        $('#drawer-body').querySelector('[data-action="ob-add"]').click();
+        T.eq(g.groupMembers(es, gr.id).length, 3, 'Añadir a… suma la marcada');
+        return true;
+    }],
+    ['A4 · renombrar desde el cajón fija el nombre', () => {
+        const g = T.uiStart('es'), es = g.player, spot = () => T.plainPair(g, es)[1];
+        const xs = [5, 6].map(n => T.army(g, es, spot(), n));
+        const gr = g.createGroup(es, xs.map(a => a.id));
+        ui.tab = 'batalla'; ui.drawerOpen = true; ui.render();
+        const inp = $('#drawer-body').querySelector(`[data-group-name="${gr.id}"]`);
+        inp.value = 'Vanguardia'; inp.dispatchEvent(new Event('change', { bubbles: true }));
+        T.ok(gr.name === 'Vanguardia' && gr.custom, 'nombre fijado');
+        inp.value = ''; inp.dispatchEvent(new Event('change', { bubbles: true }));
+        T.ok(!gr.custom && gr.name !== 'Vanguardia' && inp.value === gr.name, 'vacío: vuelve al automático');
+        return true;
+    }],
+    ['A4 · tecla B abre la pestaña', () => {
+        const g = T.uiStart('es');
+        ui.tab = 'registro'; ui.drawerOpen = false; ui.render();
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', bubbles: true }));
+        T.ok(ui.tab === 'batalla' && ui.drawerOpen, 'abre la pestaña');
+        T.ok($('#drawer .tabs button.on').dataset.tab === 'batalla', 'pestaña marcada');
+        return true;
+    }],
+    ['A4 · 400 ejércitos: renderBattleOrder tarda menos de 50 ms', () => {
+        const g = T.uiStart('es'), es = g.player, ids = [];
+        for (const c of G.land) { if (ids.length >= 400) break; if (T.free(g, c)) ids.push(T.army(g, es, c, 1 + ids.length % 7).id); }
+        T.ok(ids.length >= 400, `solo hay sitio para ${ids.length}`);
+        for (let i = 0; i < 40; i++) g.createGroup(es, ids.slice(i * 5, i * 5 + 5));
+        ui.tab = 'batalla'; ui.drawerOpen = true; ui.render();
+        for (let i = 1; i <= 40; i++) ui.obOpen.add(g.nations[es].groups[i - 1].id);
+        ui.renderBattleOrder();
+        const t0 = performance.now(); ui.renderBattleOrder(); const ms = performance.now() - t0;
+        T.ok(ms < 50, `${ms.toFixed(1)} ms`);
+        T.ok($('#drawer-body').querySelectorAll('[data-ob-army]').length >= 400, 'todos listados');
+        return true;
     }]
 ];
 
@@ -701,6 +781,39 @@ try {
         if (errs.length) { failed++; console.log(`FALLA ${SEL_SHOTS}\n      ${errs.join('\n      ')}`); }
         else console.log(`ok    ${SEL_SHOTS} (${join(out, 'seleccion-ficha.png')}, seleccion-ficha-movil.png)`);
         await shotPage.close();
+    }
+    // Captura de la pestaña Orden de batalla: tres agrupaciones (una desplegada) y ejércitos sueltos, en escritorio y móvil.
+    const OB_SHOTS = 'A4 · captura del cajón Orden de batalla';
+    if (!filter || OB_SHOTS.includes(filter)) {
+        ran++;
+        const out = join(root, 'tools/cache/smoke');
+        mkdirSync(out, { recursive: true });
+        const obPage = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+        const errs = [];
+        obPage.on('pageerror', e => errs.push(e.message));
+        await obPage.goto(`http://localhost:${port}/?seed=7`);
+        await obPage.waitForFunction(() => typeof GameEngine === 'function' && typeof ui === 'object');
+        await obPage.evaluate(setup);
+        await obPage.evaluate(() => {
+            const g = T.uiStart('es'), es = g.player;
+            ui.view.setMode('sencilla');
+            const spot = () => T.plainPair(g, es)[1];
+            const xs = [30, 12, 20, 8, 15, 6, 25, 9].map((n, i) => T.army(g, es, spot(), n, i % 3 === 0 ? 6 : 0, i % 2 ? 4 : 0));
+            const a = g.createGroup(es, [xs[0].id, xs[1].id, xs[2].id]), b = g.createGroup(es, [xs[3].id, xs[4].id]), c = g.createGroup(es, [xs[5].id], { name: 'Reserva del norte' });
+            g.recolorGroup(es, b.id, 3);
+            g.setOrder(xs[3], { kind: 'hold' }); g.setOrder(xs[4], { kind: 'hold' });
+            ui.obOpen.add(a.id); ui.obSel.add(xs[6].id); ui.obSel.add(xs[7].id);
+            ui.tab = 'batalla'; ui.drawerOpen = true; ui.render();
+        });
+        await obPage.waitForTimeout(300);
+        await obPage.screenshot({ path: join(out, 'orden-batalla.png') });
+        await obPage.setViewportSize({ width: 390, height: 844 });
+        await obPage.evaluate(() => { ui.setSheet('grande'); ui.drawerOpen = true; ui.render(); });
+        await obPage.waitForTimeout(300);
+        await obPage.screenshot({ path: join(out, 'orden-batalla-movil.png') });
+        if (errs.length) { failed++; console.log(`FALLA ${OB_SHOTS}\n      ${errs.join('\n      ')}`); }
+        else console.log(`ok    ${OB_SHOTS} (${join(out, 'orden-batalla.png')}, orden-batalla-movil.png)`);
+        await obPage.close();
     }
 } finally {
     await browser.close();

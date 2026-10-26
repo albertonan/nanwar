@@ -289,6 +289,37 @@
         .op-row small { color: var(--muted); font-size: 12.5px; }
         .chip.warn { background: rgba(240, 196, 25, 0.22); }
         .chip.ok { background: rgba(143, 209, 107, 0.2); }
+        /* Orden de batalla */
+        .ob-bar { position: sticky; top: -12px; z-index: 2; display: grid; gap: 6px; margin: -4px 0 8px; padding: 8px 10px; border-radius: 12px;
+            background: var(--raised); border: 1px solid var(--line); box-shadow: 0 6px 14px rgba(0, 0, 0, 0.3); }
+        .ob-bar[hidden] { display: none; }
+        .ob-bar .row { flex-wrap: nowrap; }
+        .ob-bar .row > span { flex: 1; }
+        .ob-bar select { flex: 1; min-width: 0; }
+        .ob-filters { flex-wrap: wrap; margin: 4px 8px 8px; }
+        .ob-filters select { width: auto; flex: 1; min-width: 110px; }
+        .ob-groups { display: grid; gap: 8px; }
+        .ob-group { padding: 9px 10px 9px 12px; border-radius: 12px; background: var(--raised); border-left: 5px solid var(--gc); }
+        .ob-head { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center; }
+        .ob-symbtn { background: none; border: 0; padding: 2px; cursor: pointer; border-radius: 8px; }
+        .ob-symbtn:hover { background: var(--ink); }
+        .ob-sym { display: grid; justify-items: center; line-height: 1; gap: 1px; }
+        .ob-sym small { font: 700 10px var(--font); color: var(--muted); }
+        .ob-main small { display: block; color: var(--muted); font-size: 12.5px; margin-top: 3px; }
+        .ob-main .row { gap: 6px; flex-wrap: nowrap; }
+        .ob-num { flex: 0 0 auto; min-width: 20px; padding: 1px 6px; border-radius: 99px; background: var(--gc); color: #151a12; font: 700 12px var(--font); text-align: center; }
+        .ob-main input[type="text"] { font-weight: 600; background: transparent; border-color: transparent; padding: 4px 6px; border-radius: 8px; }
+        .ob-main input[type="text"]:hover, .ob-main input[type="text"]:focus { background: var(--ink); border-color: var(--line); }
+        .ob-btns { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+        .ob-btns { justify-content: space-between; }
+        .ob-btns .btn { padding: 4px 9px; }
+        .ob-color i { display: block; width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid var(--ink); }
+        .ob-list { display: grid; gap: 2px; margin-top: 8px; }
+        .ob-army { display: flex; align-items: center; gap: 4px; }
+        .ob-army label { flex: 1; min-width: 0; display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 8px; align-items: center; padding: 4px 6px; border-radius: 8px; cursor: pointer; font-size: 13.5px; }
+        .ob-army label:hover { background: var(--ink); }
+        .ob-army small { display: block; color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .ob-army .btn { padding: 2px 8px; }
         .op-detail { margin-top: 12px; }
         .op-detail .group-title { margin: 12px 0 6px; }
         .op-members { display: grid; gap: 2px; }
@@ -7946,6 +7977,10 @@ class GameUI {
         this.opDraft = null;         // { kind, cells, redraw }: operación que se está dibujando con la herramienta Operación
         this.air = this.noAir();     // herramienta Aviación: aeródromo elegido, sus escuadrones elegidos y el blanco
         this.focusOp = null;         // operación abierta en la pestaña Mando
+        this.obFilter = 'todas';     // pestaña Orden de batalla: 'todas', 'pantalla' u 'op:<id>'
+        this.obBy = 'provincia';     // cómo se agrupan los sueltos: 'provincia' u 'operacion'
+        this.obOpen = new Set();     // agrupaciones desplegadas
+        this.obSel = new Set();      // ejércitos marcados con la casilla
         this.proposal = null;        // { ids, ghost, skip }: lo que proponen las operaciones asistidas al terminar el turno
         this.orderRatio = 1.3;       // ventaja mínima para atacar de las órdenes nuevas
         this.replaying = false;
@@ -7975,6 +8010,13 @@ class GameUI {
             if (!e.target.closest?.('[data-preview]') || !this.opPreview) return;
             this.opPreview = null;
             this.view?.draw();
+        });
+        // Al pasar el ratón por la fila de una agrupación en el cajón, el mapa resalta a sus miembros (lo dibuja MapView).
+        const focusGroup = gid => { if (this.view && (this.view.groupFocus || 0) !== gid) { this.view.groupFocus = gid; this.view.draw(); } };
+        document.addEventListener('mouseover', e => { const r = e.target.closest?.('[data-ob-group]'); if (r) focusGroup(+r.dataset.obGroup); });
+        document.addEventListener('mouseout', e => {
+            const r = e.target.closest?.('[data-ob-group]');
+            if (r && !r.contains(e.relatedTarget)) focusGroup(0);
         });
         document.addEventListener('input', e => this.onInput(e));
         document.addEventListener('change', e => this.onChange(e));
@@ -8857,12 +8899,17 @@ class GameUI {
         const g = this.game, xs = g.player === null || g.over ? [] : g.groupMembers(g.player, gid);
         if (!xs.length) return false;
         if (this.tool !== 'command') this.setTool('command');
-        if (center) {
-            const mx = xs.reduce((s, a) => s + G.cx[a.cell], 0) / xs.length, my = xs.reduce((s, a) => s + G.cy[a.cell], 0) / xs.length;
-            const mid = xs.reduce((b, a) => (Math.hypot(G.cx[a.cell] - mx, G.cy[a.cell] - my) < Math.hypot(G.cx[b.cell] - mx, G.cy[b.cell] - my) ? a : b));
-            this.view.centerOn(mid.cell, Math.max(5, G.S * this.view.scale));
-        }
+        if (center) this.centerGroup(gid);
         this.setSel(xs);
+        return true;
+    }
+    // Centra el mapa en el ejército de la agrupación que está más en medio.
+    centerGroup(gid) {
+        const g = this.game, xs = g.player === null ? [] : g.groupMembers(g.player, gid);
+        if (!xs.length) return false;
+        const mx = xs.reduce((s, a) => s + G.cx[a.cell], 0) / xs.length, my = xs.reduce((s, a) => s + G.cy[a.cell], 0) / xs.length;
+        const mid = xs.reduce((b, a) => (Math.hypot(G.cx[a.cell] - mx, G.cy[a.cell] - my) < Math.hypot(G.cx[b.cell] - mx, G.cy[b.cell] - my) ? a : b));
+        this.view.centerOn(mid.cell, Math.max(5, G.S * this.view.scale));
         return true;
     }
     // Rectángulo de selección, en píxeles del mapa (los de view.toScreen): elige tus ejércitos de dentro; con `add`, los
@@ -9086,6 +9133,25 @@ class GameUI {
             case 'sel-fortify': g.playerOrderMany(this.selIds(), 'fortify'); break;
             case 'sel-op': { const s = document.querySelector('#card select[data-sel-op]'); if (s) g.playerAssignMany(this.selIds(), +s.value); break; }
             case 'sel-disband': g.playerDisbandGroup(+d.id); break;
+            // Pestaña Orden de batalla
+            case 'ob-toggle': if (this.obOpen.has(+d.id)) this.obOpen.delete(+d.id); else this.obOpen.add(+d.id); break;
+            case 'ob-select': if (isMobile()) this.drawerOpen = false; this.selectGroup(+d.id); return;
+            case 'ob-center': if (isMobile()) this.drawerOpen = false; this.centerGroup(+d.id); break;
+            case 'ob-color': { const gr = g.groupById(g.player, +d.id); if (gr) g.recolorGroup(g.player, gr.id, (gr.color + 1) % GROUP_COLORS.length); break; }
+            case 'ob-disband': this.obOpen.delete(+d.id); g.playerDisbandGroup(+d.id); break;
+            case 'ob-new': {
+                const gr = g.playerCreateGroup([...this.obSel]);
+                if (gr) { this.obSel.clear(); this.obOpen.add(gr.id); }
+                break;
+            }
+            case 'ob-add': {
+                const s = document.querySelector('#ob-bar select[data-ob-pick]');
+                if (s && +s.value && g.playerAddToGroup(+s.value, [...this.obSel])) { this.obOpen.add(+s.value); this.obSel.clear(); }
+                break;
+            }
+            case 'ob-clear': this.obSel.clear(); break;
+            case 'ob-filter': this.obFilter = d.value; break;
+            case 'ob-by': this.obBy = d.value; break;
             case 'sel-clear': this.select(-1); return;
             case 'box-mode': this.boxMode = !this.boxMode; if (this.boxMode && isMobile()) this.setSheet('mini'); break;
             case 'joint-all': this.jointAll = !this.jointAll; break;
@@ -9418,6 +9484,17 @@ class GameUI {
         if (e.target.dataset.opAssign !== undefined) { this.game.assignArmy(this.selectedArmy(), +e.target.value); this.render(); }
         if (e.target.dataset.airTask !== undefined) this.airTaskChange(+e.target.dataset.airTask, e.target.value);
         if (e.target.dataset.opTemplate !== undefined) { const op = this.game.ops.get(+e.target.dataset.opTemplate); if (op) this.game.playerOpSet(op, 'template', e.target.value); this.render(); }
+        if (e.target.dataset.obArmy !== undefined) {   // casilla de un ejército del cajón: solo se refresca la barra, sin perder el sitio de la lista
+            const id = +e.target.dataset.obArmy;
+            if (e.target.checked) this.obSel.add(id); else this.obSel.delete(id);
+            const bar = $('#ob-bar');
+            if (bar) bar.outerHTML = this.obBar();
+        }
+        if (e.target.dataset.groupName !== undefined) {   // nombre de una agrupación; vacío, vuelve al automático
+            const g = this.game, gr = g.player === null ? null : g.groupById(g.player, +e.target.dataset.groupName);
+            if (gr && g.renameGroup(g.player, gr.id, e.target.value)) { e.target.value = gr.name; this.renderCard(); this.view.draw(); }
+        }
+        if (e.target.dataset.obOp !== undefined) { this.obFilter = +e.target.value ? `op:${e.target.value}` : 'todas'; this.render(); }
         if (e.target.id === 'op-name') { const op = this.game.ops.get(this.focusOp); if (op) this.game.playerOpSet(op, 'name', e.target.value); this.render(); }
     }
 
@@ -9453,6 +9530,11 @@ class GameUI {
         if (e.key === 'a' || e.key === 'A') { this.toggleHighway(); return; }
         if (e.key === 'l' || e.key === 'L') this.setLayer('supply', !this.view.showSupply);
         else if (e.key === 'm' || e.key === 'M') { this.mapMenu = !this.mapMenu; this.render(); }
+        else if (e.key === 'b' || e.key === 'B') {
+            const same = this.tab === 'batalla' && this.drawerOpen;
+            this.tab = 'batalla'; this.focusNation = null; this.drawerOpen = !same;
+            this.render();
+        }
         else if (e.key === 'n' || e.key === 'N') this.nextArmy();
         else if (e.key === 'o' || e.key === 'O') this.runOrders();
         else if (e.key === 'Enter') { e.preventDefault(); $('#end-turn').click(); }
@@ -10179,14 +10261,17 @@ class GameUI {
         if (g.player === null) return;
         const unread = g.logs.length - this.seenLog;
         if (this.tab === 'registro' && this.drawerOpen) this.seenLog = g.logs.length;
-        const tabs = [['paises', 'Países'], ['mando', 'Mando'], ['alianzas', 'Alianzas'], ['registro', 'Registro']];
+        const tabs = [['paises', 'Países'], ['mando', 'Mando'], ['batalla', 'Batalla'], ['alianzas', 'Alianzas'], ['registro', 'Registro']];
+        const keep = this.tab === 'batalla' ? $('#drawer-body')?.scrollTop ?? 0 : 0;   // la lista larga no salta al principio
+        if (this.view && (this.tab !== 'batalla' || !this.drawerOpen) && this.view.groupFocus) { this.view.groupFocus = 0; this.view.draw(); }
         el.innerHTML = `<div class="sheet-grip" data-sheet-grip role="button" aria-label="Agrandar o achicar el panel"><i></i></div><div class="tabs">
-            ${tabs.map(([id, label]) => `<button data-action="tab" data-tab="${id}" class="${this.tab === id ? 'on' : ''}">${label}${id === 'registro' && unread > 0 && this.tab !== 'registro' ? `<span class="count">${unread}</span>` : ''}</button>`).join('')}
+            ${tabs.map(([id, label]) => `<button data-action="tab" data-tab="${id}"${id === 'batalla' ? ' title="Orden de batalla (B)"' : ''} class="${this.tab === id ? 'on' : ''}">${label}${id === 'registro' && unread > 0 && this.tab !== 'registro' ? `<span class="count">${unread}</span>` : ''}</button>`).join('')}
             <button class="toggle" data-action="drawer" title="${this.drawerOpen ? 'Ocultar el panel' : 'Mostrar el panel'}" aria-label="${this.drawerOpen ? 'Cerrar' : 'Abrir'}">${isMobile() ? '✕' : this.drawerOpen ? '›' : '‹'}</button></div>
             <div class="drawer-body" id="drawer-body"></div>`;
         if (!this.drawerOpen) return;
         if (this.tab === 'paises') this.renderNations();
         else if (this.tab === 'mando') this.renderCommand();
+        else if (this.tab === 'batalla') { this.renderBattleOrder(); $('#drawer-body').scrollTop = keep; }
         else if (this.tab === 'alianzas') this.renderBlocs();
         else this.renderLog();
     }
@@ -10404,6 +10489,103 @@ class GameUI {
             ${detail}
             <p class="note" style="margin-top:10px">Tu estado mayor lleva ${cap} operaciones a la vez: ${rules.commandOps} por Doctrina y una más por cada 20 provincias.</p>
             ${this.templatesSection()}`;
+    }
+    // Qué hace una agrupación, en una o dos palabras: su ataque coordinado, las órdenes de sus ejércitos o su operación.
+    obGroupState(gr, members) {
+        const g = this.game, kinds = new Set(), ops = new Set();
+        if (gr.order) return gr.order.waitSince ? 'esperando' : 'atacando';
+        for (const a of members) { if (a.order) kinds.add(a.order.kind); if (a.op) ops.add(a.op); }
+        if (kinds.has('attack')) return 'atacando';
+        if (kinds.has('march') || kinds.has('join') || kinds.has('follow')) return 'marchando';
+        if (kinds.has('hold') || kinds.has('fortify')) return 'esperando';
+        if (ops.size === 1) return `en operación «${esc(g.ops.get([...ops][0])?.name ?? '')}»`;
+        return ops.size ? 'en varias operaciones' : 'sin órdenes';
+    }
+    // Barra con las casillas marcadas: crear una agrupación con ellas o sumarlas a otra. Se redibuja sola al marcar.
+    obBar() {
+        const g = this.game, n = this.obSel.size, groups = g.nations[g.player].groups;
+        return `<div class="ob-bar" id="ob-bar" ${n ? '' : 'hidden'}><div class="row"><span><b>${n}</b> ${n === 1 ? 'marcado' : 'marcados'}</span>
+            <button class="btn" data-action="ob-new" title="Una agrupación nueva con los marcados">Crear agrupación</button>
+            <button class="btn ghost" data-action="ob-clear" aria-label="Quitar las marcas" title="Quitar las marcas">✕</button></div>
+            ${groups.length ? `<div class="row"><select data-ob-pick aria-label="Agrupación a la que añadir">${groups.map(x => `<option value="${x.id}">${x.num} · ${esc(x.name)}</option>`).join('')}</select>
+                <button class="btn" data-action="ob-add">Añadir a…</button></div>` : ''}</div>`;
+    }
+    // Pestaña Orden de batalla: las agrupaciones del jugador (con sus ejércitos al desplegarlas) y, debajo, los sueltos.
+    // El HTML se construye una vez, sin alcances ni cálculos de combate: con cientos de ejércitos sigue siendo instantáneo.
+    renderBattleOrder() {
+        const g = this.game, p0 = g.player, body = $('#drawer-body'), color = g.nations[p0].color;
+        const all = [];
+        for (const a of g.armies.values()) if (a.owner === p0 && g.armyOn(a.cell) === a) all.push(a);
+        all.sort((a, b) => a.id - b.id);
+        const alive = new Set(all.map(a => a.id));
+        for (const id of [...this.obSel]) if (!alive.has(id)) this.obSel.delete(id);
+        const ops = g.opsOf(p0);
+        if (this.obFilter.startsWith('op:') && !g.ops.has(+this.obFilter.slice(3))) this.obFilter = 'todas';
+        const f = this.obFilter, fop = f.startsWith('op:') ? +f.slice(3) : 0, V = this.view;
+        const pass = a => {
+            if (f === 'todas') return true;
+            if (fop) return a.op === fop;
+            const x = G.cx[a.cell] * V.scale + V.ox, y = G.cy[a.cell] * V.scale + V.oy;
+            return x >= 0 && x <= V.w && y >= 0 && y <= V.h;
+        };
+        const DOING = { march: 'marchando', attack: 'va a atacar', hold: 'mantiene', fortify: 'fortificando', follow: 'sigue a otro', join: 'va a juntarse' };
+        const state = a => a.order ? DOING[a.order.kind] ?? 'con orden' : a.op ? `en «${esc(g.ops.get(a.op)?.name ?? '')}»` : 'sin órdenes';
+        const sym = (u, n) => `<span class="ob-sym"><small>${echelonOf(n).mark}</small>${unitIcon(dominantType(u), color)}</span>`;
+        const place = new Map(), where = a => { let t = place.get(a.cell); if (t === undefined) place.set(a.cell, t = esc(g.placeName(a.cell))); return t; };
+        const row = (a, withPlace) => {
+            const n = countUnits(a.units);
+            return `<div class="ob-army"><label><input type="checkbox" data-ob-army="${a.id}" ${this.obSel.has(a.id) ? 'checked' : ''} aria-label="Marcar el ejército">
+                ${sym(a.units, n)}<span><b>${n}</b>${withPlace ? ` en ${where(a)}` : ''}<small>${state(a)} · ${unitText(a.units)}</small></span></label>
+                <button class="btn ghost" data-action="sel-center" data-id="${a.id}" title="Centrar el mapa en él">Ver</button></div>`;
+        };
+        const byGroup = new Map(), loose = [];
+        for (const a of all) {
+            if (!a.group) { loose.push(a); continue; }
+            let l = byGroup.get(a.group);
+            if (!l) byGroup.set(a.group, l = []);
+            l.push(a);
+        }
+        const groups = g.nations[p0].groups;
+        const groupRows = groups.slice().sort((a, b) => a.num - b.num).map(gr => {
+            const ms = byGroup.get(gr.id) ?? [];
+            if (f !== 'todas' && !ms.some(pass)) return '';
+            const u = emptyUnits();
+            for (const a of ms) for (const k of UNIT_KEYS) u[k] += a.units[k] || 0;
+            const n = countUnits(u), open = this.obOpen.has(gr.id), col = GROUP_COLORS[gr.color];
+            return `<div class="ob-group ${open ? 'open' : ''}" data-ob-group="${gr.id}" style="--gc:${col}">
+                <div class="ob-head"><button class="ob-symbtn" data-action="ob-toggle" data-id="${gr.id}" aria-expanded="${open}" title="${open ? 'Plegar' : 'Desplegar'} sus ejércitos">${sym(u, n)}</button>
+                    <div class="ob-main"><div class="row"><span class="ob-num">${gr.num}</span><input type="text" data-group-name="${gr.id}" maxlength="40" value="${esc(gr.name)}" aria-label="Nombre de la agrupación" title="Cambiar el nombre (vacío: el automático)"></div>
+                        <small>${plural(ms.length, 'ejército', 'ejércitos')} · ${plural(n, 'unidad', 'unidades')} · ${this.obGroupState(gr, ms)}</small></div></div>
+                <div class="ob-btns">
+                    <button class="btn" data-action="ob-select" data-id="${gr.id}" title="Elige a todos en el mapa (Alt + ${gr.num})">Elegir</button>
+                    <button class="btn" data-action="ob-center" data-id="${gr.id}" title="Centrar el mapa en la agrupación">Centrar</button>
+                    <button class="btn ob-color" data-action="ob-color" data-id="${gr.id}" title="Cambiar el color" aria-label="Cambiar el color"><i style="background:${col}"></i></button>
+                    <button class="btn ghost" data-action="ob-toggle" data-id="${gr.id}" title="${open ? 'Plegar' : 'Desplegar'} sus ejércitos" aria-label="${open ? 'Plegar' : 'Desplegar'} sus ejércitos">${open ? '▴' : '▾'}</button>
+                    <button class="btn ghost" data-action="ob-disband" data-id="${gr.id}" title="Disolver la agrupación: sus ejércitos quedan sueltos">Disolver</button></div>
+                ${open ? `<div class="ob-list">${ms.filter(pass).map(a => row(a, true)).join('') || '<p class="note">Ninguno cumple el filtro.</p>'}</div>` : ''}</div>`;
+        }).join('');
+        // Los sueltos, por provincia (o por operación).
+        const buckets = new Map();
+        for (const a of loose) {
+            if (!pass(a)) continue;
+            const key = this.obBy === 'operacion' ? a.op : afloat(a.cell) ? -1 - SEA_PROV[a.cell] : G.prov[a.cell];
+            let b = buckets.get(key);
+            if (!b) buckets.set(key, b = { list: [], label: this.obBy === 'operacion' ? (a.op ? g.ops.get(a.op)?.name ?? 'Operación' : 'Sin operación') : key < 0 ? `Mar junto a ${PROVINCES[-1 - key].name}` : PROVINCES[key].name });
+            b.list.push(a);
+        }
+        const looseRows = [...buckets.values()].sort((a, b) => a.label.localeCompare(b.label, 'es'))
+            .map(b => `<p class="group-title">${esc(b.label)} · ${b.list.length}</p><div class="ob-list">${b.list.map(a => row(a, false)).join('')}</div>`).join('');
+        const nLoose = loose.filter(pass).length;
+        const seg = (act, cur, items) => `<div class="seg">${items.map(([v, l, t]) => `<button data-action="${act}" data-value="${v}" class="${cur === v ? 'on' : ''}" ${t ? `title="${t}"` : ''}>${l}</button>`).join('')}</div>`;
+        body.innerHTML = `${this.obBar()}
+            <p class="group-title">Agrupaciones · ${groups.length}</p>
+            <div class="row ob-filters">${seg('ob-filter', fop ? '' : f, [['todas', 'Todas'], ['pantalla', 'En pantalla', 'Solo los ejércitos que ves ahora en el mapa']])}
+                ${ops.length ? `<select data-ob-op aria-label="Filtrar por operación"><option value="0">Operación…</option>${ops.map(o => `<option value="${o.id}" ${fop === o.id ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select>` : ''}</div>
+            <div class="ob-groups">${groupRows || `<p class="note" style="margin:8px">${groups.length ? 'Ninguna agrupación tiene ejércitos que cumplan el filtro.' : 'Aún no hay agrupaciones. Marca ejércitos de la lista de abajo y crea una, o elígelos en el mapa con Ctrl + clic o un rectángulo.'}</p>`}</div>
+            <p class="group-title">Sin agrupar · ${nLoose}</p>
+            ${loose.length ? `<div class="row" style="margin:0 8px 4px"><span class="small muted">Agrupados por</span>${seg('ob-by', this.obBy, [['provincia', 'Provincia'], ['operacion', 'Operación']])}</div>` : ''}
+            ${looseRows || '<p class="note" style="margin:8px">Todos tus ejércitos están en una agrupación.</p>'}
+            <p class="note" style="margin-top:10px">Una agrupación es una etiqueta para elegir y mandar a la vez: sus ejércitos siguen en su operación. Alt + 1–9 elige la de ese número.</p>`;
     }
     // Directiva nacional: postura, objetivos estratégicos, presupuesto opcional y retaguardia.
     directiveSection() {
