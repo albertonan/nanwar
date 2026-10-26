@@ -118,6 +118,69 @@ const setup = () => {
             }
             throw new Error('no hay sitio para el frente');
         },
+        // Casillas que pisa la recta de `a` a `b`, cada media casilla (como el trazado de una ofensiva).
+        samples(a, b) {
+            const k = Math.max(1, Math.round(Math.hypot(G.cx[b] - G.cx[a], G.cy[b] - G.cy[a]) / G.W)) * 2, out = new Set([a, b]);
+            for (let j = 1; j < k; j++) { const c = G.cellAt(G.cx[a] + (G.cx[b] - G.cx[a]) * j / k, G.cy[a] + (G.cy[b] - G.cy[a]) * j / k); if (c >= 0) out.add(c); }
+            return [...out];
+        },
+        // ¿Son de `owner` y de tierra todas las casillas a `m` o menos del trazado `pts` (y con suministro, si `supply`)?
+        // Si lo son, quita los ejércitos que haya en ellas y devuelve true.
+        clearRoute(g, owner, pts, m, supply = false) {
+            const area = new Set();
+            for (let i = 0; i + 1 < pts.length; i++) for (const s of T.samples(pts[i], pts[i + 1])) for (const x of g.nearCells(s, m).keys()) {
+                if (!isLand(x) || g.owner[x] !== owner || CAPITAL_OF[x] >= 0 || (supply && !g.inSupply(owner, x))) return false;
+                area.add(x);
+            }
+            for (const x of area) { const a = g.armyOn(x); if (a) g.removeArmy(a); }
+            return true;
+        },
+        // Flecha recta de `len` casillas por tierra de `owner`, con margen `m` alrededor: [salida, objetivo].
+        straight(g, owner, len, { m = 2, supply = false, skip = 0 } = {}) {
+            for (const S of G.land) {
+                if (g.owner[S] !== owner || CITY_OF[S] >= 0) continue;
+                for (const [O, d] of g.nearCells(S, len)) if (d === len && isLand(O) && CITY_OF[O] < 0 && T.clearRoute(g, owner, [S, O], m, supply) && skip-- <= 0) return [S, O];
+            }
+            throw new Error('no hay sitio para la flecha');
+        },
+        // Flecha en L por tierra de `owner`: dos tramos de `leg` casillas, y el punto intermedio a `perp` casillas o más de
+        // la recta entre la salida y el objetivo (fuera de su pasillo): [salida, intermedio, objetivo].
+        elbow(g, owner, { leg = 7, perp = 4.5, m = 1 } = {}) {
+            for (const S of G.land) {
+                if (g.owner[S] !== owner || CITY_OF[S] >= 0) continue;
+                for (const [M, d] of g.nearCells(S, leg)) {
+                    if (d !== leg || !isLand(M) || g.owner[M] !== owner) continue;
+                    for (const [O, e] of g.nearCells(M, leg)) {
+                        if (e !== leg || !isLand(O) || CITY_OF[O] >= 0 || hexDist(S, O) < leg + 2) continue;
+                        const so = Math.hypot(G.cx[O] - G.cx[S], G.cy[O] - G.cy[S]);
+                        const p = Math.abs((G.cx[O] - G.cx[S]) * (G.cy[M] - G.cy[S]) - (G.cy[O] - G.cy[S]) * (G.cx[M] - G.cx[S])) / so / G.W;
+                        if (p >= perp && T.clearRoute(g, owner, [S, M, O], m)) return [S, M, O];
+                    }
+                }
+            }
+            throw new Error('no hay sitio para la L');
+        },
+        // Dos costas de un mismo país frente a frente por mar (a 3–5 casillas) con un camino por tierra suya mucho más
+        // largo, por el que la marcha de siempre iría embarcada: { owner, A, B, pts: el camino por tierra, casilla a casilla }.
+        bay(g) {
+            const nbs = c => [0, 1, 2, 3, 4, 5].map(d => G.nb[c * 6 + d]).filter(j => j >= 0);
+            for (let owner = 0; owner < g.nations.length; owner++) for (const A of G.land) {
+                if (g.owner[A] !== owner || !T.free(g, A) || !nbs(A).some(j => !isLand(j))) continue;
+                let steps = null;
+                for (const [B, d] of g.nearCells(A, 5)) {
+                    if (d < 3 || !isLand(B) || g.owner[B] !== owner || !T.free(g, B) || !nbs(B).some(j => !isLand(j))) continue;
+                    steps ??= g.landSteps(owner, [A]);
+                    if (steps[B] < d * 3 || steps[B] > 30) continue;
+                    const pts = [B];
+                    while (pts[pts.length - 1] !== A) { const c = pts[pts.length - 1]; pts.push(nbs(c).find(j => isLand(j) && steps[j] === steps[c] - 1)); }
+                    pts.reverse();
+                    if (!pts.every(c => g.owner[c] === owner && CAPITAL_OF[c] < 0)) continue;
+                    if (!g.fieldPath(g.orderField(owner, B), A).some(afloat)) continue;   // por mar le saldría más corto
+                    return { owner, A, B, pts };
+                }
+            }
+            throw new Error('no hay bahía');
+        },
         // Empieza una partida en la interfaz con el país dado y devuelve su motor.
         uiStart(key, fog = false) {
             for (const d of document.querySelectorAll('dialog[open]')) d.close();
@@ -823,6 +886,226 @@ const CHECKS = [
         const t0 = performance.now(); ui.renderBattleOrder(); const ms = performance.now() - t0;
         T.ok(ms < 50, `${ms.toFixed(1)} ms`);
         T.ok($('#drawer-body').querySelectorAll('[data-ob-army]').length >= 400, 'todos listados');
+        return true;
+    }],
+    ['A5 · espera en la zona hasta estar todos y luego sale', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 8);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O]);
+        T.eq([op.phase, op.launch, op.go, op.wp, op.zone, op.gatherSince], ['reunion', 'lista', false, 1, S, g.turn], 'empieza reuniéndose');
+        const near = T.cellsAt(g, es, S, [0, 1]).map(c => T.army(g, es, c, 0, 6, 0));
+        const far = T.army(g, es, T.farCell(g, es, S, 10, 16), 3);
+        for (const a of [...near, far]) g.assignArmy(a, op.id);
+        T.ok(hexDist(far.cell, S) > 2, 'el lejano no está en la zona');
+        let launched = -1, waited = 0;
+        for (let t = 0; t < 7 && launched < 0; t++) {
+            const st = g.opReady(op);
+            T.turns(g, es, 1);
+            if (op.phase === 'avance') { launched = t; T.ok(st.ready && st.missing.length === 0, `sale con todos en la zona (${JSON.stringify(st)})`); }
+            else { waited++; T.ok(near.every(a => hexDist(a.cell, S) <= 2), 'los que están esperan en la zona'); }
+        }
+        T.ok(launched > 0 && waited > 0, `espera ${waited} turnos y sale`);
+        T.eq(op.body.slice().sort(), [...near, far].map(a => a.id).sort(), 'el grueso son los tres');
+        T.ok(g.logs.some(l => l.msg.includes('Reunión: 2 de 3 en la zona')), 'el parte dice cómo va la reunión');
+        const before = Math.max(...g.opMembers(op).map(a => g.opAlong(op, a.cell)));
+        T.turns(g, es, 1);
+        T.ok(!g.ops.has(op.id) || Math.max(...g.opMembers(op).map(a => g.opAlong(op, a.cell))) > before, 'y avanzan');
+        return true;
+    }],
+    ['A5 · sigue los puntos de la flecha en orden', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const [S, M, O] = T.elbow(g, es);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, M, O]), lane = g.opCorridor(op);
+        T.ok(!g.opAxisSea(op), 'por tierra');
+        const xs = T.cellsAt(g, es, S, [0, 1, 1]).map(c => T.army(g, es, c, 0, 5, 0));
+        for (const a of xs) g.assignArmy(a, op.id);
+        const ids = new Set(xs.map(a => a.id)), seen = new Set(g.motion);
+        let atM = -1, nearO = -1, wps = [];
+        for (let t = 0; t < 40 && g.ops.has(op.id); t++) {
+            T.turns(g, es, 1);
+            wps.push(op.wp);
+            const mine = [...g.armies.values()].filter(a => a.owner === es && (ids.has(a.id) || a.op === op.id));
+            for (const a of mine) T.ok(lane.has(a.cell), `fuera del pasillo en ${a.cell}`);
+            if (atM < 0 && mine.some(a => hexDist(a.cell, M) <= 1)) atM = t;
+            if (nearO < 0 && mine.some(a => hexDist(a.cell, O) < hexDist(M, O) - 1)) nearO = t;
+        }
+        for (const e of g.motion) if (!seen.has(e) && e.kind === 'move' && e.owner === es) for (const c of e.cells) T.ok(lane.has(c), `pasa fuera del pasillo por ${c}`);
+        T.ok(atM >= 0, 'pasa por el punto intermedio');
+        T.ok(nearO < 0 || atM <= nearO, `antes de acercarse al objetivo (${atM} / ${nearO})`);
+        T.ok(wps.every((w, i) => !i || w >= wps[i - 1]), 'los puntos, en orden');
+        T.eq([g.owner[O], g.ops.has(op.id)], [es, false], 'toma el objetivo');
+        return true;
+    }],
+    ['A5 · los rápidos esperan a los lentos', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 10, { m: 1, supply: true });
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O]);
+        const [tk, inf] = T.cellsAt(g, es, S, [0, 1]).map((c, i) => T.army(g, es, c, i ? 6 : 0, i ? 0 : 6, 0));
+        for (const a of [tk, inf]) g.assignArmy(a, op.id);
+        T.ok(g.mp(tk) > g.mp(inf) + MOVE, `los tanques corren más (${g.mp(tk)} / ${g.mp(inf)})`);
+        let turns = 0, first = null;
+        const t0 = g.opAlong(op, tk.cell);
+        for (let t = 0; t < 25 && g.ops.has(op.id); t++) {
+            T.turns(g, es, 1);
+            if (!g.ops.has(op.id)) break;
+            const [a, b] = [tk, inf].map(x => g.opAlong(op, x.cell));
+            T.ok(a - b <= OP_LEAD + 1e-9, `los tanques no se adelantan más de ${OP_LEAD} (${a.toFixed(2)} / ${b.toFixed(2)})`);
+            first ??= a - t0;
+            turns++;
+        }
+        T.ok(first < 5 && turns >= 2, `los tanques esperan (${first?.toFixed(2)} casillas el primer turno) y van juntos ${turns} turnos`);
+        T.eq(g.owner[O], es, 'y toman el objetivo');
+        return true;
+    }],
+    ['A5 · nadie ataca solo: asalto conjunto con todos', () => {
+        let g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        let { target, sides } = T.ring(g, es, fr, 3);
+        g.settle(g.newArmy(fr, target, { infantry: 400, tank: 0, artillery: 0 }, 0));
+        let xs = sides.map(c => T.army(g, es, c, 0, 0, 30));
+        let op = g.createOp(es, 'ofensiva', [sides[0], target]);
+        for (const a of xs) g.assignArmy(a, op.id);
+        for (const a of xs) { const fx = g.combatFactors(es, a.units, a.cell, g.armyOn(target), target, a.id); T.ok(fx.atk / fx.dfn < 1, 'uno solo no puede'); }
+        let seen = new Set(g.motion);
+        g.executeOp(op);
+        let bs = g.motion.filter(e => e.kind === 'battle' && !seen.has(e));
+        T.eq(bs.length, 1, 'un solo combate');
+        T.eq(bs[0].joint.slice().sort(), xs.map(a => a.id).sort(), 'con los tres a la vez');
+        T.eq(g.owner[target], es, 'y lo ganan');
+        T.ok(g.logs.some(l => l.msg.includes('Asalto conjunto sobre') && l.msg.includes('con 3 ejércitos')), 'el parte lo dice');
+        // Contra lo que no pueden ni juntos, nadie ataca: esperan, y piden ayuda.
+        g = T.game(); es = T.nation('es'); fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        ({ target, sides } = T.ring(g, es, fr, 3));
+        g.settle(g.newArmy(fr, target, { infantry: 3000, tank: 0, artillery: 0 }, 0));
+        xs = sides.map(c => T.army(g, es, c, 0, 0, 30));
+        op = g.createOp(es, 'ofensiva', [sides[0], target]);
+        for (const a of xs) g.assignArmy(a, op.id);
+        g.opLaunch(op);
+        seen = new Set(g.motion);
+        T.turns(g, es, 3);
+        T.eq(g.motion.filter(e => e.kind === 'battle' && !seen.has(e)).length, 0, 'sin combates');
+        T.ok(xs.every(a => g.armies.has(a.id) && G.dirTo(a.cell, target) >= 0), 'esperan junto al objetivo');
+        T.ok(op.waiting > 0 && g.opNeed(op) > 0, 'y piden ayuda');
+        return true;
+    }],
+    ['A5 · por tierra no embarca aunque el mar sea más corto', () => {
+        const g = T.game(), { owner: es, A, B, pts } = T.bay(g), fr = es === T.nation('fr') ? T.nation('es') : T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        for (const c of pts) for (const x of g.nearCells(c, 1).keys()) { const a = g.armyOn(x); if (a) g.removeArmy(a); }
+        g.owner[B] = fr; g.legal[B] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', pts);
+        T.ok(op && !g.opAxisSea(op) && !op.bySea, 'la flecha va por tierra');
+        const a = T.army(g, es, A, 0, 4, 0);
+        g.assignArmy(a, op.id);
+        const seen = new Set(g.motion);
+        for (let t = 0; t < 40 && g.ops.has(op.id); t++) {
+            T.turns(g, es, 1);
+            T.ok(!afloat(a.cell), `embarcado en ${a.cell}`);
+        }
+        T.ok(!g.motion.some(e => !seen.has(e) && e.kind === 'move' && e.owner === es && e.cells.some(afloat)), 'nunca pisa el mar');
+        T.eq(g.owner[B], es, 'llega por tierra y toma el objetivo');
+        return true;
+    }],
+    ['A5 · con mar, desembarcan el mismo turno que asalta la tierra', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const { target, sides, sea } = T.ring(g, es, fr, 1, { sea: true });
+        g.settle(g.newArmy(fr, target, { infantry: 6, tank: 0, artillery: 0 }, 0));
+        // Una salida desde la que la flecha cruza el mar; el de tierra empieza a 3 casillas del objetivo.
+        const start = [...g.nearCells(target, 6)].find(([c, d]) => d >= 2 && isLand(c) && g.owner[c] === es && T.free(g, c) && T.samples(c, target).some(x => !isLand(x)))?.[0];
+        T.ok(start !== undefined, 'hay salida al otro lado del mar');
+        const op = g.createOp(es, 'ofensiva', [start, target]);
+        T.ok(op.bySea, 'la flecha cruza el mar');
+        const lc = T.cellsAt(g, es, target, [3])[0];
+        const land = T.army(g, es, lc, 2, 0, 0), ship = T.army(g, es, sea, 0, 0, 40);
+        for (const a of [land, ship]) g.assignArmy(a, op.id);
+        const solo = g.combatFactors(es, ship.units, sea, g.armyOn(target), target, ship.id);
+        T.ok(solo.atk / solo.dfn >= op.ratio, 'el barco solo podría atacar');
+        op.phase = 'avance'; op.body = [land.id, ship.id];
+        const seen = new Set(g.motion);
+        let fought = -1, adj = -1;
+        for (let t = 0; t < 10 && fought < 0; t++) {
+            const ready = G.dirTo(land.cell, target) >= 0;
+            T.turns(g, es, 1);
+            const bs = g.motion.filter(e => e.kind === 'battle' && !seen.has(e));
+            if (bs.length) {
+                fought = t;
+                T.ok(ready, 'el combate empieza con los de tierra junto al objetivo');
+                T.eq(bs[0].joint.slice().sort(), [land.id, ship.id].sort(), 'tierra y mar a la vez');
+            } else T.eq(ship.cell, sea, 'el barco espera junto a la costa');
+            if (adj < 0 && G.dirTo(land.cell, target) >= 0) adj = t;
+        }
+        T.ok(adj >= 1 && fought === adj + 1, `llega la tierra (${adj}) y asaltan juntos (${fought})`);
+        T.eq(g.owner[target], es, 'y lo toman');
+        return true;
+    }],
+    ['A5 · con «cuando yo lo diga» no sale hasta Lanzar', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 8);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O], { launch: 'orden' });
+        T.eq(op.launch, 'orden', 'cuando yo lo diga');
+        const xs = T.cellsAt(g, es, S, [0, 1]).map(c => T.army(g, es, c, 0, 6, 0));
+        for (const a of xs) g.assignArmy(a, op.id);
+        const cells = xs.map(a => a.cell);
+        T.turns(g, es, 3);
+        T.eq([op.phase, xs.map(a => a.cell)], ['reunion', cells], 'lista, pero espera la orden');
+        T.ok(g.opReady(op).strong && !g.opReady(op).ready, 'tiene fuerza y no sale');
+        T.ok(g.playerLaunchOp(op), 'Lanzar');
+        T.eq(op.phase, 'avance', 'sale');
+        T.turns(g, es, 1);
+        T.ok(!g.ops.has(op.id) || xs.some((a, i) => a.cell !== cells[i]), 'y se mueven');
+        return true;
+    }],
+    ['A5 · un miembro aislado: sale sin él a los 8 turnos', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 8);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O]);
+        const xs = T.cellsAt(g, es, S, [0, 1]).map(c => T.army(g, es, c, 0, 6, 0));
+        const iso = T.army(g, es, T.farCell(g, es, S, 30, 60), 2);
+        for (const a of [...xs, iso]) g.assignArmy(a, op.id);
+        g.setOrder(iso, { kind: 'hold' });   // no viene: lo retiene su propia orden
+        let out = -1;
+        for (let t = 0; t < 12 && out < 0; t++) {
+            const turn = g.turn;
+            T.turns(g, es, 1);
+            if (op.phase === 'avance') out = turn - op.gatherSince;
+        }
+        T.eq(out, OP_WAIT, `sale a los ${OP_WAIT} turnos`);
+        T.ok(!op.body.includes(iso.id) && xs.every(a => op.body.includes(a.id)), 'sin el aislado');
+        T.ok(g.logs.some(l => l.msg.includes('sin 1 ejército que no ha llegado')), 'el parte lo avisa');
+        return true;
+    }],
+    ['A5 · ofensiva de una partida vieja carga en avance', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const [S, M, O] = T.elbow(g, es);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, M, O]), op2 = g.createOp(es, 'ofensiva', [S, O], { launch: 'orden', noCap: true });
+        g.assignArmy(T.army(g, es, M, 0, 3, 0), op.id);
+        op2.zone = T.cellsAt(g, es, S, [1])[0]; op2.gatherSince = 3;
+        const data = JSON.parse(JSON.stringify(g.serialize()));
+        // Partida nueva: se guarda y se carga igual.
+        let h = GameEngine.load(JSON.parse(JSON.stringify(data)));
+        const pick = o => [o.phase, o.launch, o.go, o.wp, o.zone, o.gatherSince, o.bySea];
+        T.eq(pick(h.ops.get(op2.id)), pick(op2), 'se guardan las fases');
+        // Partida de antes de las fases: sin esos campos, en avance hacia el primer punto aún no alcanzado.
+        for (const o of data.ops) for (const k of ['phase', 'launch', 'go', 'wp', 'zone', 'gatherSince', 'body']) delete o[k];
+        h = GameEngine.load(data);
+        const old = h.ops.get(op.id);
+        T.eq([old.phase, old.launch, old.wp, old.zone, old.body], ['avance', 'lista', 2, S, null], 'en avance, hacia el objetivo');
+        T.eq([h.ops.get(op2.id).phase, h.ops.get(op2.id).wp], ['avance', 1], 'sin ejércitos, hacia el primer punto');
+        h.endTurn();
         return true;
     }]
 ];

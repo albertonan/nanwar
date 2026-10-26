@@ -765,6 +765,12 @@ const LINE_RETURN = 1.5;     // con esta relación en la línea dibujada, vuelve
 const LINE_STEP_TURNS = 2;   // cada repliegue busca a este número de turnos de marcha del ejército más lento
 const LINE_MAX_TURNS = 4;    // y, sumando todos, no se aleja más de la línea dibujada
 const OP_MIN_ARMIES = 3;     // ejércitos que pide una ofensiva para empezar
+// Ofensivas por fases (A5): reunión en la salida de la flecha, avance juntos por su pasillo y asalto conjunto.
+const OP_WAIT = 8;           // turnos que la reunión espera a un ejército que no llega; luego sale sin él
+const OP_LANE = 3;           // pasillo de la ofensiva: casillas a esta distancia o menos del trazado de la flecha
+const OP_LEAD = 2;           // ningún ejército termina el turno más adelantado que esto (a lo largo de la flecha) del más atrasado
+const OP_ZONE = 2;           // en la zona de reunión: a esta distancia o menos de su casilla (más si son muchos)
+const OP_LAUNCH = { lista: 'Cuando esté lista', orden: 'Cuando yo lo diga' };
 // Directiva nacional: la postura fija la ventaja con la que atacan las ofensivas nuevas y un reparto de la renta.
 const POSTURES = {
     defensa: { name: 'Defensa total', ratio: 1.8, budget: { recruit: 45, research: 10, forts: 35, roads: 5 }, desc: 'Ofensivas nuevas en «cauta» (1,8 a 1). Mucho oro para fortificar.' },
@@ -1313,7 +1319,8 @@ class GameEngine {
             nextArmyId: this.nextArmyId,
             ops: [...this.ops.values()].map(o => ({ id: o.id, owner: o.owner, kind: o.kind, name: o.name, cells: o.cells, ratio: o.ratio, auto: o.auto,
                 paused: o.paused, fortify: o.fortify, since: o.since, waiting: o.waiting, front: o.front ?? -1, drawn: o.drawn, state: o.state, rel: o.rel, gold: o.gold, extra: o.extra ?? 0, poolTurn: o.poolTurn ?? 0, template: o.template, pool: o.pool, formed: o.formed, aims: o.aims,
-                form: o.form ? { name: o.form.name, units: o.form.units, zone: o.form.zone, recruited: o.form.recruited, pending: o.form.pending } : null })),
+                form: o.form ? { name: o.form.name, units: o.form.units, zone: o.form.zone, recruited: o.form.recruited, pending: o.form.pending } : null,
+                ...(o.kind === 'ofensiva' ? { phase: o.phase, launch: o.launch, go: o.go, wp: o.wp, zone: o.zone, gatherSince: o.gatherSince, body: o.body } : {}) })),
             armyForms: [...this.armies.values()].filter(a => a.form).map(a => [a.id, a.form]),
             nextOpId: this.nextOpId,
             armyOps: [...this.armies.values()].filter(a => a.op).map(a => [a.id, a.op]),
@@ -1499,6 +1506,7 @@ class GameEngine {
         g.blocsChanged();
         g.version++; g.roadVersion++; g.fortVersion++;
         // Operaciones: tipos, casillas, nombres y ajustes conocidos; los ejércitos, solo si son del mismo dueño.
+        const firstWp = [];
         for (const o of list(data.ops).slice(0, 5000)) {
             const kind = ['ofensiva', 'defensa', 'reserva'].find(k => k === o?.kind), id = int(o?.id, 1, 1e6, 0);
             if (!kind || !id || g.ops.has(id)) continue;
@@ -1517,6 +1525,14 @@ class GameEngine {
                 op.state = ['aguanta', 'repliega', 'restablece'].find(k => k === o.state) ?? 'aguanta';
                 op.rel = Number.isFinite(o.rel) ? Math.max(0, Math.min(1e3, o.rel)) : null;
             } else { op.drawn = null; op.state = 'aguanta'; op.rel = null; }
+            if (kind === 'ofensiva') {   // fases (A5); las de antes de las fases ya estaban en marcha: avance
+                const old = !['reunion', 'avance'].includes(o.phase), zone = int(o.zone, -1, G.N - 1, -1);
+                Object.assign(op, { phase: old ? 'avance' : o.phase, launch: o.launch === 'orden' ? 'orden' : 'lista', go: o.go === true, wp: int(o.wp, 1, cells.length - 1, 1),
+                    zone: zone >= 0 && isLand(zone) ? zone : cells[0], gatherSince: int(o.gatherSince, 0, 1e6, g.turn),
+                    body: Array.isArray(o.body) ? [...new Set(o.body.slice(0, 5000).map(x => int(x, 1, 1e9, 0)).filter(Boolean))] : null });
+                op.bySea = g.opAxisSea(op);
+                if (old) firstWp.push(op);
+            }
             const f = o.form;
             const zone = int(f?.zone, -1, G.N - 1, -1);
             if (f && zone >= 0 && isLand(zone)) op.form = { name: str(f.name, 40), units: units(f.units), zone, recruited: units(f.recruited),
@@ -1531,6 +1547,7 @@ class GameEngine {
             const a = g.armies.get(int(x?.[0], 1, 1e9, 0)), op = g.ops.get(int(x?.[1], 1, 1e6, 0));
             if (a && op && op.owner === a.owner) a.op = op.id;
         }
+        for (const op of firstWp) op.wp = g.opFirstWp(op);   // el primer punto que sus ejércitos aún no han alcanzado
         for (const x of list(data.armyGroups)) {
             const a = g.armies.get(int(x?.[0], 1, 1e9, 0)), gr = a && g.groupById(a.owner, int(x?.[1], 1, 1e9, 0));
             if (gr && !a.group) a.group = gr.id;
@@ -3370,17 +3387,20 @@ class GameEngine {
     // Coste en subpuntos de ir de cada casilla hasta `dest` para un ejército de `owner`: Dijkstra hacia atrás desde el
     // destino que solo avanza lo que se le pide (sirve para muchos ejércitos con el mismo destino). Los ejércitos ajenos
     // cortan el paso, salvo en el propio destino; el mar cuesta el triple para que prefiera ir por tierra.
-    orderField(owner, dest) {
+    // `mode` (las ofensivas, A5): { key, land: solo por tierra, within: Set de casillas fuera de las que no se pasa }.
+    orderField(owner, dest, mode = null) {
         // Durante una pasada de órdenes (passStamp) los caminos valen para toda la pasada: rehacerlos tras cada
         // movimiento propio costaría mucho en el mapa del mundo y apenas cambia nada.
         const stamp = this.passStamp ?? `${this.version}:${this.armyVersion}:${this.roadVersion}:${this.fortVersion}:${this.techVersion}:${this.blocVersion}`;
         if (stamp !== this.fieldStamp) { this.fields.clear(); this.fieldStamp = stamp; }
-        const key = owner * G.N + dest;
+        const key = mode ? `${owner}:${mode.key}:${dest}` : owner * G.N + dest;
         let f = this.fields.get(key);
         if (f) return f;
         const dist = new Float64Array(G.N).fill(Infinity), next = new Int32Array(G.N).fill(-1), done = new Uint8Array(G.N), heap = new MinHeap();
+        const land = !!mode?.land, within = mode?.within ?? null;
         const open = c => {
             if (c === dest) return true;
+            if ((land && !isLand(c)) || (within && !within.has(c))) return false;
             const o = this.owner[c];
             if (isLand(c) && !(o === owner || this.allied(owner, o) || this.atWar(owner, o))) return false;
             const id = this.armyAt[c];
@@ -3890,6 +3910,10 @@ class GameEngine {
             ratio: opts.ratio ?? (kind === 'defensa' ? 1.8 : POSTURES[this.nations[owner].command.posture].ratio), auto: opts.auto ?? 'auto', paused: false, fortify: !!opts.fortify,
             since: this.turn, waiting: 0, uncovered: 0, drawn: kind === 'defensa' ? [...new Set(cells)] : null, state: 'aguanta', rel: null, gold: OP_GOLD.includes(opts.gold) ? opts.gold : 0, template: opts.template ?? 'auto', pool: 0, formed: 0, form: null,
             aims: Array.isArray(opts.aims) ? [...new Set(opts.aims.filter(k => Object.hasOwn(OP_AIMS, k)))] : [...OP_AIM_DEFAULT[kind]] };   // solo fines que existen
+        if (kind === 'ofensiva') {   // empieza reuniéndose en la salida de la flecha (A5)
+            Object.assign(op, { phase: 'reunion', launch: opts.launch === 'orden' ? 'orden' : 'lista', go: false, wp: 1, zone: cells[0], gatherSince: this.turn, body: null });
+            op.bySea = this.opAxisSea(op);
+        }
         this.ops.set(op.id, op);
         this.orderVersion++;
         return op;
@@ -3908,7 +3932,7 @@ class GameEngine {
     // guarnición de una unidad de cada ciudad (al salir de las demás deja una infantería, ver detach) y a quien tenga
     // otro enemigo a 2 casillas o menos, que ya guarda otro frente.
     offensiveFree(op) {
-        const id = op.owner, rules = this.rules(id), start = op.cells[0], target = this.owner[op.cells[op.cells.length - 1]];
+        const id = op.owner, rules = this.rules(id), start = op.zone ?? op.cells[0], target = this.owner[op.cells[op.cells.length - 1]];
         const fastest = Math.max(...UNIT_KEYS.map(k => rules.types[k].speed));
         const cost = this.marchCosts(id, start, OP_GATHER_TURNS * MOVE * fastest);
         const otherFront = a => { for (const c of this.nearCells(a.cell, 2).keys()) { const e = this.armyOn(c); if (e && e.owner !== target && this.atWar(id, e.owner)) return true; } return false; };
@@ -3958,6 +3982,275 @@ class GameEngine {
         if (op.kind === 'defensa') return op.cells.filter(c => { const id = this.armyAt[c]; return !id || this.armies.get(id).owner !== op.owner; }).length;
         return this.opMembers(op).length ? op.waiting : 1;
     }
+
+    // --- Ofensivas por fases (A5): reunión, avance por la flecha y asalto conjunto ---
+    // Campos de una ofensiva: phase 'reunion' | 'avance'; launch 'lista' (sale cuando está lista) | 'orden' (cuando el
+    // jugador lo diga); go: el jugador la ha lanzado; wp: índice del siguiente punto de `cells`; zone: casilla de
+    // reunión (por defecto la salida de la flecha); gatherSince: turno en que empezó a reunirse; body: ids del grueso
+    // (los que salieron juntos y los que lo han alcanzado; null: todos); bySea: la flecha cruza el mar (opAxisSea).
+    // Trazado de una ofensiva, guardado por trazado: tramos (origen, vector, longitud y casillas recorridas antes),
+    // casillas que pisa cada tramo (cada media casilla, como suggestTemplate pero más fino), pasillo (a OP_LANE o menos),
+    // pasillo del primer tramo y si cruza el mar.
+    opTrace(op) {
+        const key = op.cells.join(',');
+        if (op._trace?.key === key) return op._trace;
+        const segs = [], lane = new Set(), first = new Set();
+        let along = 0, sea = op.cells.some(c => !isLand(c));
+        for (let i = 0; i + 1 < op.cells.length; i++) {
+            const a = op.cells[i], b = op.cells[i + 1], dx = G.cx[b] - G.cx[a], dy = G.cy[b] - G.cy[a], len = Math.hypot(dx, dy);
+            segs.push({ x: G.cx[a], y: G.cy[a], dx, dy, len, along });
+            along += len / G.W;
+            const k = Math.max(1, Math.round(len / G.W)) * 2, pts = new Set([a, b]);
+            for (let j = 1; j < k; j++) { const c = G.cellAt(G.cx[a] + dx * j / k, G.cy[a] + dy * j / k); if (c >= 0) pts.add(c); }
+            for (const c of pts) {
+                if (!isLand(c)) sea = true;
+                for (const x of this.nearCells(c, OP_LANE).keys()) { lane.add(x); if (i === 0) first.add(x); }
+            }
+        }
+        this.traceN = (this.traceN ?? 0) + 1;
+        op._trace = { key, n: this.traceN, segs, length: along, lane, first, sea };
+        return op._trace;
+    }
+    // Pasillo de la ofensiva: casillas (de tierra y de mar) a OP_LANE o menos del trazado de su flecha.
+    opCorridor(op) { return this.opTrace(op).lane; }
+    // ¿Cruza el mar la flecha? Un punto en el mar o una recta entre dos puntos seguidos que pasa por casillas de mar.
+    opAxisSea(op) { return this.opTrace(op).sea; }
+    // Distancia a lo largo de la flecha (en casillas) del punto del trazado más cercano a `cell`.
+    opAlong(op, cell) {
+        const t = this.opTrace(op), px = G.cx[cell], py = G.cy[cell];
+        let best = Infinity, out = 0;
+        for (const s of t.segs) {
+            const u = s.len ? Math.max(0, Math.min(1, ((px - s.x) * s.dx + (py - s.y) * s.dy) / (s.len * s.len))) : 0;
+            const d = Math.hypot(s.x + s.dx * u - px, s.y + s.dy * u - py);
+            if (d < best - 1e-9) { best = d; out = s.along + u * s.len / G.W; }
+        }
+        return out;
+    }
+    // Lo que lleva recorrido el punto `i` de la flecha.
+    opPointAlong(op, i) { const t = this.opTrace(op); return i < t.segs.length ? t.segs[i].along : t.length; }
+    // Radio de la zona de reunión: OP_ZONE, o más si sus `n` ejércitos no caben (spreadCells, sin apelotonarse).
+    opZone(op, members = this.opMembers(op)) {
+        const zone = op.zone ?? op.cells[0], cells = this.spreadCells(op.owner, zone, Math.max(1, members.length), new Set(members.map(a => a.id)));
+        let R = OP_ZONE;
+        for (const c of cells) R = Math.max(R, hexDist(c, zone));
+        return { zone, R, cells };
+    }
+    // ¿Está lista para salir? { ready, members, inZone, present: [ids en la zona], missing: [ids], forming, ratio, need,
+    // waited, strong }. Con «Cuando esté lista»: todos en la zona, sin formación de refuerzo en curso y con la fuerza
+    // reunida a `op.ratio` o más contra la defensa conocida del primer tramo (los ejércitos enemigos vistos en su pasillo;
+    // sin enemigos, ratio null y vale). Tras OP_WAIT turnos de reunión sale sin los que faltan. Con «Cuando yo lo diga»,
+    // solo cuando el jugador la lanza (go).
+    opReady(op, members = this.opMembers(op)) {
+        const id = op.owner, rules = this.rules(id), { zone, R } = this.opZone(op, members);
+        const present = [], missing = [];
+        let atk = 0, dfn = 0;
+        for (const a of members) if (hexDist(a.cell, zone) <= R) { present.push(a.id); atk += unitPower(a.units, 'atk', rules); } else missing.push(a.id);
+        for (const c of this.opTrace(op).first) {
+            const e = this.armyOn(c);
+            if (!e || !this.atWar(id, e.owner) || !this.sees(id, c)) continue;
+            const seen = this.intel(id, e.owner, c).exact ? e : { id: e.id, owner: e.owner, units: { infantry: echelonCeil(countUnits(e.units)), tank: 0, artillery: 0 } };
+            dfn += this.combatFactors(id, { infantry: 1, tank: 0, artillery: 0 }, c, seen, c).dfn;
+        }
+        const ratio = dfn > 0 ? atk / dfn : null, waited = this.turn - (op.gatherSince ?? this.turn), forming = !!op.form;
+        const strong = ratio === null || ratio >= op.ratio;
+        const ready = !!op.go || (op.launch !== 'orden' && present.length > 0 && strong && ((!missing.length && !forming) || waited >= OP_WAIT));
+        return { ready, members: members.length, inZone: present.length, present, missing, forming, ratio, need: op.ratio, waited, strong };
+    }
+    // Sale la ofensiva: el grueso son los que están en la zona (o todos, si no hay nadie); los demás la alcanzarán.
+    opLaunch(op, st = this.opReady(op), tally = null) {
+        op.phase = 'avance';
+        op.go = false;
+        op.wp = Math.min(Math.max(1, op.wp ?? 1), op.cells.length - 1);
+        op.body = st.present.length ? [...st.present] : this.opMembers(op).map(a => a.id);
+        op.note = null;
+        this.orderVersion++;
+        const left = st.present.length ? st.missing.length : 0;
+        const msg = `Sale de ${this.placeName(op.zone ?? op.cells[0])} con ${plural(op.body.length, 'ejército', 'ejércitos')}${left ? `, sin ${plural(left, 'ejército que no ha llegado', 'ejércitos que no han llegado')} en ${st.waited} turnos` : ''}`;
+        if (tally) tally.notes.push(msg);
+        else if (op.owner === this.player) this.log(`${op.name}. ${msg}.`);
+    }
+    // «Lanzar la ofensiva» desde su ficha: sale ya, con lo que haya en la zona.
+    playerLaunchOp(op) {
+        if (!op || op.owner !== this.player || op.kind !== 'ofensiva' || op.phase === 'avance' || this.over) return false;
+        op.go = true;
+        this.opLaunch(op, this.opReady(op));
+        return true;
+    }
+    // Primer punto de la flecha aún no alcanzado por los ejércitos de la ofensiva (para las partidas de antes de las fases
+    // y al redibujarla): el primero que ninguno tiene a 1 casilla o menos y que queda por delante del más adelantado.
+    opFirstWp(op) {
+        const members = this.opMembers(op), last = op.cells.length - 1;
+        if (!members.length) return 1;
+        let front = -Infinity;
+        for (const a of members) front = Math.max(front, this.opAlong(op, a.cell));
+        for (let i = 1; i < last; i++) if (!members.some(a => hexDist(a.cell, op.cells[i]) <= 1) && this.opPointAlong(op, i) > front) return i;
+        return last;
+    }
+    // Caminos de la ofensiva: por su pasillo (`lane`) o fuera de él; por tierra si la flecha no cruza el mar, salvo para
+    // quien ya está embarcado, que tiene que llegar a la costa.
+    opField(op, dest, a, lane) {
+        const land = !op.bySea && !afloat(a.cell);
+        if (!land && !lane) return this.orderField(op.owner, dest);
+        return this.orderField(op.owner, dest, { key: `${land ? 't' : 'm'}${lane ? `p${op.id}.${this.opTrace(op).n}` : ''}`, land, within: lane ? this.opCorridor(op) : null });
+    }
+    // Un paso de la ofensiva hacia el destino de `f`: a la casilla libre alcanzable que más acerque (las de mar expuestas
+    // cuentan tres casillas de mar más, como en advance) y que `ok` admita. 'moved', 'held' (las que acercaban no las
+    // admite `ok`: espera a los demás) o 'blocked'.
+    // Con `along` (avance), si las que acercan están ocupadas, se pone al lado: a una casilla igual de lejos del destino
+    // pero más adelante en la flecha. Así una columna se abre en frente y el de detrás no tapona al de delante.
+    opStep(a, f, r, ok = () => true, along = null) {
+        const here = f.to(a.cell);
+        let best = -1, bestD = here, risk = -1, riskD = here, held = false;
+        for (const v of this.destinations(r)) {
+            if (this.armyAt[v] || !f.done[v] || f.dist[v] >= here) continue;
+            if (!ok(v)) { held = true; continue; }
+            const exposed = v !== f.dest && this.exposedAtSea(a.owner, v);
+            const d = f.dist[v] + (exposed ? 3 * 3 * MOVE : 0);
+            if (d < bestD) { bestD = d; best = v; }
+            if (exposed && f.dist[v] < riskD) { riskD = f.dist[v]; risk = v; }
+        }
+        if (best < 0) best = risk;
+        if (best < 0 && along && here < Infinity) {
+            let bestA = along(a.cell) + 0.25;
+            for (const v of this.destinations(r)) {
+                if (this.armyAt[v] || afloat(v) !== afloat(a.cell) || f.to(v) > here || this.exposedAtSea(a.owner, v) || !ok(v)) continue;
+                const x = along(v);
+                if (x > bestA) { bestA = x; best = v; }
+            }
+        }
+        if (best < 0) return held ? 'held' : 'blocked';
+        this.moveArmy(a, best, r);
+        return 'moved';
+    }
+    // Fase de reunión: los que no están en la zona marchan a ella, a una casilla libre de las de spreadCells si la
+    // alcanzan este turno; los que ya están se quedan quietos. El parte dice cómo va (sin repetirse turno tras turno).
+    opGather(op, free, tally, live, st) {
+        const id = op.owner, { zone, R, cells } = this.opZone(op);
+        const open = new Set(cells.filter(c => !this.armyAt[c]));
+        for (const a0 of free) {
+            if (this.over) break;
+            if (!live(a0) || hexDist(a0.cell, zone) <= R) continue;
+            const a = this.detach(a0), r = this.reach(id, a.cell, this.mp(a), a.used === 0);
+            if (this.flee(a, r)) { tally.moved++; continue; }
+            let spot = -1;
+            for (const v of this.destinations(r)) if (open.has(v) && (spot < 0 || hexDist(v, zone) < hexDist(spot, zone))) spot = v;
+            if (spot >= 0) { open.delete(spot); this.moveArmy(a, spot, r); tally.moved++; continue; }
+            if (this.opStep(a, this.opField(op, zone, a, false), r) === 'moved') tally.moved++; else this.reattach(a);
+        }
+        // Lo que pide para salir: los que esperan ventaja (para que la reserva y el reparto le manden más).
+        op.waiting = st.present.length && !st.strong ? Math.max(1, Math.min(st.present.length, Math.ceil(st.present.length * (op.ratio / Math.max(st.ratio, 0.05) - 1)))) : 0;
+        const why = op.launch === 'orden' ? '; espera la orden de lanzarla' : st.forming ? '; esperando a los refuerzos' : st.missing.length ? '' : !st.strong ? '; le falta fuerza' : '';
+        const note = `Reunión: ${st.inZone} de ${st.members} en la zona, ${st.ratio === null ? 'sin enemigos a la vista' : `fuerza ${decimal(st.ratio)} a 1 de ${decimal(op.ratio)}`}${why}`;
+        if (note !== op.note) { op.note = note; tally.notes.push(note); }
+    }
+    // Fase de avance: 1) puntos alcanzados (el más adelantado del grueso a 1 casilla o menos, o el punto ya es propio y
+    // el grueso ha llegado a su altura); 2) asalto conjunto; 3) marcha hacia el punto siguiente por el pasillo, del más
+    // atrasado al más adelantado, sin que nadie quede más de OP_LEAD por delante del más atrasado del grueso (los barcos,
+    // al final: esperan junto a la costa a que el grupo de tierra esté a 1 casilla de su meta); 4) los rezagados que han
+    // alcanzado al grueso pasan a contar para los ataques.
+    opAdvance(op, free, tally, live) {
+        const id = op.owner, last = op.cells.length - 1, lane = this.opCorridor(op);
+        const members = this.opMembers(op), ids = new Set(members.map(a => a.id));
+        let body = new Set((op.body ?? [...ids]).filter(x => ids.has(x)));
+        if (!body.size) body = new Set(ids);   // sin grueso (perdido o recién cargado): lo son todos
+        const loose = new Set(free.map(a => a.id));
+        const crew = members.filter(a => loose.has(a.id));
+        const here = a => this.armies.has(a.id) && a.owner === id && a.op === op.id && this.armyOn(a.cell) === a;
+        // El grueso que marca el paso: los suyos en tierra que manda la operación (los barcos van a su ritmo).
+        const pacers = () => crew.filter(a => body.has(a.id) && here(a) && !afloat(a.cell));
+        const alongOf = a => this.opAlong(op, a.cell);
+        let wpMoved = false;
+        for (;;) {
+            if (op.wp >= last) break;
+            const c = op.cells[op.wp], grp = members.filter(a => body.has(a.id) && here(a));
+            const front = grp.reduce((m, a) => Math.max(m, alongOf(a)), -Infinity);
+            if (!grp.some(a => hexDist(a.cell, c) <= 1) && !(this.owner[c] === id && front >= this.opPointAlong(op, op.wp) - 1)) break;
+            op.wp++; wpMoved = true;
+        }
+        const goal = op.cells[op.wp];
+        if (wpMoved) this.orderVersion++;
+        // El grupo de tierra: 'none' si va todo por mar, 'ready' si está a 1 casilla de su meta, 'far' si aún no.
+        const landState = () => { const g = pacers(); return !g.length ? 'none' : g.some(a => hexDist(a.cell, goal) <= 1) ? 'ready' : 'far'; };
+        // 2) Asalto: cada casilla enemiga del pasillo a tiro del grueso, con todos los que pueden atacarla (A3).
+        const short = this.opAssault(op, crew.filter(a => body.has(a.id)), landState, tally);
+        // 3) Marcha.
+        const order = crew.filter(here).map(a => [a, afloat(a.cell) ? 1 : 0, alongOf(a)]).sort((x, y) => x[1] - y[1] || x[2] - y[2] || x[0].id - y[0].id).map(x => x[0]);
+        let waiting = 0;
+        for (const a0 of order) {
+            if (this.over) break;
+            if (!live(a0)) continue;
+            const a = this.detach(a0);
+            if (a !== a0) { if (body.has(a0.id)) body.add(a.id); crew.push(a); }
+            const r = this.reach(id, a.cell, this.mp(a), a.used === 0);
+            if (this.flee(a, r)) { tally.moved++; continue; }
+            if (afloat(a.cell) && this.opHoldShip(op, a, goal, landState())) { this.reattach(a); continue; }
+            const others = pacers().filter(b => b !== a && b !== a0);
+            const lim = others.length ? others.reduce((m, b) => Math.min(m, alongOf(b)), Infinity) + OP_LEAD : Infinity;
+            let f = lane.has(a.cell) ? this.opField(op, goal, a, true) : null;
+            if (!f || f.to(a.cell) === Infinity) f = this.opField(op, goal, a, false);   // fuera del pasillo, o sin paso por él
+            const res = this.opStep(a, f, r, v => this.opAlong(op, v) <= lim, v => this.opAlong(op, v));
+            if (res === 'moved') tally.moved++;
+            else { this.reattach(a); if (res === 'blocked' && short.has(a0.id)) waiting++; }
+        }
+        // 4) Los rezagados que llegan a OP_LEAD o menos del más atrasado del grueso, dentro del pasillo, se suman a él.
+        const rear = pacers().reduce((m, a) => Math.min(m, alongOf(a)), Infinity);
+        for (const a of this.opMembers(op)) if (!body.has(a.id) && (rear === Infinity || (lane.has(a.cell) && alongOf(a) >= rear - OP_LEAD))) body.add(a.id);
+        const alive = new Set(this.opMembers(op).map(a => a.id));
+        op.body = [...body].filter(x => alive.has(x));
+        op.waiting = waiting;
+        if (wpMoved) tally.notes.push(`Avance hacia el punto ${op.wp + 1} de ${op.cells.length}`);
+    }
+    // Asalto conjunto de la ofensiva con los ejércitos del grueso `crew`: para cada casilla del pasillo con un ejército
+    // enemigo a tiro, todos los que pueden atacarla (como jointCandidates) y la relación conjunta con lo que se sabe del
+    // defensor (como groupStrike). Se ataca la de mejor relación si llega a op.ratio, y se repite mientras quede alguna.
+    // Los embarcados solo atacan con tropas de tierra, cuando el grupo de tierra está en posición o si va todo por mar
+    // (landState).
+    // Devuelve los ids de los que tenían a tiro un enemigo al que no llegaban.
+    opAssault(op, crew, landState, tally) {
+        const id = op.owner, lane = this.opCorridor(op), short = new Set();
+        for (let k = 0; k < 40 && !this.over; k++) {
+            const by = new Map();
+            for (const a of crew) {
+                if (!this.armies.has(a.id) || this.armyOn(a.cell) !== a || a.used >= 999 || this.mp(a) <= 0) continue;
+                const r = this.reach(id, a.cell, this.mp(a), a.used === 0);
+                for (const [t, from] of r.attacks) if (lane.has(t)) { if (!by.has(t)) by.set(t, []); by.get(t).push({ army: a, from, r }); }
+            }
+            if (!by.size) break;
+            const ready = landState() !== 'far';
+            let best = null;
+            short.clear();
+            for (const [t, all] of by) {
+                const def = this.armyOn(t);
+                if (!def || !this.atWar(id, def.owner)) continue;
+                const list = ready || all.some(x => !afloat(x.army.cell)) ? all : [];
+                if (!list.length) continue;
+                const seen = this.intel(id, def.owner, t).exact ? def
+                    : { id: def.id, owner: def.owner, units: { infantry: echelonCeil(countUnits(def.units)), tank: 0, artillery: 0 } };
+                const j = this.jointFactors(id, list.map(x => ({ units: x.army.units, from: x.from, id: x.army.id })), seen, t), ratio = j.atk / j.dfn;
+                if (ratio >= op.ratio) { if (!best || ratio > best.ratio) best = { t, list, ratio }; }
+                else for (const x of list) short.add(x.army.id);
+            }
+            if (!best) break;
+            const where = this.placeName(best.t);
+            this.attackJoint(best.list, best.t);
+            tally.attacked++;
+            tally.notes.push(`Asalto conjunto sobre ${where} con ${plural(best.list.length, 'ejército', 'ejércitos')}`);
+        }
+        return short;
+    }
+    // Desembarco a la vez (generaliza holdLanding): un embarcado de la ofensiva junto a la costa por la que entra espera
+    // a que el grupo de tierra esté a 1 casilla de su meta (como mucho OP_WAIT turnos) y entonces desembarca; si va todo
+    // por mar, espera como holdLanding a los demás barcos. true si espera.
+    opHoldShip(op, a, goal, land) {
+        const f = this.orderField(a.owner, goal);
+        if (f.to(a.cell) === Infinity) return false;
+        const c = f.next[a.cell];
+        if (!(c >= 0 && isLand(c))) return false;   // aún navega
+        if (land === 'none') return this.holdLanding(a, goal);
+        if (land === 'ready') { a.seaWait = 0; return false; }
+        a.seaWait ||= this.turn;
+        return this.turn - a.seaWait < OP_WAIT;
+    }
     // Un ejército que pasa a otro país llega sin orden ni operación.
     changeOwner(a, owner) {
         a.owner = owner;
@@ -3989,31 +4282,19 @@ class GameEngine {
             .sort((x, y) => unitPower(y.units, 'atk', rules) - unitPower(x.units, 'atk', rules) || x.id - y.id);
         const tally = { moved: 0, attacked: 0, waiting: 0, fortified: 0, sent: [], sentAir: [], notes: [], air: null };
         const live = a => this.armies.has(a.id) && a.owner === id && this.armyOn(a.cell) === a && this.mp(a) > 0;
+        let done = '';   // una ofensiva que toma su objetivo termina tras dar su parte
         if (op.kind === 'ofensiva') {
             const obj = op.cells[op.cells.length - 1];
             if (this.owner[obj] === id) { this.endOp(op, `objetivo cumplido, ${this.placeName(obj)} es tuya`); return tally; }
-            const far = c => Math.hypot(G.cx[c] - G.cx[obj], G.cy[c] - G.cy[obj]) / G.W;   // casillas en línea recta
-            for (const a0 of free) {
-                if (this.over) break;
-                if (!live(a0)) continue;
-                const a = this.detach(a0);
-                const r = this.reach(id, a.cell, this.mp(a), a.used === 0);
-                if (this.flee(a, r)) { tally.moved++; continue; }
-                let best = null, bestScore = -Infinity, wanted = false;
-                for (const [target, from] of r.attacks) {
-                    if (far(target) > far(a.cell) + 0.5) continue;   // no se desvía hacia atrás
-                    const ratio = this.expectedRatio(id, a.units, from, this.armyOn(target), target, a.id);
-                    if (ratio < op.ratio) { wanted = true; continue; }
-                    const score = Math.min(ratio, 5) + (CITY_OF[target] >= 0 ? 1 : 0) + (target === obj ? 5 : 0) - far(target) * 0.05;
-                    if (score > bestScore) { bestScore = score; best = { target, from }; }
-                }
-                if (best) { this.attack(a, best.from, best.target, r); this.reattach(a); tally.attacked++; continue; }
-                if (this.holdLanding(a, obj)) continue;   // en el mar, espera a los demás para desembarcar a la vez
-                const res = this.advance(a, obj, r);
-                if (res === 'blocked') { this.reattach(a); if (wanted) tally.waiting++; } else tally.moved++;
+            // Por fases (A5): se reúne en su zona hasta estar lista y luego avanza por la flecha y asalta junta.
+            op.bySea = this.opAxisSea(op);
+            if (op.phase !== 'avance') {
+                const st = this.opReady(op);
+                if (st.ready) this.opLaunch(op, st, tally);
+                else this.opGather(op, free, tally, live, st);
             }
-            op.waiting = tally.waiting;
-            if (this.owner[obj] === id) this.endOp(op, `objetivo cumplido, ${this.placeName(obj)} es tuya`);
+            if (op.phase === 'avance') this.opAdvance(op, free, tally, live);
+            if (this.owner[obj] === id) done = `objetivo cumplido, ${this.placeName(obj)} es tuya`;
         } else if (op.kind === 'defensa') {
             this.defenseStep(op, free, tally, live);
             op.uncovered = this.opNeed(op);
@@ -4050,7 +4331,7 @@ class GameEngine {
             }
         }
         // La aviación de la operación vuela al final, con lo que ya han hecho sus ejércitos.
-        if (this.ops.has(op.id)) tally.air = this.opAir(op);
+        if (this.ops.has(op.id) && !done) tally.air = this.opAir(op);
         if (id === this.player) {
             const parts = [];
             if (tally.moved) parts.push(plural(tally.moved, 'ejército se mueve', 'ejércitos se mueven'));
@@ -4063,9 +4344,16 @@ class GameEngine {
             const air = tally.air;
             if (air?.notes.length) parts.push(air.strikes ? `${plural(air.notes.length, 'misión aérea', 'misiones aéreas')}, ${plural(air.hits, 'acierto', 'aciertos')}`
                 : plural(air.notes.length, 'misión aérea de protección', 'misiones aéreas de protección'));
-            parts.unshift(...tally.notes);
-            if (parts.length && this.ops.has(op.id)) this.log(`${op.name}: ${parts.join(', ')}.`);
+            // Las ofensivas dicen antes su fase y lo que ha hecho («Reunión: …», «Asalto conjunto sobre …»), en frases.
+            const rest = parts.join(', ');
+            if (op.kind === 'ofensiva' && tally.notes.length) {
+                if (this.ops.has(op.id)) this.log(`${op.name}. ${[...tally.notes, rest && rest[0].toUpperCase() + rest.slice(1)].filter(Boolean).join('. ')}.`);
+            } else {
+                parts.unshift(...tally.notes);
+                if (parts.length && this.ops.has(op.id)) this.log(`${op.name}: ${parts.join(', ')}.`);
+            }
         }
+        if (done) this.endOp(op, done);
         return tally;
     }
 
@@ -4121,7 +4409,7 @@ class GameEngine {
             busy = false;
             for (const t of takers) {
                 if (t.want <= 0) continue;
-                if (!costs.has(t)) costs.set(t, this.marchCosts(id, t.op.kind === 'ofensiva' ? t.op.cells[0] : t.op.cells[Math.floor(t.op.cells.length / 2)], OP_GATHER_TURNS * MOVE * fastest));
+                if (!costs.has(t)) costs.set(t, this.marchCosts(id, t.op.kind === 'ofensiva' ? t.op.zone ?? t.op.cells[0] : t.op.cells[Math.floor(t.op.cells.length / 2)], OP_GATHER_TURNS * MOVE * fastest));
                 const cost = costs.get(t), front = this.opFront(t.op);
                 let best = null, bk = Infinity;
                 for (const x of offer) {
@@ -4353,7 +4641,7 @@ class GameEngine {
     templateCost(id, units) { return UNIT_KEYS.reduce((sum, k) => sum + (units[k] || 0) * this.unitCost(id, k), 0); }
     // Zona de reunión de los refuerzos: casilla libre suya, sin ciudad, junto al punto de partida de la operación.
     formZone(op) {
-        const id = op.owner, anchor = op.kind === 'defensa' ? op.cells[Math.floor(op.cells.length / 2)] : op.cells[0];
+        const id = op.owner, anchor = op.kind === 'defensa' ? op.cells[Math.floor(op.cells.length / 2)] : op.kind === 'ofensiva' ? op.zone ?? op.cells[0] : op.cells[0];
         let best = -1, bd = Infinity;
         for (const [c, d] of this.nearCells(anchor, 3)) {
             if (!isLand(c) || this.owner[c] !== id || CITY_OF[c] >= 0 || this.armyAt[c] || op.cells.includes(c) && op.kind === 'defensa') continue;
@@ -5880,8 +6168,14 @@ class GameEngine {
         if (!probe) return null;
         this.ops.delete(probe.id);
         this.nextOpId--;
+        const start = op.cells[0];
         op.cells = probe.cells;
         if (op.kind === 'defensa') { op.drawn = [...probe.cells]; op.state = 'aguanta'; }
+        if (op.kind === 'ofensiva') {   // la zona de reunión sigue a la salida si no se había movido; el punto siguiente, el primero sin alcanzar
+            if (op.zone === start) op.zone = op.cells[0];
+            op.bySea = this.opAxisSea(op);
+            op.wp = op.phase === 'avance' ? this.opFirstWp(op) : 1;
+        }
         op.waiting = 0;
         this.orderVersion++;
         this.log(`${op.name}: nuevo trazado.`);
