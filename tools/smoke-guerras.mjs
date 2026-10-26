@@ -65,9 +65,8 @@ const CHECKS = [
         T.ok(w.goal.provinces.length > 0, 'el objetivo tiene provincias');
         const touches = pid => PROVINCES[pid].cells.some(c => [0, 1, 2, 3, 4, 5].some(d => { const j = G.nb[c * 6 + d]; return j >= 0 && g.owner[j] === es; }));
         T.ok(w.goal.provinces.every(pid => g.owner[PROVINCES[pid].city] === pt && touches(pid)), 'provincias fronterizas de Portugal que tocan España');
-        const legal = id => G.land.filter(i => g.legal[i] === id).length;
-        T.eq([w.start[es], w.start[pt]], [legal(es), legal(pt)], 'casillas legales de cada bando al empezar');
-        const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+        T.ok(!('start' in w), 'sin casillas al empezar: lo ganado y lo perdido se mide por lo ocupado');
+        const h =GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
         T.eq(h.rel(es, pt).war, w, 'se carga igual');
         h.settlePeace(es, pt, { mode: 'white' });
         T.eq([h.rel(es, pt).war, h.rel(es, pt).noWarUntil], [null, h.turn + CONFIG.TRUCE_TURNS + 10], 'la paz quita el motivo y da 10 turnos más sin volver a declarar');
@@ -152,7 +151,7 @@ const CHECKS = [
         g.declareWar(es, pt);
         T.occupy(g, es, pt, 6);   // va ganando: hoy aceptaría quedarse lo ocupado
         const since = g.turn;
-        for (const k of [CONFIG.WAR_MIN_TURNS, 10, g.ai.peaceAfter + 5]) {
+        for (const k of [CONFIG.WAR_MIN_TURNS, 10]) {   // más allá de peaceAfter, ver la salida por tiempo
             g.turn = since + k;
             const w = g.peaceWish(es, pt);
             T.eq([w.wants, w.why], [false, null], `turno ${k}`);
@@ -201,7 +200,7 @@ const CHECKS = [
         T.eq(g.peaceWish(pt, es).why, 'estancada', 'estancada: la acepta');
         g.turn = since + after - 1;
         T.occupy(g, pt, es, 3);
-        g.warState(pt, es);   // gana terreno en este turno
+        g.trackWarGains();   // gana terreno en este turno
         g.turn = since + after + 1;
         const w = g.peaceWish(pt, es);
         T.eq(w.wants, false, 'ganó terreno hace dos turnos: aún no');
@@ -281,6 +280,204 @@ const CHECKS = [
         g.declareWar(fr, pt);
         T.ok(!g.atWar(ru, fr), 'Rusia no entra');
         T.ok(T.logs(g, from).includes(`${g.nm(ru)} no acude en defensa de ${g.nm(pt)}.`), `registro: ${T.logs(g, from)}`);
+        return true;
+    }],
+    ['C1 · el objetivo son provincias legales del atacado, y la guerra con un objetivo imposible termina', () => {
+        // La sonda de la revisión: Portugal ocupa una provincia española que toca Francia y Francia le declara la guerra.
+        const g = T.game(), fr = T.nation('fr'), es = T.nation('es'), pt = T.nation('pt'), it = T.nation('it');
+        g.start(it);
+        const touchesFr = c => [0, 1, 2, 3, 4, 5].some(d => { const j = G.nb[c * 6 + d]; return j >= 0 && g.owner[j] === fr; });
+        const pid = PROVINCES.findIndex(p => p.country === es && p.cells.some(touchesFr));
+        for (const c of PROVINCES[pid].cells) g.owner[c] = pt;
+        g.version++;
+        T.power(g, fr, 200); T.power(g, pt, 10);
+        g.declareWar(fr, pt);
+        const goal = g.rel(fr, pt).war.goal.provinces;
+        T.ok(!goal.includes(pid), `la provincia española ocupada no entra en el objetivo: ${goal.map(p => PROVINCES[p].name)}`);
+        T.ok(goal.length && goal.every(p => g.legal[PROVINCES[p].city] === pt), 'solo provincias de Portugal');
+        for (const c of PROVINCES[pid].cells) g.owner[c] = es;   // vuelve a España, que no está en esta guerra
+        g.version++;
+        const since = g.turn, after = g.ai.peaceAfter;
+        for (let k = 0; k < 3 * after && g.atWar(fr, pt); k++) {
+            g.turn++;
+            g.trackWarGains();
+            const pw = g.powers();
+            g.aiDiplomacy(fr, pw); g.aiDiplomacy(pt, pw);
+        }
+        T.ok(!g.atWar(fr, pt), 'la guerra termina');
+        T.ok(g.turn - since <= 2 * after, `antes de 2 × peaceAfter (${g.turn - since} turnos)`);
+        return true;
+    }],
+    ['C1 · la provincia que deja de ser legalmente del atacado sale del objetivo; sin ninguna, cumplido', () => {
+        const g = T.game(), es = T.nation('es'), pt = T.nation('pt'), fr = T.nation('fr');
+        T.power(g, es, 300); T.power(g, pt, 110);
+        g.declareWar(es, pt);
+        const goal = g.rel(es, pt).war.goal.provinces;
+        T.ok(goal.length >= 2, `objetivo de varias provincias (${goal.length})`);
+        g.turn += 10;
+        const [first, ...rest] = goal;
+        g.owner[PROVINCES[first].city] = es;
+        for (const pid of rest) for (const c of PROVINCES[pid].cells) g.legal[c] = fr;   // las demás, de un tercero tras otra paz
+        g.version++;
+        T.eq(g.peaceWish(es, pt).why, 'objetivo', 'tiene la única que sigue siendo de Portugal: cumplido');
+        g.owner[PROVINCES[first].city] = pt;
+        for (const c of PROVINCES[first].cells) g.legal[c] = fr;
+        g.version++;
+        T.eq(g.peaceWish(es, pt).why, 'objetivo', 'ninguna sigue siendo de Portugal: cumplido');
+        return true;
+    }],
+    ['C1 · salida por tiempo: estancada tras peaceAfter también para quien la empezó y, tras 2 × peaceAfter, siempre', () => {
+        const run = stopAt => {
+            const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+            g.start(T.nation('it'));
+            T.power(g, es, 300); T.power(g, pt, 110);
+            g.declareWar(es, pt);
+            const since = g.turn, after = g.ai.peaceAfter, seen = [];
+            for (let k = 1; k <= 2 * after; k++) {
+                g.turn = since + k;
+                if (k < stopAt) T.occupy(g, es, pt, 1);   // gana terreno cada turno hasta stopAt
+                g.trackWarGains();
+                const w = g.peaceWish(es, pt);
+                seen.push(w.wants ? w.why : '-');
+            }
+            return { seen, after };
+        };
+        let { seen, after } = run(1e9);
+        T.eq(seen.indexOf('larga'), 2 * after - 1, `siempre ganando: solo a los 2 × peaceAfter turnos (${seen})`);
+        T.eq(seen.slice(0, 2 * after - 1).every(x => x === '-'), true, `antes, nunca (${seen})`);
+        ({ seen, after } = run(after - 2));   // deja de ganar a los peaceAfter − 3 turnos
+        T.eq(seen.findIndex(x => x !== '-') + 1, after + 3, `estancada: 6 turnos después de lo último ganado (${seen})`);
+        T.eq(seen[after + 2], 'estancada', 'por estancada');
+        const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+        T.power(g, es, 300); T.power(g, pt, 110);
+        g.declareWar(es, pt);
+        T.occupy(g, es, pt, 3);
+        g.turn += 10; g.trackWarGains();
+        T.ok(/en todo caso, dentro de \d+ turnos/.test(g.peaceWish(es, pt).blocker), `el bloqueo dice cuándo, en todo caso: ${g.peaceWish(es, pt).blocker}`);
+        return true;
+    }],
+    ['I1 · con el objetivo cumplido la IA no acepta una paz blanca, solo quedarse lo ocupado', () => {
+        const setup = () => {
+            const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+            g.start(pt);
+            T.power(g, es, 100); T.power(g, pt, 60);
+            g.declareWar(es, pt);
+            for (const pid of g.rel(es, pt).war.goal.provinces) for (const c of PROVINCES[pid].cells) if (g.owner[c] === pt) g.owner[c] = es;
+            g.version++; g.turn += 9;
+            return { g, es, pt };
+        };
+        let { g, es, pt } = setup();
+        T.eq(g.peaceWish(es, pt).why, 'objetivo', 'ha cumplido su objetivo');
+        T.eq([g.acceptsPeace(es, { mode: 'white' }, false), g.acceptsPeace(es, { mode: 'annex' }, false)], [false, true], 'blanca no; anexionar sí');
+        T.eq(g.playerPeace(es, { mode: 'white' }), false, 'la paz blanca del jugador se rechaza');
+        T.ok(g.atWar(es, pt), 'sigue la guerra');
+        T.ok(/no una paz blanca/.test(g.warBrief(es).accept), `el cajón lo dice: ${g.warBrief(es).accept}`);
+        // La IA propone la paz por objetivo cumplido: tampoco acepta la blanca, y el diálogo no la promete.
+        ({ g, es, pt } = setup());
+        g.aiDiplomacy(es, g.powers());
+        T.eq(g.proposals.find(p => p.kind === 'paz' && p.from === es)?.why, 'objetivo', 'propone la paz');
+        ui.setGame(g);
+        ui.peace = { target: es, mode: 'white', keep: true, mine: -1, satGains: 'self' };
+        ui.renderPeaceDialog();
+        const note = document.querySelector('#peace-body .note').innerText;
+        T.ok(/aceptará anexionar lo ocupado/.test(note) && !/o una paz blanca/.test(note), `la nota no promete la paz blanca: ${note}`);
+        T.eq(g.playerPeace(es, { mode: 'white' }), false, 'paz blanca a su propuesta: no');
+        T.eq(g.playerPeace(es, { mode: 'annex' }), true, 'anexionar lo ocupado: sí');
+        // El vencido sí acepta la blanca.
+        ({ g, es, pt } = setup());
+        T.power(g, es, 10);
+        T.eq(g.acceptsPeace(es, { mode: 'white' }, false), true, 'vencido: acepta la blanca');
+        return true;
+    }],
+    ['M1 · «propone la paz» en el registro una vez y luego cada 5 turnos', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        T.power(g, es, 300); T.power(g, fr, 100);
+        g.declareWar(es, fr);
+        g.turn = g.rel(es, fr).since + 10;
+        const from = g.logs.length;
+        for (let k = 0; k < 7; k++) {
+            g.proposals = [];   // cada turno se vacían
+            g.aiDiplomacy(fr, g.powers());
+            T.ok(g.proposals.some(p => p.kind === 'paz' && p.from === fr), `turno ${k}: la propuesta sigue en pie`);
+            g.turn++;
+        }
+        T.eq(T.logs(g, from).filter(m => /propone la paz/.test(m)).length, 2, 'en 7 turnos, dos líneas (la primera y a los 5)');
+        const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+        T.eq(h.rel(es, fr).war.told, g.rel(es, fr).war.told, 'se guarda');
+        return true;
+    }],
+    ['M2 · con niebla el cajón no deja ver la relación de fuerzas; frases exactas', () => {
+        const drawer = (g, t) => { ui.drawerOpen = true; ui.tab = 'paises'; ui.focusNation = t; ui.render(); return document.querySelector('#drawer-body').innerText; };
+        let g = T.uiStart('es', true), es = g.player, fr = T.nation('fr');
+        T.power(g, es, 300); T.power(g, fr, 100);
+        g.declareWar(fr, es);
+        g.turn = g.rel(es, fr).since + 10;
+        let text = drawer(g, fr);
+        T.ok(/Aceptaría la paz\./.test(text) && !/inferior/.test(text), `niebla: aceptaría, sin decir que se ve inferior: ${text}`);
+        // El otro no la empezó: con niebla no se habla de su objetivo, sino de cuándo se estanca.
+        g = T.uiStart('es', true); es = g.player;
+        T.power(g, es, 100); T.power(g, fr, 300);
+        g.declareWar(es, fr);
+        g.turn = g.rel(es, fr).since + 10;
+        text = drawer(g, fr);
+        T.ok(/No aceptará la paz/.test(text) && !/objetivo/.test(text) && /se estanca/.test(text), `niebla, sin objetivo: ${text}`);
+        // Sin niebla, si no la empezó y te ocupa más, dice que puede aceptar quedarse lo ocupado.
+        g = T.uiStart('es', false); es = g.player;
+        T.power(g, es, 100); T.power(g, fr, 300);
+        g.declareWar(es, fr);
+        T.occupy(g, fr, es, 5);
+        g.turn = g.rel(es, fr).since + 10;
+        text = drawer(g, fr);
+        T.ok(/puede aceptar que cada uno se quede lo ocupado/.test(text), `nombra la salida de anexionar: ${text}`);
+        return true;
+    }],
+    ['M3 · warState no cambia nada al leerlo; lo ganado se apunta al empezar la fase de la IA', () => {
+        const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
+        g.start(es);
+        T.power(g, es, 300); T.power(g, pt, 110);
+        g.declareWar(es, pt);
+        g.turn += 2;
+        T.occupy(g, es, pt, 4);
+        const before = JSON.stringify(g.rel(es, pt).war);
+        g.warState(es, pt); g.peaceWish(pt, es); g.warBrief(pt);
+        T.eq(JSON.stringify(g.rel(es, pt).war), before, 'leer no cambia la guerra');
+        g.beginAiPhase();
+        T.eq(g.rel(es, pt).war.gain[es], [4, g.turn], 'la fase de la IA apunta lo ganado');
+        T.eq(g.warState(es, pt).stallIn, CONFIG.WAR_STALL_TURNS, 'y warState lo ve');
+        return true;
+    }],
+    ['M5 · la llamada del jugador respeta la tregua extra del aliado', () => {
+        const g = T.game(), es = T.nation('es'), pt = T.nation('pt'), fr = T.nation('fr');
+        g.start(es);
+        T.bloc(g, es, fr);
+        g.declareWar(es, pt);
+        T.ok(g.callToWarOdds(fr, pt) > 0, 'de partida, puede acudir');
+        g.rel(fr, pt).noWarUntil = g.turn + 5;
+        T.eq(g.callToWarOdds(fr, pt), 0, 'firmó la paz hace poco: no puede');
+        T.eq(g.playerCallToWar(fr, pt), false, 'no acude');
+        T.ok(!g.atWar(fr, pt), 'no entra en guerra');
+        return true;
+    }],
+    ['M6 · el modo satélite dice que cuenta a tu bando', () => {
+        const g = T.uiStart('es'), pt = T.nation('pt');
+        T.power(g, g.player, 100); T.power(g, pt, 90);   // no está vencido: se ve la condición
+        g.declareWar(g.player, pt);
+        ui.peace = { target: pt, mode: 'annex', keep: true, mine: -1, satGains: 'self' };
+        ui.renderPeaceDialog();
+        const text = document.querySelector('#peace-body').innerText;
+        T.ok(/su bando/.test(text) && /tus aliados en esta guerra/.test(text), `texto del modo satélite: ${text}`);
+        return true;
+    }],
+    ['M7 · el 15 % se mide contra el atacante, no contra su bando', () => {
+        const g = T.game(), es = T.nation('es'), pt = T.nation('pt'), it = T.nation('it'), fi = T.nation('fi');
+        g.nations[it].overlord = es; g.blocsChanged();   // Italia, satélite de España: su bando suma 300
+        T.bloc(g, pt, fi);
+        T.power(g, es, 100); T.power(g, it, 200); T.power(g, pt, 60);
+        T.power(g, fi, 20);
+        T.ok(g.allyOdds(fi, es, pt) > 0, `con el 20 % del atacante puede acudir (${g.allyOdds(fi, es, pt)})`);
+        T.power(g, fi, 10);
+        T.eq(g.allyOdds(fi, es, pt), 0, 'con el 10 %, no');
         return true;
     }],
     ['E3 · 30 turnos de Europa en Caos total: ninguna guerra de 1–2 turnos salvo vencidos', () => {
