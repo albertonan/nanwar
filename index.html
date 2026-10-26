@@ -1350,7 +1350,7 @@ class GameEngine {
             armySeaWait: [...this.armies.values()].filter(a => a.seaWait).map(a => [a.id, a.seaWait]),
             nextGroupId: this.nextGroupId,
             armyFrom: [...this.armies.values()].filter(a => a.from).map(a => [a.id, a.from]),
-            orders: [...this.armies.values()].filter(a => a.order).map(a => [a.id, a.order.kind, a.order.dest, a.order.target, a.order.ratio, a.order.flee ? 1 : 0, a.order.since, a.order.stuck]),
+            orders: [...this.armies.values()].filter(a => a.order).map(a => [a.id, a.order.kind, a.order.dest, a.order.target, a.order.ratio, a.order.flee ? 1 : 0, a.order.since, a.order.stuck, a.order.gather ? 1 : 0]),
             blocs: this.blocs.map(b => ({ id: b.id, name: b.name, founder: b.founder, secret: b.secret, since: b.since, members: [...b.members] })),
             nextBlocId: this.nextBlocId,
             air: { sq: [...this.squadrons.values()].map(q => [q.id, q.owner, q.base, q.ready, q.flown, q.patrol, q.op, q.task ? q.task.cell : -1, q.task ? q.task.aims : [], q.damaged ? 1 : 0]), nextSq: this.nextSquadronId,
@@ -1604,7 +1604,7 @@ class GameEngine {
         for (const x of list(data.orders)) {
             const a = g.armies.get(int(x?.[0], 1, 1e9, 0)), kind = kinds.find(k => k === x?.[1]);
             if (!a || a.order || !kind) continue;
-            if (g.setOrder(a, { kind, dest: int(x?.[2], -1, G.N - 1, -1), target: int(x?.[3], 0, 1e9, 0), ratio: [0, 1, 1.3, 1.8].includes(Number(x?.[4])) ? Number(x[4]) : 1.3, flee: !!x?.[5] }))
+            if (g.setOrder(a, { kind, dest: int(x?.[2], -1, G.N - 1, -1), target: int(x?.[3], 0, 1e9, 0), ratio: [0, 1, 1.3, 1.8].includes(Number(x?.[4])) ? Number(x[4]) : 1.3, flee: !!x?.[5], gather: x?.[8] === 1 }))
                 Object.assign(a.order, { since: int(x?.[6], 0, 1e6, g.turn), stuck: int(x?.[7], 0, 3, 0) });
         }
         // Refuerzos de ejércitos (los de las agrupaciones vienen con ellas) y sus reclutas: solo con un refuerzo vivo de
@@ -3328,19 +3328,21 @@ class GameEngine {
                 if (d < bestD) { bestD = d; best = a; }
             }
             left.delete(best);
-            if (this.setOrder(best, best.cell === c ? { kind: 'hold' } : { kind: 'march', dest: c })) n++;
+            if (this.setOrder(best, best.cell === c ? { kind: 'hold', gather: true } : { kind: 'march', dest: c })) n++;
         }
         return n;
     }
     // Reunir en un solo ejército: el anfitrión es el ejército propio de `cell` o, si no, el más fuerte (que va a `cell`
     // si se ha elegido una casilla libre); los demás van tras él y se funden al llegar. Devuelve el anfitrión o null.
+    // El anfitrión que espera (y el que ya estaba en su casilla al marchar repartidos) mantiene con `gather`: deja de
+    // mantener cuando ya nadie va a juntarse con él (runOrders).
     groupGather(owner, ids, cell = -1) {
         const list = this.ownArmies(owner, ids, false).filter(a => this.armyOn(a.cell) === a);
         const there = cell >= 0 ? this.armyOn(cell) : null;
         if (!list.length || (there && there.owner !== owner)) return null;
         const r = this.rules(owner), power = a => unitPower(a.units, 'atk', r) + unitPower(a.units, 'def', r);
         const host = there ?? list.reduce((b, a) => (power(a) > power(b) ? a : b));
-        if (!(cell >= 0 && host.cell !== cell && this.setOrder(host, { kind: 'march', dest: cell }))) this.setOrder(host, { kind: 'hold' });
+        if (!(cell >= 0 && host.cell !== cell && this.setOrder(host, { kind: 'march', dest: cell }))) this.setOrder(host, { kind: 'hold', gather: true });
         for (const a of list) if (a !== host) this.setOrder(a, { kind: 'join', target: host.id });
         return host;
     }
@@ -3575,6 +3577,7 @@ class GameEngine {
             }
         }
         if (o.kind === 'follow' || o.kind === 'join') { const t = this.armies.get(o.target); if (!t || t.owner !== a.owner || t === a) return false; this.watched.add(t.id); }
+        if (o.kind === 'hold' && order.gather) o.gather = true;
         a.order = o;
         this.refreshOrder(a);
         this.orderVersion++;
@@ -3725,6 +3728,13 @@ class GameEngine {
             else if (res === 'fled') out.fled++;
             else if (res === 'fortified') out.fortified++;
             else if (res === 'cancelled') out.cancelled.push(name?.name ?? 'su objetivo');
+        }
+        // El anfitrión de «Reunir» deja de mantener cuando ya nadie va a juntarse con él.
+        const hosts = list.filter(a => a.order?.gather && this.armies.has(a.id));
+        if (hosts.length) {
+            const joined = new Set();
+            for (const x of this.armies.values()) if (x.owner === id && x.order?.kind === 'join') joined.add(x.order.target);
+            for (const a of hosts) if (!joined.has(a.id)) this.clearOrder(a);
         }
         this.markGroupArrivals(id);
         this.directive(id);
@@ -8956,7 +8966,10 @@ class GameUI {
             if (pointers.size === 0) {
                 const b = this.view.box;
                 if (boxed?.moved && b) this.boxSelect(b.x0, b.y0, b.x1, b.y1, boxed.add);
-                else if (tap || boxed) this.clickCell(this.cellFromEvent(e), e.shiftKey, e.ctrlKey || e.metaKey);   // Ctrl + clic sin arrastrar
+                else if (tap || boxed) {   // Ctrl + clic sin arrastrar; un toque con «Seleccionar zona» la apaga
+                    if (boxed && this.boxMode) this.boxMode = false;
+                    this.clickCell(this.cellFromEvent(e), e.shiftKey, e.ctrlKey || e.metaKey);
+                }
                 if (this.view.box) { this.view.box = null; this.requestDraw(); }
                 drag = null; box = null;
                 c.classList.remove('dragging');
@@ -8969,7 +8982,8 @@ class GameUI {
         });
         c.addEventListener('pointerup', end);
         c.addEventListener('pointercancel', end);
-        c.addEventListener('contextmenu', e => { e.preventDefault(); this.cancel(); });
+        // En el Mac, Ctrl + clic abre el menú contextual: es el clic de sumar a la selección, no un cancelar.
+        c.addEventListener('contextmenu', e => { e.preventDefault(); if (!(e.ctrlKey && e.button === 0)) this.cancel(); });
         c.addEventListener('wheel', e => {
             e.preventDefault();
             const r = c.getBoundingClientRect();
@@ -9195,6 +9209,9 @@ class GameUI {
         // Con varios elegidos, un clic en uno de ellos lo elige solo (no lo funde con el elegido).
         const there = g.armyOn(cell);
         if (this.sel.size > 1 && there && this.sel.has(there.id)) { this.select(cell); return; }
+        // Un clic en un ejército tuyo de otra agrupación que el elegido (o con agrupación y el elegido sin ella, o al revés)
+        // lo elige en vez de fundirlos (así el doble clic elige su agrupación); para fundirlos, Mayúsculas + clic o «Reunir».
+        if (army && there && there !== army && there.owner === g.player && (there.group || 0) !== (army.group || 0)) { this.select(cell); return; }
         // Ataque conjunto: con él atacan los de la selección (o los de su agrupación) que también lleguen.
         const joint = army && this.reachInfo?.attacks.has(cell) ? this.jointList(cell) : [];
         if (joint.length > 1) {

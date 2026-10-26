@@ -449,6 +449,18 @@ const CHECKS = [
         T.turns(g, es, 6);
         T.eq(xs.filter(x => g.armies.has(x.id)).map(x => x.id), [host.id], 'queda uno');
         T.eq(countUnits(host.units), total, 'con todas las unidades');
+        T.eq(host.order, null, 'y el anfitrión deja de mantener: vuelve a mandarlo su operación');
+        // Un anfitrión que mantiene por «Reunir» lo sigue haciendo tras guardar y cargar, y lo deja igual.
+        const [h1, j1] = T.cellsAt(g, es, home, [1, 3]).map(c => T.army(g, es, c, 2));
+        T.eq(g.groupGather(es, [h1.id, j1.id], h1.cell), h1, 'anfitrión');
+        const g2 = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+        T.ok(g2.armies.get(h1.id).order?.gather, 'gather se guarda');
+        T.turns(g2, es, 6);
+        T.ok(!g2.armies.has(j1.id) && g2.armies.get(h1.id).order === null, 'tras cargar, también deja de mantener');
+        // Una orden de mantener del jugador no se toca.
+        g.setOrder(h1, { kind: 'hold' }); g.clearOrder(j1);
+        T.turns(g, es, 1);
+        T.eq(h1.order?.kind, 'hold', 'mantener a mano sigue');
         // Si el que se busca desaparece, la orden se cancela.
         const [p, q] = T.cellsAt(g, es, home, [1, 4]).map(c => T.army(g, es, c, 2));
         T.ok(g.setOrder(p, { kind: 'join', target: q.id }), 'orden de juntarse');
@@ -589,6 +601,56 @@ const CHECKS = [
         ui.clickCell(xs[1].cell, false, true); ui.clickCell(xs[2].cell, false, true);
         ui.clickCell(xs[1].cell);
         T.eq([ui.sel.size, ui.selectedArmy()?.id], [0, xs[1].id], 'un clic sin Ctrl vuelve a uno');
+        return true;
+    }],
+    ['A4 · un clic en un ejército de otra agrupación lo elige; el doble clic, su agrupación', () => {
+        const g = T.uiStart('es'), es = g.player;
+        const [c1, c2] = T.plainPair(g, es), c3 = T.cellsAt(g, es, c2, [2])[0];
+        const a = T.army(g, es, c1, 5), b = T.army(g, es, c2, 6), m = T.army(g, es, c3, 4);
+        const gr = g.createGroup(es, [b.id, m.id]);
+        ui.clickCell(a.cell);
+        T.ok(ui.reachInfo?.moves.has(b.cell), 'b está a su alcance');
+        ui.clickCell(b.cell);
+        T.ok(g.armies.has(a.id) && a.cell === c1 && countUnits(b.units) === 6, 'no se funden');
+        T.eq(ui.selectedArmy()?.id, b.id, 'queda elegido b');
+        // Como el doble clic de verdad: un clic y luego dblclick.
+        ui.clickCell(a.cell);
+        const c = ui.view.canvas, r = c.getBoundingClientRect(), [x, y] = ui.view.toScreen(G.cx[b.cell], G.cy[b.cell]);
+        ui.clickCell(b.cell);
+        c.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, clientX: r.left + x, clientY: r.top + y }));
+        T.eq([...ui.sel].sort((p, q) => p - q), [b.id, m.id].sort((p, q) => p - q), 'el doble clic elige la agrupación');
+        T.ok(g.armies.has(a.id) && a.cell === c1, 'sin fundir antes a nadie');
+        // Sin agrupación ninguno de los dos: un clic los funde, como siempre.
+        g.disbandGroup(es, gr.id);
+        ui.select(-1); ui.clickCell(a.cell); ui.clickCell(b.cell);
+        T.ok(!g.armies.has(a.id) || !g.armies.has(b.id), 'sin agrupaciones, se funden');
+        return true;
+    }],
+    ['A4 · toque con «Seleccionar zona» la apaga; Ctrl+clic del Mac no cancela', () => {
+        const g = T.uiStart('es'), es = g.player;
+        const c1 = T.plainPair(g, es)[1], a = T.army(g, es, c1, 5), b = T.army(g, es, T.farCell(g, es, c1, 4, 8), 6);   // lejos: no se funden
+        const c = ui.view.canvas, cap = c.setPointerCapture;
+        c.setPointerCapture = () => {};   // los punteros sintéticos no se pueden capturar
+        try {
+            const at = cell => { ui.view.centerOn(cell, 30); const r = c.getBoundingClientRect(), [x, y] = ui.view.toScreen(G.cx[cell], G.cy[cell]); return { clientX: r.left + x, clientY: r.top + y }; };
+            const tap = (cell, type = 'touch', extra = {}) => {
+                const o = { bubbles: true, pointerId: 7, pointerType: type, button: 0, ...at(cell), ...extra };
+                c.dispatchEvent(new PointerEvent('pointerdown', o)); c.dispatchEvent(new PointerEvent('pointerup', o));
+            };
+            ui.clickCell(a.cell);
+            document.querySelector('#card [data-action="box-mode"]').click();
+            T.ok(ui.boxMode, 'modo rectángulo');
+            tap(b.cell);
+            T.ok(!ui.boxMode, 'un toque sin arrastrar lo apaga');
+            T.eq(ui.selectedArmy()?.id, b.id, 'y elige lo tocado');
+            // Mac: Ctrl + clic manda contextmenu (botón 0) además del clic; no debe cancelar la selección.
+            tap(a.cell, 'mouse', { ctrlKey: true });
+            T.eq([...ui.sel].sort((p, q) => p - q), [a.id, b.id].sort((p, q) => p - q), 'Ctrl+clic suma');
+            c.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 0, ctrlKey: true, ...at(a.cell) }));
+            T.eq([...ui.sel].sort((p, q) => p - q), [a.id, b.id].sort((p, q) => p - q), 'Ctrl+clic suma y el menú no cancela');
+            c.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, ...at(a.cell) }));
+            T.eq([ui.sel.size, ui.selected], [0, -1], 'el clic derecho sí cancela');
+        } finally { c.setPointerCapture = cap; }
         return true;
     }],
     ['A4 · rectángulo elige los propios de dentro', () => {
