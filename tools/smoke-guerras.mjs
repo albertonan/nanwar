@@ -43,6 +43,14 @@ const setup = () => {
             g.version++;
             return n;
         },
+        // Empieza una partida en la interfaz con el país dado y devuelve su motor.
+        uiStart(key, fog = false) {
+            for (const d of document.querySelectorAll('dialog[open]')) d.close();
+            ui.setGame(T.game(7, fog));
+            ui.choice = T.nation(key); ui.render();
+            document.querySelector('[data-action="start"]').click();
+            return ui.game;
+        },
         logs: (g, from = 0) => g.logs.slice(from).map(l => l.msg)
     };
 };
@@ -217,6 +225,62 @@ const CHECKS = [
         T.eq(run('fi', 14), true, 'Finlandia, lejana y débil, no entraría: declara');
         T.eq(run('fi', 40, 100), false, 'Finlandia dudosa cuenta la mitad: con 100 no basta');
         T.eq(run('fi', 40, 120), true, 'con 120 sí');
+        return true;
+    }],
+    ['E5 · el cajón explica por qué no acepta la paz y qué la haría aceptar', () => {
+        const start = fog => {
+            const g = T.uiStart('es', fog), es = g.player, fr = T.nation('fr');
+            T.power(g, es, 100); T.power(g, fr, 300);
+            g.declareWar(fr, es);
+            g.turn = g.rel(es, fr).since + 10;
+            ui.drawerOpen = true; ui.tab = 'paises'; ui.focusNation = fr; ui.render();
+            return { g, es, fr, text: document.querySelector('#drawer-body').innerText };
+        };
+        let { g, fr, text } = start(false);
+        const name = g.nm(fr);
+        T.ok(new RegExp(`La declaró ${name}`).test(text) && /conquistar/.test(text), `quién y para qué: ${text}`);
+        T.ok(/10 turnos/.test(text), 'turnos de guerra');
+        T.ok(/Tu bando\s+fuerza \d+/.test(text) && /Su bando\s+fuerza \d+/.test(text), `fuerza de cada bando: ${JSON.stringify(text)}`);
+        T.ok(/No aceptará la paz: se ve muy superior/.test(text) && /si pierde territorio, si se igualan fuerzas/.test(text), `qué la haría aceptar: ${text}`);
+        // Si se iguala, dice que aceptaría y por qué.
+        T.power(g, g.player, 300); ui.render();
+        text = document.querySelector('#drawer-body').innerText;
+        T.ok(/Aceptaría la paz: se ve inferior/.test(text), `aceptaría: ${text}`);
+        // El diálogo de paz lo muestra igual.
+        T.power(g, g.player, 100);
+        ui.peace = { target: fr, mode: 'annex', keep: true, mine: -1, satGains: 'self' };
+        ui.renderPeaceDialog();
+        T.ok(/No aceptará la paz: se ve muy superior/.test(document.querySelector('#peace-body').innerText), 'en el diálogo de paz');
+        // Con niebla no se ve la fuerza del otro bando ni se deduce de la frase.
+        ({ g, text } = start(true));
+        T.ok(/Su bando\s+fuerza \?/.test(text), `niebla: fuerza del otro bando oculta: ${text}`);
+        T.ok(!/muy superior/.test(text) && /No aceptará la paz/.test(text), `niebla: sin revelar la relación de fuerzas: ${text}`);
+        return true;
+    }],
+    ['E5 · el registro dice por qué propone la paz', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        T.power(g, es, 300); T.power(g, fr, 100);
+        g.declareWar(es, fr);
+        g.turn = g.rel(es, fr).since + 10;
+        const from = g.logs.length;
+        g.aiDiplomacy(fr, g.powers());
+        const pr = g.proposals.find(p => p.kind === 'paz' && p.from === fr);
+        T.ok(pr && pr.why === 'inferior', `propuesta con motivo: ${JSON.stringify(g.proposals)}`);
+        T.ok(T.logs(g, from).includes(`${g.nm(fr)} propone la paz: se ve inferior.`), `registro: ${T.logs(g, from)}`);
+        g.aiDiplomacy(fr, g.powers());
+        T.eq(T.logs(g, from).filter(m => /propone la paz/.test(m)).length, 1, 'una sola vez');
+        return true;
+    }],
+    ['E5 · «no acude en defensa» en el registro', () => {
+        const g = T.game(7), es = T.nation('es'), pt = T.nation('pt'), ru = T.nation('ru'), fr = T.nation('fr');
+        g.start(es);
+        T.power(g, ru, 10); T.power(g, fr, 400);
+        T.bloc(g, pt, ru);   // Portugal y Rusia: aliados públicos; Rusia, lejana y débil, no acude
+        const from = g.logs.length;
+        g.declareWar(fr, pt);
+        T.ok(!g.atWar(ru, fr), 'Rusia no entra');
+        T.ok(T.logs(g, from).includes(`${g.nm(ru)} no acude en defensa de ${g.nm(pt)}.`), `registro: ${T.logs(g, from)}`);
         return true;
     }],
     ['E3 · 30 turnos de Europa en Caos total: ninguna guerra de 1–2 turnos salvo vencidos', () => {

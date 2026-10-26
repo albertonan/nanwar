@@ -386,6 +386,7 @@
         .peace-opt.on { border-color: var(--signal); box-shadow: inset 5px 0 0 var(--signal); }
         .peace-opt:disabled { opacity: 0.45; cursor: not-allowed; }
         .warn-text { color: #ffb347; }
+        .ok-text { color: #8fd18f; }
         dialog { border: 0; padding: 0; background: none; color: var(--text); }
         dialog::backdrop { background: rgba(10, 14, 10, 0.6); }
         dialog .float { padding: 18px; width: min(480px, calc(100vw - 32px)); }
@@ -787,6 +788,9 @@ const WAR_GOALS = ['conquista', 'defensa', 'alianza', 'señor'];
 // Por qué quiere la paz un país (peaceWish): ha cumplido su objetivo, se ve inferior, ha perdido territorio, la guerra
 // se ha estancado o está vencido.
 const PEACE_WHY = ['objetivo', 'inferior', 'territorio', 'estancada', 'vencido'];
+// Los mismos motivos, como se dicen en el registro y en el cajón de Países.
+const PEACE_WHY_TEXT = { objetivo: 'ha cumplido su objetivo', inferior: 'se ve inferior', territorio: 'ha perdido territorio',
+    estancada: 'la guerra se ha estancado', vencido: 'está vencido' };
 const ALLIANCE_SETUPS = { reales: "Reales: OTAN y OTSC", ninguna: "Ninguna: cada país por su cuenta" };
 const VICTORY_SETUPS = { 0.5: `Dominar el 50 % ${MAP.of}`, 0.75: `Dominar el 75 % ${MAP.of}`, 1: "Eliminar a todas las naciones" };
 
@@ -7503,6 +7507,27 @@ class GameEngine {
             : `se ve muy superior. Lo hará si pierde territorio, si se igualan fuerzas o dentro de ${plural(Math.max(after + 1 - s.turns, s.stallIn), 'turno', 'turnos')} si se estanca` };
     }
     wantsPeace(ai, other, powers = this.powers()) { return this.peaceWish(ai, other, powers).wants; }
+    // Lo que el jugador puede saber de su guerra con `rival`, para el cajón de Países y el diálogo de paz: quién la empezó
+    // y para qué, turnos, fuerza de cada bando (con niebla, la del otro bando es null) y qué haría que el otro aceptase la
+    // paz. Con niebla la frase no deja ver la relación de fuerzas del otro bando.
+    warBrief(rival) {
+        const p = this.player, w = this.rel(p, rival).war, s = this.warState(p, rival), fog = this.settings.fog;
+        const provs = ids => { const n = ids.map(i => PROVINCES[i].name); return n.length > 3 ? `${n.slice(0, 3).join(', ')} y ${n.length - 3} más` : n.join(', '); };
+        const by = w?.by ?? -1, goal = w?.goal, f = goal?.for ?? -1;
+        let origin = 'No consta quién la empezó.';
+        if (goal && by >= 0) {
+            const who = by === p ? 'La declaraste tú' : `La declaró ${this.nm(by)}`, entra = by === p ? 'Entraste' : `${this.nm(by)} entró`;
+            if (goal.kind === 'conquista') origin = `${who} para conquistar ${provs(goal.provinces) || 'territorio'}.`;
+            else if (goal.kind === 'alianza') origin = `${entra} en defensa de ${this.nm(f)}.`;
+            else if (goal.kind === 'señor') origin = `${entra} por su señor ${this.nm(f)}.`;
+        }
+        const wish = this.peaceWish(rival, p);
+        let accept;
+        if (wish.wants) accept = `Aceptaría la paz: ${PEACE_WHY_TEXT[wish.why]}.`;
+        else if (fog && s.turns >= CONFIG.WAR_MIN_TURNS) accept = 'No aceptará la paz: no sabes cuánta fuerza reúne su bando. Solo la querrá si cumple su objetivo, si pierde territorio o si se igualan las fuerzas.';
+        else accept = `No aceptará la paz: ${wish.blocker}.`;
+        return { origin, turns: s.turns, power: s.power, enemyPower: fog ? null : s.enemyPower, mine: s.mine, theirs: s.theirs, accept, wants: wish.wants };
+    }
     acceptsPeace(ai, terms, offered) {
         if (terms.mode === 'satellite') return this.isCrushed(ai);
         if (offered || this.peaceWish(ai, this.player).wants) return true;
@@ -7972,7 +7997,7 @@ class GameEngine {
             if (this.nations[e].overlord >= 0 || !this.atWar(id, e)) continue;   // con un satélite se negocia a través de su señor
             const wish = this.peaceWish(id, e, powers);
             if (!wish.wants) continue;
-            if (e === this.player) { if (!this.proposals.some(p => p.kind === 'paz' && p.from === id)) this.proposals.push({ kind: 'paz', from: id, why: wish.why }); }
+            if (e === this.player) { if (!this.proposals.some(p => p.kind === 'paz' && p.from === id)) { this.proposals.push({ kind: 'paz', from: id, why: wish.why }); this.log(`${this.nm(id)} propone la paz: ${PEACE_WHY_TEXT[wish.why]}.`); } }
             else if (this.peaceWish(e, id, powers).wants) this.settlePeace(id, e, { mode: 'annex' });
         }
         const enemies = this.enemiesOf(id);
@@ -12833,7 +12858,7 @@ class GameUI {
             ${f.action ? `<div class="row"><button class="btn" data-action="${f.action}"${f.data ? ` data-id="${f.data}"` : ''}>${f.label}</button></div>` : ''}</div>`).join('') + g.proposals.map((pr, i) => {
             const who = `<b>${g.nm(pr.from)}</b>`;
             let text, yes = 'Aceptar', no = 'Rechazar';
-            if (pr.kind === 'paz') text = `${who} te propone la paz.`;
+            if (pr.kind === 'paz') text = `${who} te propone la paz${PEACE_WHY_TEXT[pr.why] ? `: ${PEACE_WHY_TEXT[pr.why]}` : ''}.`;
             else if (pr.kind === 'bloque') text = `${who} te invita a ${pr.blocId && g.bloc(pr.blocId) ? `unirte a ${esc(g.bloc(pr.blocId).name)}` : 'formar una alianza'}.`;
             else { text = `${who}, tu aliado, ha sido atacado por <b>${g.nm(pr.against)}</b>. Si no acudes, saldrás de vuestras alianzas.`; yes = 'Ir a la guerra'; no = 'No intervenir'; }
             const yesAction = pr.kind === 'paz' ? `data-action="peace-open" data-target="${pr.from}"` : `data-action="accept" data-index="${i}"`;
@@ -12987,12 +13012,27 @@ class GameUI {
                     ${t === g.player ? this.economyFacts(t) : ''}
                     <button class="btn" style="margin-top:10px" data-action="goto" data-cell="${n.capitalCell}" ${n.alive ? '' : 'disabled'}>Ver en el mapa</button>
                 </div>
+                ${n.alive && t !== g.player && g.atWar(g.player, t) ? `<div class="pick" style="margin-top:12px"><h3>La guerra</h3>${this.warBox(t)}</div>` : ''}
                 ${n.alive && t !== g.player ? `<div style="margin-top:12px">${this.diplomacyActions(t)}</div>` : ''}`;
             return;
         }
         body.innerHTML = `<input type="search" id="nation-search" placeholder="Buscar país" value="${esc(this.filter)}" aria-label="Buscar país">
             <div id="nation-list"></div>`;
         this.renderNationList();
+    }
+
+    // La guerra del jugador con `t`: quién la empezó y para qué, turnos, fuerza de cada bando, casillas ocupadas y qué
+    // haría aceptar la paz al otro.
+    warBox(t) {
+        const b = this.game.warBrief(t);
+        return `<p>${esc(b.origin)}</p>
+            <dl class="facts" style="margin:6px 0">
+                <dt>Turnos</dt><dd>${plural(b.turns, 'turno', 'turnos')} de guerra</dd>
+                <dt>Tu bando</dt><dd>fuerza ${b.power}</dd>
+                <dt>Su bando</dt><dd>${b.enemyPower === null ? 'fuerza ?' : `fuerza ${b.enemyPower}`}</dd>
+                <dt>Ocupado</dt><dd>tú, ${plural(b.mine, 'casilla', 'casillas')}; él, ${plural(b.theirs, 'casilla', 'casillas')}</dd>
+            </dl>
+            <p class="small ${b.wants ? 'ok-text' : 'warn-text'}">${esc(b.accept)}</p>`;
     }
 
     // Con niebla de guerra solo se conoce la fuerza propia y la de los aliados.
@@ -13512,6 +13552,7 @@ class GameUI {
         $('#peace-body').innerHTML = `
             <div class="row" style="justify-content:space-between"><h2>Paz con ${g.nm(t)}</h2><button class="btn ghost" data-action="peace-close" aria-label="Cerrar">✕</button></div>
             <p class="note" style="margin-bottom:10px">${offered ? `${g.nm(t)} te ha propuesto la paz: aceptará anexionar lo ocupado o una paz blanca.` : `Elige las condiciones. ${g.nm(t)} puede rechazarlas, y solo puedes proponerle la paz una vez por turno.`}</p>
+            <div class="pick" style="margin-bottom:12px">${this.warBox(t)}</div>
             <dl class="facts" style="margin-bottom:12px">
                 <dt>Has ocupado</dt><dd>${plural(occ.mine, 'casilla', 'casillas')} en ${plural(occ.provinces, 'provincia', 'provincias')}${occ.sats ? `, y tus satélites ${occ.sats} más` : ''}</dd>
                 <dt>Te ha ocupado</dt><dd>${plural(occ.theirs, 'casilla', 'casillas')} tuyas o de tus satélites</dd>
