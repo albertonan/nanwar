@@ -4158,10 +4158,13 @@ class GameEngine {
     }
     // Misión del ala `gid` de `owner` contra `cell`: vuelan todos los suyos que puedan, cada tipo en una misión con sus
     // reglas. Primero los enjambres, si la misión es de las suyas (DRONE_KINDS), que dejan conocido lo que atacan; luego
-    // los escuadrones, si es de las suyas (AIR_KINDS). Devuelve { flown, results, text }: cuántos han volado, el
+    // los escuadrones, si es de las suyas (AIR_KINDS). Con `only` (claves de piezas, como airPieces), solo las del ala que
+    // estén en esa lista: las que el jugador ha dejado marcadas. Devuelve { flown, results, text }: cuántos han volado, el
     // resultado de cada misión y, si no ha volado nadie, el motivo.
-    wingMission(owner, gid, kind, cell) {
-        const { squadrons, swarms } = this.wingPieces(owner, gid), out = { flown: 0, results: [], text: '' };
+    wingMission(owner, gid, kind, cell, only = null) {
+        const all = this.wingPieces(owner, gid), out = { flown: 0, results: [], text: '' };
+        const keep = only ? new Set(only.map(r => this.airPieces(owner, [r])?.[0]).filter(q => q && q.group === gid)) : null;
+        const squadrons = keep ? all.squadrons.filter(q => keep.has(q)) : all.squadrons, swarms = keep ? all.swarms.filter(q => keep.has(q)) : all.swarms;
         for (const [list, kinds, drone] of [[swarms, DRONE_KINDS, true], [squadrons, AIR_KINDS, false]]) {
             if (!list.length || !Object.hasOwn(kinds, kind)) continue;
             const n = this.fliers(owner, list, cell, drone).length, ids = list.map(q => q.id);
@@ -4171,7 +4174,7 @@ class GameEngine {
             out.flown += n;
         }
         if (out.results.length) out.text = '';
-        else out.text ||= this.wingById(owner, gid) ? 'El ala no tiene con qué hacer esa misión.' : 'Esa ala no existe.';
+        else out.text ||= !this.wingById(owner, gid) ? 'Esa ala no existe.' : keep && !keep.size ? 'Nada elegido: marca en el ala lo que puede volar.' : 'El ala no tiene con qué hacer esa misión.';
         return out;
     }
     // El ala entera a la operación `opId` (0: a ninguna, y sin ningún otro encargo). Devuelve cuántas piezas la cumplen.
@@ -4223,10 +4226,10 @@ class GameEngine {
         this.log(`${gr.name} se disuelve: sus escuadrones y enjambres quedan sueltos.`);
         return true;
     }
-    // Si no vuela nadie, el parte dice por qué (las misiones que salen ya tienen el suyo).
-    playerWingMission(gid, kind, cell) {
+    // Si no vuela nadie, el parte dice por qué (las misiones que salen ya tienen el suyo). `only`: las piezas marcadas.
+    playerWingMission(gid, kind, cell, only = null) {
         if (this.over || this.player === null) return null;
-        const res = this.wingMission(this.player, gid, kind, cell);
+        const res = this.wingMission(this.player, gid, kind, cell, only);
         if (!res.results.length) this.log(res.text);
         return res;
     }
@@ -9672,13 +9675,18 @@ class MapView {
     }
     // La herramienta Aviación (en coordenadas del mapa): el alcance de la base con un contorno discontinuo, un velo rojo
     // con el radio de cada antiaéreo enemigo que conoces y el camino a trazos hasta el blanco, rojo donde lo cubre.
-    // El contorno se guarda por base y alcance, y el velo por las fuentes que se conocen.
+    // El contorno se guarda por bases y alcance (uno por cada alcance: un ala con escuadrones y enjambres tiene dos), y el
+    // velo por las fuentes que se conocen.
     drawAirPick(ctx, s) {
-        const P = this.airPick, rk = `${P.bases.join(',')}:${P.range}`, vk = P.known.map(k => `${k.cell}:${k.radius}`).join(',');
+        const P = this.airPick, rk = P.rings.map(x => `${x.bases.join(',')}:${x.range}`).join('|'), vk = P.known.map(k => `${k.cell}:${k.radius}`).join(',');
         if (this.airRangeCache?.key !== rk) {
-            const all = new Set();
-            for (const b of P.bases) for (const c of this.cellsWithin(b, P.range)) all.add(c);
-            this.airRangeCache = { key: rk, edge: this.outline(all) };
+            const edge = new Path2D();
+            for (const x of P.rings) {
+                const all = new Set();
+                for (const b of x.bases) for (const c of this.cellsWithin(b, x.range)) all.add(c);
+                edge.addPath(this.outline(all));
+            }
+            this.airRangeCache = { key: rk, edge };
         }
         if (this.airVeilCache?.key !== vk) {
             const cover = new Set(), fill = new Path2D();
@@ -10753,24 +10761,30 @@ class GameUI {
     }
     // Lo que dibuja el mapa con la herramienta: el alcance desde el aeródromo (o, si solo van enjambres, el suyo desde su
     // ciudad), el camino al blanco y el antiaéreo enemigo que conoces; con los enjambres, también las baterías.
-    // Con un ala, desde todas las bases de lo elegido (el camino, desde la más cercana al blanco).
+    // Con un ala, desde todas las bases de lo elegido (el camino, desde la más cercana al blanco); si van escuadrones y
+    // enjambres, los dos alcances (`rings`), cada uno desde sus bases.
     airPick() {
         const g = this.game, p0 = g.player, A = this.air;
-        let drones = this.nestShown() && (A.base < 0 || (!A.picked.size && A.drones.size > 0)), bases = [drones ? A.nest : A.base];
+        let drones = this.nestShown() && (A.base < 0 || (!A.picked.size && A.drones.size > 0)), bases = [drones ? A.nest : A.base], rings = null, veil = drones;
         if (A.wing) {
+            const near = list => (A.target >= 0 ? list.sort((x, y) => hexDist(x, A.target) - hexDist(y, A.target) || x - y) : list);
+            const of = (ids, m) => near([...new Set([...ids].map(id => m.get(id)?.base ?? -1))].filter(c => c >= 0));
+            const sqB = of(A.picked, g.squadrons), swB = of(A.drones, g.swarms);
             drones = !A.picked.size;
-            bases = [...new Set([...(drones ? A.drones : A.picked)].map(id => (drones ? g.swarms : g.squadrons).get(id)?.base ?? -1))].filter(c => c >= 0);
-            if (A.target >= 0) bases.sort((x, y) => hexDist(x, A.target) - hexDist(y, A.target) || x - y);
+            veil = swB.length > 0;
+            bases = drones ? swB : sqB;
+            if (sqB.length && swB.length) rings = [{ bases: sqB, range: g.airRange(p0) }, { bases: swB, range: g.droneRange(p0) }];
         }
         const from = bases[0] ?? -1;
         if (p0 === null || from < 0) return null;
+        const range = drones ? g.droneRange(p0) : g.airRange(p0);
         const known = g.aaList().filter(s => g.atWar(p0, s.owner) && g.aaKnown(p0, s)).map(s => ({ cell: s.cell, owner: s.owner, radius: g.knowsResearch(p0, s.owner) ? s.radius : AA_MAX_RADIUS, kind: s.kind }));
-        if (drones) for (const [c, b] of g.batteries) {
+        if (veil) for (const [c, b] of g.batteries) {
             if (b.left > 0 || g.owner[c] !== b.owner || !g.atWar(p0, b.owner) || !g.batteryKnown(p0, c)) continue;
             const L = g.knowsResearch(p0, b.owner) ? g.batteryLevel(b.owner) : BATTERY_LEVELS[BATTERY_LEVELS.length - 1];
             if (L?.p.drone) known.push({ cell: c, owner: b.owner, radius: kmCells(L.km), kind: 'battery' });
         }
-        return { bases, range: drones ? g.droneRange(p0) : g.airRange(p0), target: A.target, path: A.target >= 0 ? flightPath(from, A.target) : null, known };
+        return { bases, range, rings: rings ?? [{ bases, range }], target: A.target, path: A.target >= 0 ? flightPath(from, A.target) : null, known };
     }
     // Estado de un escuadrón, en pocas palabras.
     squadronState(q) {
@@ -11014,7 +11028,7 @@ class GameUI {
             <p class="note">El encargo vale para el ala entera (los enjambres escoltan con Municiones merodeadoras). Para que escolte a un ejército suelto, elígela en la sección Escolta de su ficha.</p></section>`;
     }
     // «X contra Y»: las misiones del ala elegida contra el blanco, cada una con la previsión de sus escuadrones y de sus
-    // enjambres, hecha solo con lo que sabes. Cada misión manda a todos los que puedan hacerla.
+    // enjambres, hecha solo con lo que sabes. Cada misión manda a todos los marcados que puedan hacerla (y solo a ellos).
     wingTargetSection() {
         const g = this.game, p0 = g.player, A = this.air, c = A.target, r = g.rules(p0), gr = g.wingById(p0, A.wing), pct = x => Math.round(x * 100);
         const sqs = [...A.picked].map(id => g.squadrons.get(id)).filter(Boolean), sws = [...A.drones].map(id => g.swarms.get(id)).filter(Boolean);
@@ -11541,9 +11555,9 @@ class GameUI {
             case 'wing-add': { const gid = +($('#card select[data-wing-add]')?.value ?? 0); if (g.playerAddToWing(gid, this.airRefs())) this.pickWing(gid); break; }
             case 'wing-drop': g.playerUnwing([`${d.kind}${d.id}`]); break;
             case 'wing-disband': if (g.playerDisbandWing(this.air.wing)) this.air = this.noAir(); break;
-            case 'wing-mission': {   // después vuelven a quedar elegidas las del ala que sigan listas, con el mismo blanco
+            case 'wing-mission': {   // vuelan las marcadas; después vuelven a quedar elegidas las del ala que sigan listas, con el mismo blanco
                 const A = this.air, t = A.target;
-                g.playerWingMission(A.wing, d.kind, t);
+                g.playerWingMission(A.wing, d.kind, t, this.airRefs());
                 this.pickWing(A.wing); this.air.target = t;
                 break;
             }

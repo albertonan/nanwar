@@ -1044,6 +1044,23 @@ const CHECKS = [
     return true;
 }],
 // Arreglos de la revisión final (I1, I2, M1–M11).
+['Rev I1 · el ala vuela solo con las piezas marcadas', () => {
+    const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+    g.declareWar(es, fr); T.bare(g); T.noIntegrated(g); T.learn(g, es, 'drones1');
+    const [base, target] = T.pair(g, es, fr, () => true, 2, g.droneRange(es));
+    const sws = T.swarm(g, es, base, 3), wing = g.createGroup(es, sws, { air: true });
+    ui.setTool('air'); ui.pickWing(wing.id); ui.render();
+    for (const q of sws.slice(1)) document.querySelector(`#card [data-action="drone-pick"][data-id="${q.id}"]`).click();
+    ui.clickCell(target);
+    const b = document.querySelector('#card [data-action="wing-mission"][data-kind="recon"]');
+    T.ok(b && /^1 enjambre:/.test(b.closest('.air-mission').querySelector('span').textContent), `la previsión cuenta uno: ${b?.closest('.air-mission').textContent}`);
+    T.luck(g, 0.99);
+    b.click();
+    T.eq(sws.map(q => q.flown), [g.turn, 0, 0], 'vuela solo el marcado');
+    // Sin la lista, como antes: todos los que puedan.
+    T.eq(g.wingMission(es, wing.id, 'patrol', base).flown, 2, 'sin lista, los demás');
+    return true;
+}],
 ['Rev I2 · con una escolta de drones en ataque hay previsión exacta', () => {
     const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr');
     g.declareWar(es, fr); T.bare(g); T.noIntegrated(g); T.learn(g, es, 'drones1', 'drones2');
@@ -1120,6 +1137,17 @@ const CHECKS = [
     const s = run(1);
     T.eq([s.g.armyOn(s.e), s.g.armyOn(s.c)?.id], [null, s.mine.id], 'se queda');
     T.ok(s.logs.some(l => /el defensor cae antes del asalto: a tu ejército no le queda movimiento/.test(l)), `en el parte: ${s.logs.join(' | ')}`);
+    return true;
+}],
+['Rev M7 · un ala con escuadrones y enjambres dibuja los dos alcances', () => {
+    const g = T.uiStart('es'), es = g.player;
+    T.bare(g); T.learn(g, es, 'drones1');
+    const cap = g.nations[es].capitalCell;
+    T.airfield(g, es, cap); const [q] = T.squad(g, es, cap), [w] = T.swarm(g, es, cap);
+    const wing = g.createGroup(es, [q, w], { air: true });
+    ui.setTool('air'); ui.pickWing(wing.id); ui.render();
+    T.eq(ui.view.airPick.rings?.map(x => [x.bases, x.range]), [[[cap], g.airRange(es)], [[cap], g.droneRange(es)]], 'los dos alcances');
+    ui.view.draw();
     return true;
 }],
 ];
