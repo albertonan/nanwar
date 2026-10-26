@@ -914,6 +914,31 @@ const CHECKS = [
         T.ok(!g.ops.has(op.id) || Math.max(...g.opMembers(op).map(a => g.opAlong(op, a.cell))) > before, 'y avanzan');
         return true;
     }],
+    ['A5 · lista contra el enemigo más fuerte del primer tramo, no contra la suma', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 10);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O]);
+        // Dos ejércitos franceses en el pasillo del primer tramo, en tierra que les pasa a ellos.
+        const spots = T.samples(S, O).filter(c => hexDist(c, S) >= 4 && hexDist(c, S) <= 7 && c !== O).slice(0, 2);
+        T.eq(spots.length, 2, 'dos sitios');
+        const foes = spots.map(c => { g.owner[c] = fr; g.legal[c] = fr; return g.settle(g.newArmy(fr, c, { infantry: 10, tank: 0, artillery: 0 }, 0)); });
+        g.version++;
+        const dfn = foes.map(e => g.combatFactors(es, { infantry: 1, tank: 0, artillery: 0 }, e.cell, e, e.cell).dfn);
+        const per = unitPower({ infantry: 0, tank: 1, artillery: 0 }, 'atk', g.rules(es));
+        const n = Math.ceil(op.ratio * Math.max(...dfn) / per / 2) + 1;   // dos ejércitos de n tanques
+        const xs = T.cellsAt(g, es, S, [0, 1]).map(c => T.army(g, es, c, 0, n, 0));
+        for (const a of xs) g.assignArmy(a, op.id);
+        const atk = 2 * n * per;
+        T.ok(atk >= op.ratio * Math.max(...dfn) && atk < op.ratio * (dfn[0] + dfn[1]), `puede con cada uno pero no con los dos juntos (${atk} / ${dfn})`);
+        const st = g.opReady(op);
+        T.ok(Math.abs(st.ratio - atk / Math.max(...dfn)) < 1e-9, `relación contra el más fuerte (${st.ratio})`);
+        T.ok(st.strong && st.ready, 'lista');
+        g.executeOp(op);
+        T.eq(op.phase, 'avance', 'y sale');
+        return true;
+    }],
     ['A5 · sigue los puntos de la flecha en orden', () => {
         const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
         g.start(es); g.declareWar(es, fr);

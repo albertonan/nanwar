@@ -4037,8 +4037,9 @@ class GameEngine {
     }
     // ¿Está lista para salir? { ready, members, inZone, present: [ids en la zona], missing: [ids], forming, ratio, need,
     // waited, strong }. Con «Cuando esté lista»: todos en la zona, sin formación de refuerzo en curso y con la fuerza
-    // reunida a `op.ratio` o más contra la defensa conocida del primer tramo (los ejércitos enemigos vistos en su pasillo;
-    // sin enemigos, ratio null y vale). Tras OP_WAIT turnos de reunión sale sin los que faltan. Con «Cuando yo lo diga»,
+    // reunida a `op.ratio` o más contra la defensa conocida del primer tramo: la del ejército enemigo más fuerte de los
+    // vistos en su pasillo, lo primero con lo que topará (no la suma: el asalto conjunto ya solo ataca con ventaja, uno a
+    // uno; sin enemigos, ratio null y vale). Tras OP_WAIT turnos de reunión sale sin los que faltan. Con «Cuando yo lo diga»,
     // solo cuando el jugador la lanza (go).
     opReady(op, members = this.opMembers(op)) {
         const id = op.owner, rules = this.rules(id), { zone, R } = this.opZone(op, members);
@@ -4049,7 +4050,7 @@ class GameEngine {
             const e = this.armyOn(c);
             if (!e || !this.atWar(id, e.owner) || !this.sees(id, c)) continue;
             const seen = this.intel(id, e.owner, c).exact ? e : { id: e.id, owner: e.owner, units: { infantry: echelonCeil(countUnits(e.units)), tank: 0, artillery: 0 } };
-            dfn += this.combatFactors(id, { infantry: 1, tank: 0, artillery: 0 }, c, seen, c).dfn;
+            dfn = Math.max(dfn, this.combatFactors(id, { infantry: 1, tank: 0, artillery: 0 }, c, seen, c).dfn);
         }
         const ratio = dfn > 0 ? atk / dfn : null, waited = this.turn - (op.gatherSince ?? this.turn), forming = !!op.form;
         const strong = ratio === null || ratio >= op.ratio;
