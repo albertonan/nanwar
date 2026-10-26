@@ -96,7 +96,7 @@ const setup = () => {
         },
         // Partida sin aviación: ni escuadrones, ni aeródromos, ni antiaéreo, ni satélites.
         bare(g) {
-            for (const k of ['squadrons', 'airfields', 'aaSites', 'sats', 'swarms']) {
+            for (const k of ['squadrons', 'airfields', 'aaSites', 'sats', 'swarms', 'batteries', 'defUsed']) {
                 const x = g[k];
                 if (x instanceof Map || x instanceof Set) x.clear(); else if (Array.isArray(x)) x.length = 0;
             }
@@ -110,6 +110,18 @@ const setup = () => {
         swarm(g, owner, base, n = 1) { return Array.from({ length: n }, () => g.newSwarm(owner, base, 0)); },
         // Antiaéreo fijo terminado de `owner` en `cell`, sin daños y sin que nadie lo conozca.
         site(g, owner, cell) { const s = { owner, left: 0, hits: 0, known: new Set() }; g.aaSites.set(cell, s); g.airVersion++; return s; },
+        // Batería automática terminada de `owner` en `cell`, sin usar y sin que nadie la conozca.
+        battery(g, owner, cell) { const b = { owner, left: 0, known: new Set(), used: 0 }; g.batteries.set(cell, b); g.airVersion++; return b; },
+        // Sin antiaéreo integrado: las ciudades con casamatas bajan a búnkeres.
+        noIntegrated(g) { for (const p of PROVINCES) if (g.fort[p.city] === 4) g.fort[p.city] = 3; g.fortVersion++; },
+        // Tierra de `owner` (no lago), sin ciudad, y sin ejércitos ni tierra de otro a `R` casillas o menos: un blanco limpio.
+        clear(g, owner, R = 1, skip = 0) {
+            for (const c of G.land) {
+                if (g.owner[c] !== owner || CELL_TERRAIN[c] === 'lake' || CITY_OF[c] >= 0) continue;
+                if (hexDisc(c, R).every(j => !g.armyAt[j] && (!isLand(j) || g.owner[j] === owner)) && skip-- <= 0) return c;
+            }
+            throw new Error('no hay casilla limpia');
+        },
         // La pareja más cercana [ciudad de A, ciudad de B] con min ≤ hexDist ≤ max que cumpla `ok(a, b)`.
         pair(g, A, B, ok = () => true, min = 6, max = 18) {
             const of = id => PROVINCES.filter(p => g.owner[p.city] === id).map(p => p.city);
@@ -345,6 +357,192 @@ const CHECKS = [
     delete data.drones;
     const old = GameEngine.load(data);
     T.eq([old.swarms.size, old.nextSwarmId, old.droneSeen.size, old.droneHits.size], [0, 1, 0, 0], 'partida vieja');
+    return true;
+}],
+['B3 · construir batería y que tarde 2 turnos', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); g.nations[es].gold = 1000;
+    const cell = T.clear(g, es);
+    T.eq([g.planBattery(es, cell), g.playerBuildBattery(cell)], [null, false], 'sin Defensa de punto, no');
+    T.ok(/Defensa de punto/.test(g.logs[g.logs.length - 1].msg), 'el parte dice qué falta');
+    T.learn(g, es, 'defensa1');
+    T.eq(CONFIG.BATTERY, { COST: 150, TURNS: 2 }, 'precio y obra');
+    T.eq(g.planBattery(es, cell), { cell, cost: 150 }, 'plan');
+    T.ok(g.playerBuildBattery(cell), 'construye');
+    T.ok(/150/.test(g.logs[g.logs.length - 1].msg), 'el parte dice el precio');
+    const b = g.batteries.get(cell);
+    T.eq([b.owner, b.left, [...b.known], b.used, g.nations[es].gold], [es, 2, [], 0, 850], 'en obra');
+    let sea = 0; while (isLand(sea)) sea++;
+    T.eq([g.planBattery(es, cell), g.planBattery(es, PROVINCES.find(p => p.country === fr).city), g.planBattery(es, sea)], [null, null, null], 'una por casilla, solo en tierra propia');
+    T.eq(g.incomingDefense(fr, 'drone', cell, 1, { simulate: true }).through, 1, 'en obra no dispara');
+    g.beginNationTurn(es); T.eq(b.left, 1, 'un turno');
+    g.beginNationTurn(es); T.eq(b.left, 0, 'terminada');
+    T.ok(g.logs.some(l => /Batería .*terminada/.test(l.msg)), 'el parte lo dice');
+    T.near(g.incomingDefense(fr, 'drone', cell, 1, { simulate: true }).through, 0.2, 1e-9, 'dispara');
+    // Sin nivel (un país que no la ha investigado y la tiene), no dispara.
+    const pt = T.nation('pt'), c2 = T.clear(g, pt); T.battery(g, pt, c2); g.declareWar(pt, fr);
+    T.eq(g.incomingDefense(fr, 'drone', c2, 1, { simulate: true }).through, 1, 'sin nivel');
+    return true;
+}],
+['B3 · nivel 1 para drones y cohetes, no misiles', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'defensa1');
+    const cell = T.clear(g, es, 3); T.battery(g, es, cell);
+    const CL = ['drone', 'rocket', 'heavyRocket', 'missile', 'guided', 'heavy', 'nuclear'];
+    const pass = (c = cell, who = fr) => CL.map(k => +g.incomingDefense(who, k, c, 1, { simulate: true }).through.toFixed(6));
+    T.eq(pass(), [0.2, 0.3, 0.3, 1, 1, 1, 1], 'nivel 1');
+    T.eq(BATTERY_LEVELS[1], { km: 40, cap: 4, p: { drone: 0.8, rocket: 0.7 } }, 'tabla');
+    const R = kmCells(40), edge = hexDisc(cell, R + 1).find(j => hexDist(j, cell) === R), out = hexDisc(cell, R + 1).find(j => hexDist(j, cell) === R + 1);
+    T.eq([pass(edge)[0], pass(out)[0]], [0.2, 1], 'radio de 40 km');
+    T.eq(pass(cell, T.nation('de')), [1, 1, 1, 1, 1, 1, 1], 'solo contra quien está en guerra');
+    T.learn(g, es, 'defensa2');
+    T.eq(pass(), [0.15, 0.2, 0.2, 0.4, 0.55, 1, 1], 'nivel 2: misiles y guiados');
+    T.learn(g, es, 'defensa3');
+    T.eq(pass(), [0.1, 0.1, 0.1, 0.3, 0.4, 0.5, 0.65], 'nivel 3: todo');
+    // Lo que deja la parte C: las clases con reentrada se paran menos (rules.interceptMult).
+    const rules = g.rules.bind(g);
+    g.rules = id => (id === fr ? { ...rules(id), interceptMult: 0.7 } : rules(id));
+    T.eq(pass(), [0.1, 0.1, 0.1, 0.51, 0.58, 0.65, 0.755], 'interceptMult en misiles');
+    return true;
+}],
+['B3 · capacidad: la quinta arma pasa con nivel 1', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'defensa1');
+    const cell = T.clear(g, es, 3), b = T.battery(g, es, cell);
+    T.luck(g, 0);
+    const d = g.incomingDefense(fr, 'rocket', cell, 5);
+    T.eq([d.through, d.stopped, d.sources, b.used, b.known.has(fr)], [1, { drones: 0, batteries: 4, aa: 0 }, [cell], 4, true], 'para 4 y la quinta pasa; se delata');
+    T.eq(g.incomingDefense(fr, 'rocket', cell, 2).through, 2, 'sin capacidad, todo pasa');
+    T.eq(g.incomingDefense(fr, 'rocket', cell, 2, { simulate: true }).through, 2, 'la previsión lo sabe');
+    // La capacidad se gasta aunque falle: cada arma que atiende cuenta.
+    b.used = 0; T.luck(g, 0.99);
+    const e = g.incomingDefense(fr, 'drone', cell, 6);
+    T.eq([e.through, e.stopped.batteries, b.used], [6, 0, 4], 'falla, pero gasta');
+    // Con dos baterías, primero la de más probabilidad; la previsión no gasta nada.
+    b.used = 0;
+    const b2 = T.battery(g, es, hexDisc(cell, 2).find(j => hexDist(j, cell) === 2 && isLand(j)));
+    T.near(g.incomingDefense(fr, 'rocket', cell, 10, { simulate: true }).through, 2 + 8 * 0.3, 1e-9, 'previsión: dos baterías, 8 atendidas');
+    T.eq([b.used, b2.used], [0, 0], 'sin gastar');
+    T.learn(g, T.nation('fr'), 'defensa2');   // la de otro país no cambia nada
+    T.near(g.incomingDefense(fr, 'drone', cell, 1, { simulate: true }).through, 0.2, 1e-9, 'el nivel es el de su dueño');
+    return true;
+}],
+['B3 · capacidad repuesta en el turno del siguiente atacante', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'defensa1', 'drones1');
+    const [cell] = T.border(g, es, fr), b = T.battery(g, es, cell);
+    T.luck(g, 0);
+    T.eq(g.incomingDefense(fr, 'rocket', cell, 6).through, 2, 'gasta');
+    g.beginNationTurn(T.nation('de'));
+    T.eq([b.used, g.incomingDefense(fr, 'rocket', cell, 6).through], [0, 2], 'repuesta para el siguiente');
+    // Los enjambres que patrullan: 2 por enjambre y ronda, en la casilla o una vecina.
+    g.batteries.clear(); g.airVersion++;
+    const next = [0, 1, 2, 3, 4, 5].map(d => G.nb[cell * 6 + d]).find(j => j >= 0 && isLand(j) && g.owner[j] === es);
+    const [sw] = T.swarm(g, es, T.baseFor(g, es, cell, g.droneRange(es)));
+    T.eq(g.droneMission(es, [sw.id], 'patrol', next).result, 'hit', 'patrulla al lado');
+    const d = g.incomingDefense(fr, 'rocket', cell, 3);
+    T.eq([d.through, d.stopped.drones, d.sources], [1, 2, [next]], 'dos por enjambre');
+    T.eq(g.incomingDefense(fr, 'heavyRocket', cell, 1).through, 1, 'gastado');
+    g.beginNationTurn(fr);
+    T.eq(g.incomingDefense(fr, 'guided', cell, 3).stopped.drones, 2, 'repuesto');
+    T.eq(g.incomingDefense(fr, 'missile', cell, 1, { simulate: true }).through, 1, 'misiles, nada');
+    g.beginNationTurn(fr);
+    T.near(g.incomingDefense(fr, 'guided', cell, 1, { simulate: true }).through, 0.75, 1e-9, 'guiados, 25 %');
+    T.near(g.incomingDefense(fr, 'rocket', cell, 3, { simulate: true }).through, 2 * 0.5 + 1, 1e-9, 'cohetes, 50 %');
+    T.learn(g, es, 'drones2', 'drones3');
+    T.near(g.incomingDefense(fr, 'drone', cell, 1, { simulate: true }).through, 0.3, 1e-9, 'con Drones 3, 70 %');
+    // Y los drones enemigos que van contra esa casilla caen.
+    T.learn(g, fr, 'drones1');
+    const a = T.army(g, es, cell, 10), sws = T.swarm(g, fr, T.baseFor(g, fr, cell, g.droneRange(fr)), 2);
+    T.near(g.droneOdds(fr, sws, 'army', cell).through, 2 * 0.3, 1e-9, 'la previsión de la misión los cuenta');
+    const res = g.droneMission(fr, sws.map(s => s.id), 'army', cell);
+    T.eq([res.result, res.down, countUnits(a.units)], ['intercepted', 2, 10], 'interceptados por la patrulla');
+    return true;
+}],
+['B3 · antiaéreo: 4 sitios con Defensa aérea 2 paran ~80 % de los cohetes', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr);
+    const cell = T.clear(g, es, 2);
+    const sites = [cell, ...[0, 1, 2, 3, 4, 5].map(d => G.nb[cell * 6 + d]).filter(j => j >= 0 && isLand(j))].slice(0, 4);
+    T.eq(sites.length, 4, 'cuatro sitios');
+    T.site(g, es, sites[0]);
+    T.near(1 - g.incomingDefense(fr, 'rocket', cell, 1, { simulate: true }).through, 0.22, 0.005, 'un sitio sin investigar, 22 %');
+    for (const c of sites.slice(1)) T.site(g, es, c);
+    T.learn(g, es, 'antiaerea1', 'antiaerea2');
+    const n = 3, sim = k => g.incomingDefense(fr, k, cell, n, { simulate: true }).through / n;
+    T.near(sim('rocket'), 0.2, 0.03, 'cohetes');
+    T.near(sim('missile'), 0.45, 0.03, 'misiles');
+    T.near(sim('nuclear'), 0.79, 0.03, 'nucleares');
+    T.eq(sim('drone'), 1, 'los drones ya pasan por el antiaéreo en su misión');
+    // Cada fuente atiende 3 armas por ronda: la cuarta pasa entera.
+    T.near(g.incomingDefense(fr, 'rocket', cell, 4, { simulate: true }).through, 3 * Math.exp(-1.6) + 1, 1e-9, 'tres por fuente');
+    T.luck(g, 0);
+    const d = g.incomingDefense(fr, 'rocket', cell, 4);
+    T.eq([d.through, d.stopped.aa, d.sources.length], [1, 3, 4], 'tirada: tres paradas');
+    T.ok(sites.every(c => g.aaSites.get(c).known.has(fr)), 'los sitios que disparan se delatan');
+    return true;
+}],
+['B3 · la previsión no cuenta baterías que no conoces y avisa de que puede haberlas', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'defensa1');
+    const [, cell] = T.border(g, fr, es), b = T.battery(g, es, cell);
+    T.ok(!g.batteryKnown(fr, cell) && g.batteryKnown(es, cell), 'fr no la conoce');
+    const d = g.incomingDefense(fr, 'drone', cell, 2, { simulate: true });
+    T.eq([d.through, d.unknown], [2, true], 'no la cuenta y avisa');
+    // El reconocimiento con drones la desvela.
+    T.learn(g, fr, 'drones1');
+    g.droneEffect(fr, 'recon', cell);
+    T.ok(b.known.has(fr) && g.batteryKnown(fr, cell), 'reconocida');
+    T.near(g.incomingDefense(fr, 'drone', cell, 2, { simulate: true }).through, 0.4, 1e-9, 'ahora la cuenta');
+    // Con Reconocimiento 2 lo ve todo (la IA no necesita tenerlo a la vista): ya no hay dudas.
+    b.known.clear(); T.learn(g, fr, 'reconocimiento1', 'reconocimiento2');
+    const e = g.incomingDefense(fr, 'drone', cell, 2, { simulate: true });
+    T.ok(g.batteryKnown(fr, cell), 'la ve');
+    T.near(e.through, 0.4, 1e-9, 'la cuenta');
+    T.eq(e.unknown, false, 'sin dudas');
+    // Sin niebla no hay dudas.
+    const h = T.game(), x = T.nation('es'), y = T.nation('fr');
+    h.start(x); T.bare(h); h.declareWar(x, y);
+    T.eq(h.incomingDefense(y, 'missile', T.clear(h, x), 2, { simulate: true }).unknown, false, 'sin niebla');
+    return true;
+}],
+['B3 · se pierde al tomar la casilla, Destruir antiaéreo la destruye, guardar y cargar', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, fr, 'defensa1');
+    const [, cell] = T.border(g, es, fr), b = T.battery(g, fr, cell);
+    // Destruir antiaéreo contra una batería conocida: un acierto la destruye.
+    const base = T.baseFor(g, es, cell); T.airfield(g, es, base); const [q] = T.squad(g, es, base);
+    T.eq(g.missionCheck(es, [q], 'aa', cell), 'No conoces ningún antiaéreo en esa casilla.', 'sin conocerla, no');
+    b.known.add(es);
+    T.luck(g, 0.99);
+    const res = g.airMission(es, [q.id], 'aa', cell);
+    T.eq([res.result, g.batteries.has(cell)], ['hit', false], `destruida: ${res.text}`);
+    // Guardar y cargar: obra, conocidos y capacidad gastada en la ronda.
+    const c2 = T.clear(g, fr, 2), b2 = T.battery(g, fr, c2); b2.used = 3; b2.known.add(es);
+    T.learn(g, es, 'defensa1', 'drones1'); g.nations[es].gold = 500;
+    const [, c3] = T.border(g, fr, es, 1); g.buildBattery(es, g.planBattery(es, c3));
+    const [sw] = T.swarm(g, es, T.baseFor(g, es, c3, g.droneRange(es)));
+    g.droneMission(es, [sw.id], 'patrol', c3);
+    T.luck(g, 0);
+    g.incomingDefense(fr, 'rocket', c3, 1);   // el enjambre gasta una (la batería, en obra, no dispara)
+    T.eq([...g.defUsed], [[`s:${sw.id}`, 1]], 'el enjambre cuenta');
+    const data = JSON.parse(JSON.stringify(g.serialize())), h = GameEngine.load(data);
+    const dump = x => [...x.batteries].map(([c, v]) => [c, v.owner, v.left, [...v.known], v.used]);
+    T.eq(dump(h), dump(g), 'baterías');
+    T.eq([...h.defUsed], [...g.defUsed], 'contadores de la ronda');
+    // Basura: en el mar, repetida, rota; contadores de clave o número imposibles.
+    let sea = 0; while (isLand(sea)) sea++;
+    data.defense.bat.push([sea, es, 0, [], 0], [c2, es, 0, [], 0], ['x']);
+    data.defense.used.push(['zz', 1], ['s:1', 99]);
+    const k = GameEngine.load(data);
+    T.eq([k.batteries.size, k.defUsed.size], [2, 1], 'sin basura');
+    // Al tomar la casilla, se pierde.
+    if (g.armyOn(c2)) g.removeArmy(g.armyOn(c2));
+    g.capture(c2, es, true);
+    T.eq(g.batteries.has(c2), false, 'perdida al tomarla');
+    delete data.defense;
+    const old = GameEngine.load(data);
+    T.eq([old.batteries.size, old.defUsed.size], [0, 0], 'partida vieja');
     return true;
 }],
 ];

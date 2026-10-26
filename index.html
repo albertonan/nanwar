@@ -685,6 +685,8 @@ const CONFIG = {
     // los derriba el antiaéreo, fuerza de los cazas que protegen una casilla contra ellos, enjambres juntos que saturan
     // el antiaéreo (con Enjambres autónomos) y lo que cuenta entonces, y su fuerza frente a la de un escuadrón.
     DRONE: { COST: 120, PER_CITY: 4, RECON_KM: 60, AA_DOWN: 1.5, PATROL_KILL: 2, SATURATE: 3, SAT_AA: 0.5, POWER: 0.5 },
+    // Baterías automáticas (rama Defensa automática): precio y turnos de obra.
+    BATTERY: { COST: 150, TURNS: 2 },
     // Terreno de cada casilla, sacado de datos reales (relieve, bosques, humedales y lagos): coste de entrar y defensa.
     TERRAIN: {
         plain:    { name: "Llanura", cost: 1, def: 1 },
@@ -717,6 +719,22 @@ const AIR_TARGETS = 8, AIR_PATROLS = 2, AIR_MIN_HIT = 0.5, AIR_MAX_DOWN = 0.2, A
 // La aviación de la IA: escuadrones por operación, los que quiere por cada uno enemigo (y cuántos más), parte de la
 // renta que aparta para comprarlos y probabilidad de poner un antiaéreo cada turno.
 const AI_WINGS = 6, AI_AIR_RATIO = 0.8, AI_AIR_EXTRA = 2, AI_AIR_SHARE = 0.25, AI_AA_CHANCE = 0.35;
+// Batería automática según el nivel de Defensa automática de su dueño (sin nivel no dispara): radio, capacidad (armas
+// que atiende por ronda) y probabilidad de parar cada clase de arma; el cohete pesado, la del cohete.
+const BATTERY_LEVELS = [null,
+    { km: 40, cap: 4, p: { drone: 0.8, rocket: 0.7 } },
+    { km: 100, cap: 8, p: { drone: 0.85, rocket: 0.8, missile: 0.6, guided: 0.45 } },
+    { km: 200, cap: 12, p: { drone: 0.9, rocket: 0.9, missile: 0.7, guided: 0.6, heavy: 0.5, nuclear: 0.35 } }];
+// Capas de defensa (incomingDefense) contra cada clase de arma. Enjambres que patrullan: lo que para cada uno (con
+// Enjambres autónomos de su dueño, SWARM_STOP_AUTO contra drones y cohetes) y armas por enjambre y ronda. Antiaéreo: k
+// de p = 1 − e^(−S·k/40) y armas por fuente y ronda. La reentrada (parte C, rules.interceptMult) rebaja lo que para
+// cada capa contra los misiles.
+const DEFENSE_CLASSES = ['drone', 'rocket', 'heavyRocket', 'missile', 'guided', 'heavy', 'nuclear'];
+const SWARM_STOP = { drone: 0.5, rocket: 0.5, heavyRocket: 0.5, guided: 0.25 }, SWARM_STOP_AUTO = 0.7, SWARM_STOP_PER = 2;
+const AA_STOP_K = { drone: 1.2, rocket: 1, heavyRocket: 0.8, missile: 0.5, guided: 0.6, heavy: 0.3, nuclear: 0.15 }, AA_STOP_PER = 3;
+const REENTRY_CLASSES = new Set(['missile', 'guided', 'heavy', 'nuclear']);
+// Clave de cada clase en la tabla de las baterías.
+const batteryKey = cls => (cls === 'heavyRocket' ? 'rocket' : cls);
 // Con el antiaéreo móvil, la tirada de reclutar de la IA a partir de la que sale una antiaérea (una de cada veinte).
 const AI_ANTIAIR = 0.95;
 // Solo aparta oro para la aviación el país al que un escuadrón le cuesta como mucho estos turnos de renta: al pobre le
@@ -958,9 +976,9 @@ const TECH_TREE = {
         ['Enjambres autónomos', { drones: 3, droneSwarm: true }, [['Saturar el antiaéreo', 'no', 'sí'], ['Reconocimiento de los drones', 'tipo y número', 'también galones y fortificaciones']], 'Son tantos que el antiaéreo no da abasto, y lo que ven los drones llega con todo detalle.']
     ],
     defensa: [
-        ['Defensa de punto', { defense: 1 }, [['Baterías automáticas', 'no', 'sí'], ['Intercepta', '—', 'drones y cohetes']], 'Cañones y radar que cubren una casilla y sus vecinas sin que nadie los mande.'],
-        ['Interceptores de medio alcance', { defense: 2 }, [['Radio y capacidad de la batería', 'nivel 1', 'nivel 2'], ['Intercepta', 'drones y cohetes', 'también misiles y misiles guiados']], 'Un frente entero bajo una cúpula, a costa de gastar interceptores.'],
-        ['Escudo antimisiles con láser', { defense: 3 }, [['Radio y capacidad de la batería', 'nivel 2', 'nivel 3'], ['Intercepta', 'hasta misiles guiados', 'también misiles pesados y nucleares']], 'Lo único que puede parar un misil pesado antes de que caiga.']
+        ['Defensa de punto', { defense: 1 }, [['Baterías automáticas', 'no', 'sí'], ['Radio y capacidad por ronda', '—', '40 km, 4 armas'], ['Drones y cohetes', '—', '80 % y 70 %']], 'Cañones y radar que cubren 40 km a la redonda sin que nadie los mande. Pasada la capacidad, lo demás llega.'],
+        ['Interceptores de medio alcance', { defense: 2 }, [['Radio y capacidad por ronda', '40 km, 4 armas', '100 km, 8 armas'], ['Drones y cohetes', '80 % y 70 %', '85 % y 80 %'], ['Misiles y misiles guiados', '—', '60 % y 45 %']], 'Un frente entero bajo una cúpula, a costa de gastar interceptores.'],
+        ['Escudo antimisiles con láser', { defense: 3 }, [['Radio y capacidad por ronda', '100 km, 8 armas', '200 km, 12 armas'], ['Drones y cohetes', '85 % y 80 %', '90 % y 90 %'], ['Misiles y misiles guiados', '60 % y 45 %', '70 % y 60 %'], ['Misiles pesados y nucleares', '—', '50 % y 35 %']], 'Lo único que puede parar un misil pesado antes de que caiga.']
     ]
 };
 const TECHS = RESEARCH_BRANCHES.flatMap(b => TECH_TREE[b.id].map(([name, fx, changes, note], i) => ({ id: `${b.id}${i + 1}`, branch: b.id, tier: i + 1, name, fx, changes, note })));
@@ -1310,6 +1328,11 @@ class GameEngine {
         this.nextSwarmId = 1;
         this.droneHits = new Map();   // casilla × 8 + misión → turno: el acierto de drones del blanco ese turno (aparte del aéreo)
         this.droneSeen = new Map();   // país × casillas + casilla → turno hasta el que lo desvela su reconocimiento con drones
+        // Defensa automática: baterías (nadie empieza con ellas) y lo que llevan atendido en esta ronda los enjambres que
+        // patrullan ('s:' id) y el antiaéreo ('site:', 'integrated:' casilla; 'mobile:' id del ejército). Una ronda es el
+        // turno de cada país: todo se repone al empezar (defenseRound).
+        this.batteries = new Map();   // casilla → { owner, left, known, used }: left, turnos de obra; used, armas atendidas
+        this.defUsed = new Map();
         this.seedAir();
         this.configure({ aggression: 'normal', alliances: 'reales', victory: 0.5, fog: true });
         for (const nat of this.nations) nat.gold = this.income(nat.id) * CONFIG.START_GOLD_TURNS;
@@ -1388,7 +1411,8 @@ class GameEngine {
                 sats: this.sats.map(s => [s.owner, s.cell, s.left]) },
             drones: { sw: [...this.swarms.values()].map(q => [q.id, q.owner, q.base, q.ready, q.flown, q.patrol, q.op, q.damaged ? 1 : 0]), next: this.nextSwarmId,
                 hits: [...this.droneHits].filter(([, t]) => t === this.turn).map(([k]) => k),
-                seen: [...this.droneSeen].filter(([, t]) => t >= this.turn) }
+                seen: [...this.droneSeen].filter(([, t]) => t >= this.turn) },
+            defense: { bat: [...this.batteries].map(([c, b]) => [c, b.owner, b.left, [...b.known], b.used]), used: [...this.defUsed] }
         };
     }
 
@@ -1705,6 +1729,25 @@ class GameEngine {
             for (const x of list(data.drones.seen)) {
                 const k = x?.[0];
                 if (Number.isInteger(k) && k >= 0 && k < NN * G.N) g.droneSeen.set(k, int(x?.[1], g.turn, g.turn + 1, g.turn));
+            }
+        }
+        // Baterías: en tierra, una por casilla, y quién las conoce, solo países que existen; lo atendido en esta ronda, con
+        // una clave que exista (el enjambre, la casilla) y sin pasar de lo que atiende cada uno. Las partidas de antes, sin nada.
+        g.batteries = new Map(); g.defUsed = new Map();
+        if (data.defense) {
+            const top = BATTERY_LEVELS[BATTERY_LEVELS.length - 1].cap;
+            for (const x of list(data.defense.bat)) {
+                const c = int(x?.[0], -1, G.N - 1, -1);
+                if (c < 0 || !isLand(c) || g.batteries.has(c)) continue;
+                const known = new Set(list(x?.[3]).filter(k => Number.isInteger(k) && k >= 0 && k < NN));
+                g.batteries.set(c, { owner: nat(x?.[1]), left: int(x?.[2], 0, CONFIG.BATTERY.TURNS, 0), known, used: int(x?.[4], 0, top, 0) });
+            }
+            for (const x of list(data.defense.used)) {
+                const m = /^(s|site|integrated|mobile):([1-9]\d{0,9}|0)$/.exec(str(x?.[0], 24)), n = x?.[1];
+                if (!m || g.defUsed.has(m[0]) || !Number.isInteger(n) || n < 1 || n > (m[1] === 's' ? SWARM_STOP_PER : AA_STOP_PER)) continue;
+                const id = +m[2];
+                if (m[1] === 's' ? !g.swarms.has(id) : m[1] === 'mobile' ? !g.armies.has(id) : id >= G.N) continue;
+                g.defUsed.set(m[0], n);
             }
         }
         g.airVersion++;
@@ -2254,6 +2297,14 @@ class GameEngine {
         this.airVersion++;
         if (s.owner === this.player) this.log(`Pierdes el antiaéreo de ${this.placeName(cell)}.`);
     }
+    // Y la batería automática, igual.
+    loseBattery(cell) {
+        const b = this.batteries.get(cell);
+        if (!b || b.owner === this.owner[cell]) return;
+        this.batteries.delete(cell);
+        this.airVersion++;
+        if (b.owner === this.player) this.log(`Pierdes la batería automática de ${this.placeName(cell)}.`);
+    }
     // Aeródromos en casillas que ya no son de su dueño (sin combate: un tratado, una provincia que cae entera...): se
     // cierran y sus escuadrones vuelan al aeródromo propio más cercano que funcione y tenga sitio. Si no hay, se pierden.
     // Los antiaéreos fijos de esas casillas se pierden sin más: no se trasladan.
@@ -2266,6 +2317,14 @@ class GameEngine {
             if (s.owner === this.player) lostAA++;
         }
         if (lostAA) this.log(`Pierdes ${lostAA === 1 ? 'un antiaéreo' : `${lostAA} antiaéreos`} en tierra que ya no es tuya.`);
+        let lostB = 0;   // las baterías, igual
+        for (const [c, b] of this.batteries) {
+            if (this.owner[c] === b.owner) continue;
+            this.batteries.delete(c);
+            this.airVersion++;
+            if (b.owner === this.player) lostB++;
+        }
+        if (lostB) this.log(`Pierdes ${lostB === 1 ? 'una batería automática' : `${lostB} baterías automáticas`} en tierra que ya no es tuya.`);
         for (const [c, f] of [...this.airfields]) {
             if (this.owner[c] === f.owner) continue;
             this.airfields.delete(c);
@@ -2286,7 +2345,7 @@ class GameEngine {
         }
         this.droneSweep();
     }
-    // Al empezar el turno de `id`: avanzan sus obras de aeródromo y de antiaéreo, sus escuadrones y enjambres dejan de
+    // Al empezar el turno de `id`: avanzan sus obras de aeródromo, de antiaéreo y de baterías, sus escuadrones y enjambres dejan de
     // patrullar (y los dañados que ya pueden volar dejan de contar como dañados) y sus satélites gastan un turno. Se
     // olvidan los aciertos y lo desvelado de turnos pasados.
     airTurn(id) {
@@ -2298,6 +2357,11 @@ class GameEngine {
         for (const [c, s] of this.aaSites) {
             if (s.owner !== id || s.left <= 0) continue;
             if (--s.left === 0 && id === this.player) this.log(`Antiaéreo terminado en ${this.placeName(c)}.`);
+            this.airVersion++;
+        }
+        for (const [c, b] of this.batteries) {
+            if (b.owner !== id || b.left <= 0) continue;
+            if (--b.left === 0 && id === this.player) this.log(`Batería automática terminada en ${this.placeName(c)}.`);
             this.airVersion++;
         }
         for (const q of this.squadrons.values()) {
@@ -2499,6 +2563,48 @@ class GameEngine {
         this.log(`Empiezas un antiaéreo en ${this.placeName(cell)} por ${plan.cost} de oro: listo en ${plural(CONFIG.AIR.AA_TURNS, 'turno', 'turnos')}.`);
         return true;
     }
+    // --- Baterías automáticas (rama Defensa automática): instalaciones como el antiaéreo fijo que disparan solas contra
+    // drones, cohetes y misiles que van a una casilla de su radio, con una capacidad por ronda ---
+    // Lo que hacen las baterías de `id` (BATTERY_LEVELS): las ya construidas mejoran al investigar. null sin Defensa de punto.
+    batteryLevel(id) { return BATTERY_LEVELS[this.rules(id).defense] ?? null; }
+    // Una batería: en tierra propia (no en un lago), una por casilla, con Defensa de punto.
+    planBattery(id, cell) {
+        if (cell < 0 || !isLand(cell) || CELL_TERRAIN[cell] === 'lake' || this.owner[cell] !== id || this.batteries.has(cell) || !this.batteryLevel(id)) return null;
+        return { cell, cost: CONFIG.BATTERY.COST };
+    }
+    buildBattery(id, plan) {
+        const n = this.nations[id], p = plan ? this.planBattery(id, plan.cell) : null;
+        if (!p || p.cost > n.gold) return false;
+        this.batteries.set(p.cell, { owner: id, left: CONFIG.BATTERY.TURNS, known: new Set(), used: 0 });
+        n.gold -= p.cost;
+        this.airVersion++;
+        return true;
+    }
+    playerBuildBattery(cell) {
+        if (this.over || this.player === null) return false;
+        const p = this.player, plan = this.planBattery(p, cell), B = CONFIG.BATTERY;
+        if (!plan) {
+            this.log(!this.batteryLevel(p) ? 'Para construir baterías automáticas hace falta investigar Defensa de punto (Defensa automática 1).'
+                : this.owner[cell] === p && this.batteries.has(cell) ? 'Ahí ya tienes una batería.' : 'Solo se construye una batería en tierra tuya.');
+            return false;
+        }
+        if (plan.cost > this.nations[p].gold) { this.log(`Fondos insuficientes: la batería cuesta ${plan.cost}g.`); return false; }
+        if (!this.buildBattery(p, plan)) return false;
+        this.log(`Empiezas una batería automática en ${this.placeName(cell)} por ${plan.cost} de oro: lista en ${plural(B.TURNS, 'turno', 'turnos')}.`);
+        return true;
+    }
+    // ¿Conoce `viewer` la batería de `cell`? Como un sitio de antiaéreo: si le ha disparado (o la han reconocido sus
+    // drones) o si la ve (aaVisible: espía, satélite, drones o Reconocimiento 2).
+    batteryKnown(viewer, cell) {
+        const b = this.batteries.get(cell);
+        return !!b && (b.known.has(viewer) || this.aaVisible(viewer, cell));
+    }
+    // Una ronda nueva (al empezar el turno de cada país): las baterías, los enjambres que patrullan y el antiaéreo vuelven
+    // a atender todas las armas que pueden.
+    defenseRound() {
+        for (const b of this.batteries.values()) b.used = 0;
+        this.defUsed.clear();
+    }
     // --- Satélites (rama Espacio): vigilan un círculo del mapa durante unos turnos; no se derriban ni se comparten ---
     // Precio de un satélite: unos 20 turnos de renta, y nunca menos de 1000.
     satCost(id) { return Math.max(1000, 20 * this.income(id)); }
@@ -2545,8 +2651,9 @@ class GameEngine {
         const R = drone ? this.droneRange(owner) : this.airRange(owner), can = drone ? q => this.canFlySwarm(q) : q => this.canFly(q);
         return sqs.filter(q => q && q.owner === owner && can(q) && hexDist(q.base, cell) <= R).sort((a, b) => a.id - b.id);
     }
-    // El antiaéreo de `cell` que `viewer` conoce y que `owner` puede atacar: un sitio fijo; si no hay, las antiaéreas del
-    // ejército que haya; y si tampoco, el integrado.
+    // El antiaéreo de `cell` que `viewer` conoce y que `owner` puede atacar: un sitio fijo; si no hay, una batería
+    // automática terminada (kind 'battery'; para elegir blancos vale como un sitio de su dueño, aunque no dispara a los
+    // aviones); si tampoco, las antiaéreas del ejército que haya; y si tampoco, el integrado.
     aaTarget(owner, cell, viewer = owner) {
         const rank = { site: 3, mobile: 2, integrated: 1 };
         let best = null;
@@ -2554,6 +2661,10 @@ class GameEngine {
             if (src.cell !== cell || !this.atWar(owner, src.owner) || !this.aaKnown(viewer, src)) continue;
             if (!best || rank[src.kind] > rank[best.kind]) best = src;
         }
+        if (best?.kind === 'site') return best;
+        const b = this.batteries.get(cell);
+        if (b && b.left === 0 && this.owner[cell] === b.owner && this.atWar(owner, b.owner) && this.batteryKnown(viewer, cell))
+            return { cell, owner: b.owner, kind: 'battery', power: this.rules(b.owner).aaPower, radius: 0, site: null, battery: b };
         return best;
     }
     // Los escuadrones que salen al paso de una misión de `owner` contra `cell`: los de países en guerra con él que
@@ -2695,6 +2806,11 @@ class GameEngine {
             case 'fort': return this.lowerFort(cell);
             case 'aa': {
                 if (src.kind === 'integrated') return `la ciudad ${this.lowerFort(cell)} y pierde su antiaéreo`;
+                if (src.kind === 'battery') {   // sin estado dañado: un acierto la destruye
+                    this.batteries.delete(cell);
+                    this.airVersion++;
+                    return 'la batería automática queda destruida';
+                }
                 if (src.kind === 'mobile') {   // una parte de sus antiaéreas, el doble a un ejército embarcado
                     const a = src.army, lost = Math.min(a.units.antiair, Math.max(1, Math.round(a.units.antiair * A.MOBILE_HIT * (afloat(cell) ? A.SEA_STRIKE : 1))));
                     a.units.antiair -= lost;
@@ -2881,12 +2997,119 @@ class GameEngine {
     // Lo que cuenta el antiaéreo contra una misión de `n` enjambres de `owner`: con Enjambres autónomos y 3 o más juntos,
     // la mitad (saturación).
     droneSaturation(owner, n) { return this.rules(owner).droneSwarm && n >= CONFIG.DRONE.SATURATE ? CONFIG.DRONE.SAT_AA : 1; }
-    // Capas de defensa contra `n` armas de la clase `cls` ('drone', cohetes, misiles...) de `owner` que llegan a `cell`:
-    // drones que patrullan, baterías automáticas y antiaéreo. Devuelve cuántas pasan (`through`), cuántas para cada capa,
-    // las casillas que disparan y si puede haber defensa que `viewer` no conoce; con `simulate`, la media, sin tirar dados
-    // ni gastar capacidad. Por ahora no hay capas: todo pasa.
+    // Enjambres que defienden `cell` de las armas de `owner`: los de países en guerra con él que patrullan esa casilla o
+    // una vecina, por id. (La escolta, tarea 4, añade aquí los que escoltan al ejército de la casilla.)
+    defenseSwarms(owner, cell) {
+        const out = [];
+        for (const q of this.swarms.values()) if (q.patrol >= 0 && this.atWar(owner, q.owner) && hexDist(q.patrol, cell) <= 1) out.push(q);
+        return out.sort((a, b) => a.id - b.id);
+    }
+    // Capas de defensa contra `n` armas de la clase `cls` (DEFENSE_CLASSES) de `owner` que llegan a `cell`. Cada arma
+    // pasa, una tras otra, por tres capas y en cada una la atiende como mucho uno, el primero que aún tenga capacidad en
+    // esta ronda (la gasta al atenderla, la pare o no):
+    // 1. los enjambres de defenseSwarms: SWARM_STOP (con Enjambres autónomos de su dueño, SWARM_STOP_AUTO contra drones y
+    //    cohetes), SWARM_STOP_PER armas por enjambre;
+    // 2. las baterías enemigas terminadas, en su casilla, cuyo radio cubre `cell` y que paran esa clase (BATTERY_LEVELS
+    //    del nivel de su dueño), primero la de más probabilidad y luego la más cercana;
+    // 3. el antiaéreo que cubre `cell` (aaList: sitios e integrado con su radio y, en el mar, nada de eso; el móvil, solo
+    //    el de la casilla), salvo contra drones, que ya lo pasan en su misión (aaCover): la atienden a la vez todas las
+    //    fuentes con capacidad, AA_STOP_PER armas cada una, con p = 1 − e^(−S·k/40), S su fuerza con el tope AA_CAP
+    //    del defensor y k = AA_STOP_K.
+    // La reentrada (parte C) multiplica en las tres capas lo que se para de las clases REENTRY_CLASSES por
+    // rules(owner).interceptMult. Devuelve { through, stopped: { drones, batteries, aa }, sources, unknown }: las que
+    // pasan, las que para cada capa, las casillas de quien atiende (la patrulla del enjambre, la batería, la fuente) y si
+    // puede haber defensa que `viewer` no conoce (defenseDoubt, al leerlo). Las baterías y los sitios que disparan se
+    // delatan a `owner`. Con `simulate`, la media esperada, sin tirar dados ni gastar capacidad, con las defensas que
+    // `viewer` conoce y la capacidad que les queda.
     incomingDefense(owner, cls, cell, n, { viewer = owner, simulate = false } = {}) {
-        return { through: n, stopped: { drones: 0, batteries: 0, aa: 0 }, sources: [], unknown: false };
+        const stopped = { drones: 0, batteries: 0, aa: 0 }, sources = [], g = this;
+        let doubt, through = 0;
+        const result = () => ({ through, stopped, sources, get unknown() { return doubt ??= g.defenseDoubt(owner, cls, cell, viewer); } });
+        if (!DEFENSE_CLASSES.includes(cls) || !(n > 0)) return result();
+        const mult = REENTRY_CLASSES.has(cls) ? this.rules(owner).interceptMult ?? 1 : 1, used = key => this.defUsed.get(key) ?? 0;
+        // Quien puede atender cada capa: casilla, probabilidad, lo que le queda (`left`) y cómo lo gasta de verdad.
+        const swarms = [];
+        if (SWARM_STOP[cls]) for (const q of this.defenseSwarms(owner, cell)) {
+            if (simulate && viewer !== q.owner && !this.allied(viewer, q.owner) && !this.knownCell(viewer, q.patrol)) continue;
+            const key = `s:${q.id}`, p = cls !== 'guided' && this.rules(q.owner).droneSwarm ? SWARM_STOP_AUTO : SWARM_STOP[cls];
+            swarms.push({ cell: q.patrol, p: p * mult, left: SWARM_STOP_PER - used(key), spend: () => this.defUsed.set(key, used(key) + 1) });
+        }
+        const bats = [], bk = batteryKey(cls);
+        for (const [c, b] of this.batteries) {
+            const L = this.batteryLevel(b.owner);
+            if (!L?.p[bk] || b.left > 0 || this.owner[c] !== b.owner || !this.atWar(owner, b.owner) || hexDist(c, cell) > kmCells(L.km)) continue;
+            if (simulate && !this.batteryKnown(viewer, c)) continue;
+            bats.push({ cell: c, p: L.p[bk] * mult, left: L.cap - b.used, spend: () => { b.used++; b.known.add(owner); } });   // quien dispara se delata
+        }
+        bats.sort((x, y) => y.p - x.p || hexDist(x.cell, cell) - hexDist(y.cell, cell) || x.cell - y.cell);
+        const aa = [];
+        let cap = 0;
+        if (cls !== 'drone') {
+            const sea = afloat(cell), def = this.armyOn(cell)?.owner ?? this.owner[cell];
+            cap = CONFIG.AIR.AA_CAP * (def >= 0 ? this.rules(def) : BASE_RULES).aaPower;
+            for (const src of this.aaList()) {
+                if (!this.atWar(owner, src.owner) || (src.kind === 'mobile' ? src.cell !== cell : sea || hexDist(src.cell, cell) > src.radius)) continue;
+                if (simulate && !this.aaKnown(viewer, src)) continue;
+                const key = `${src.kind}:${src.kind === 'mobile' ? src.army.id : src.cell}`;
+                aa.push({ cell: src.cell, power: src.power, left: AA_STOP_PER - used(key), spend: () => { this.defUsed.set(key, used(key) + 1); src.site?.known.add(owner); } });
+            }
+        }
+        const fired = c => { if (!sources.includes(c)) sources.push(c); }, eps = 1e-9;
+        for (let i = 0; i < n; i++) {
+            // Lo que queda del arma: 1 o 0 con dados; en la previsión, la probabilidad de que siga.
+            let m = 1;
+            for (const [list, layer] of [[swarms, 'drones'], [bats, 'batteries']]) {
+                let rest = m, next = 0;   // rest: sin atender aún en esta capa; next: atendida y no parada
+                for (const d of list) {
+                    if (rest <= eps) break;
+                    const e = Math.min(rest, d.left);
+                    if (e <= eps) continue;
+                    d.left -= e; rest -= e;
+                    fired(d.cell);
+                    if (simulate) { stopped[layer] += e * d.p; next += e * (1 - d.p); continue; }
+                    d.spend();
+                    if (this.rng() < d.p) stopped[layer]++; else next++;
+                }
+                m = rest + next;
+            }
+            const on = m > eps ? aa.filter(x => x.left > eps) : [];
+            if (on.length) {
+                const S = Math.min(cap, on.reduce((s, x) => s + x.power, 0)), p = (1 - Math.exp(-S * AA_STOP_K[cls] / 40)) * mult;
+                for (const x of on) {
+                    x.left -= Math.min(x.left, m);
+                    fired(x.cell);
+                    if (!simulate) x.spend();
+                }
+                if (simulate) { stopped.aa += m * p; m -= m * p; } else if (this.rng() < p) { stopped.aa++; m = 0; }
+            }
+            through += m;
+        }
+        return result();
+    }
+    // ¿Puede haber defensa contra armas `cls` de `owner` a `cell` que `viewer` no conoce? Como aaDoubt, sale solo de lo
+    // que `viewer` sabe y ve, nunca de lo que hay:
+    // - enjambres que patrullen: si algún enemigo de `owner` puede tenerlos (los tiene o no sabe qué investiga) y no
+    //   conoce lo que hay en la casilla o en una vecina;
+    // - baterías: una casilla de tierra de un enemigo a lo que cubriría una batería suya que pare esa clase (el radio de
+    //   su nivel si sabe qué investiga y, si no, el mayor), donde no vería una batería ni la conoce;
+    // - el antiaéreo (aaDoubt), salvo contra drones, que lo mira su misión.
+    defenseDoubt(owner, cls, cell, viewer) {
+        if (!this.settings.fog || viewer === null || !DEFENSE_CLASSES.includes(cls)) return false;
+        const enemies = this.enemiesOf(owner), bk = batteryKey(cls);
+        if (SWARM_STOP[cls] && enemies.some(e => !this.knowsResearch(viewer, e) || this.rules(e).drones >= 1)
+            && hexDisc(cell, 1).some(c => !this.knownCell(viewer, c))) return true;
+        const reach = new Map();
+        let R = -1;
+        for (const e of enemies) {
+            const L = this.knowsResearch(viewer, e) ? this.batteryLevel(e) : BATTERY_LEVELS[BATTERY_LEVELS.length - 1], r = L?.p[bk] ? kmCells(L.km) : -1;
+            reach.set(e, r);
+            R = Math.max(R, r);
+        }
+        if (R >= 0) for (const c of hexDisc(cell, R)) {
+            if (!isLand(c) || hexDist(c, cell) > (reach.get(this.owner[c]) ?? -1)) continue;
+            if (!this.aaVisible(viewer, c) && !this.batteries.get(c)?.known.has(viewer)) return true;
+        }
+        return cls !== 'drone' && this.aaDoubt(owner, cell, [], viewer);
     }
     // ¿Puede `owner` mandar esos enjambres a esa misión contra `cell`? '' si puede; si no, el motivo. Misiones: 'recon'
     // (reconocer: el mar, o la tierra o el ejército de un país en guerra), 'army' (atacar ejército: un acierto de drones
@@ -2928,7 +3151,7 @@ class GameEngine {
     }
     // Lo que hace un acierto de drones de `owner` en `cell`; devuelve cómo lo cuenta el parte a quien lo manda.
     // - recon: desvela a `owner` las casillas a RECON_KM (tipo y número; con Drones 3, también niveles) este turno y el
-    //   siguiente, y le deja conocidos los antiaéreos fijos de la zona.
+    //   siguiente, y le deja conocidos los antiaéreos fijos y las baterías de la zona.
     // - army: le quita droneHit (base y azar) de sus unidades, al menos una, primero tanques y artillería; con Drones 3,
     //   además lo desorganiza hasta su próximo turno.
     droneEffect(owner, kind, cell) {
@@ -2937,6 +3160,7 @@ class GameEngine {
             const R = kmCells(CONFIG.DRONE.RECON_KM), until = this.turn + 1;
             for (const c of hexDisc(cell, R)) { const k = owner * G.N + c; if (!(this.droneSeen.get(k) >= until)) this.droneSeen.set(k, until); }
             for (const [c, s] of this.aaSites) if (s.owner !== owner && hexDist(c, cell) <= R) s.known.add(owner);
+            for (const [c, b] of this.batteries) if (b.owner !== owner && hexDist(c, cell) <= R) b.known.add(owner);
             this.airVersion++;
             return `ves lo que hay a ${plural(R, 'casilla', 'casillas')} a la redonda hasta el final de tu próximo turno`;
         }
@@ -5985,6 +6209,7 @@ class GameEngine {
         this.loseAirfield(cell);   // antes de que la ciudad quede asediada: el aeródromo cae al entrar
         this.loseAASite(cell);     // y el antiaéreo, igual
         this.loseSwarms(cell);     // y los enjambres de la ciudad
+        this.loseBattery(cell);    // y la batería automática
         this.sieges.delete(cell);
         if (byForce) this.wreck(cell, prev, a);
         const res = RESOURCE_AT.get(cell);
@@ -6373,6 +6598,7 @@ class GameEngine {
     }
 
     beginNationTurn(id) {
+        this.defenseRound();   // quien empieza su turno encuentra la defensa de los demás repuesta
         this.airSweep();
         this.nations[id].lastTurn = this.turn;
         this.airTurn(id);
