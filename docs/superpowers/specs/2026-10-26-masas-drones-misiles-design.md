@@ -326,7 +326,7 @@ Dos ramas nuevas en el área Militar:
   - **Frente amplio**: ocupar territorio a lo ancho; evita las batallas grandes (D4).
 - **Anchura del frente (Decisión mía):** se elige en la ficha entre estrecha, media y amplia. Por defecto, estrecha en asalto y en punta de lanza, y amplia en frente amplio.
   - En el mapa de Europa son 3, 6 y 10 casillas a cada lado de la flecha.
-  - En el del mundo, 1, 2 y 3, porque cada casilla mide unos 85 km. Se calcula en km como los demás radios: 60, 120 y 200 km.
+  - Se calcula en km como los demás radios (60, 120 y 200 km), con un mínimo de 3, 4 y 6 casillas: en el mundo, donde cada casilla mide unos 85 km, quedan 3, 4 y 6, y el asalto conserva el pasillo de 3 casillas de la parte A.
 - **(Decisión mía)** Las fases de la parte A (reunión con lanzamiento «cuando esté lista» o «cuando yo lo diga») valen para las tres doctrinas.
 
 ### D2 · Punta de lanza
