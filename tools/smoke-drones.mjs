@@ -753,6 +753,138 @@ const CHECKS = [
     T.eq([k.squadrons.get(q.id).task, k.swarms.get(w.id).task], [null, null], 'sin basura');
     return true;
 }],
+['B5i · comprar un enjambre desde la herramienta Aviación', () => {
+    const g = T.uiStart('es'), es = g.player, cap = g.nations[es].capitalCell, card = () => document.querySelector('#card').textContent;
+    T.bare(g); g.nations[es].gold = 5000;
+    const city = PROVINCES.find(p => g.owner[p.city] === es && p.city !== cap).city;
+    ui.setTool('air'); ui.clickCell(city);
+    T.ok(!document.querySelector('[data-action="drone-buy"]'), 'sin Drones 1 no se ofrece');
+    T.learn(g, es, 'drones1'); ui.clickCell(city);
+    T.ok(/Drones en/.test(card()), 'sección de la ciudad');
+    document.querySelector('[data-action="drone-buy"]').click();
+    T.eq(g.swarmsAt(city).length, 1, 'comprado');
+    T.ok(/Nuevo: vuela a partir del turno/.test(card()) && g.nations[es].gold === 5000 - CONFIG.DRONE.COST, 'su estado y su precio');
+    T.ok(ui.view.marks().some(m => m.kind === 'swarm' && m.cell === city && m.n === 1), 'en el mapa');
+    T.ok(/Tus enjambres de drones: 1/.test(T.hover(city)), 'en la tarjeta del ratón');
+    // Una ciudad con aeródromo enseña escuadrones y enjambres, y los dos quedan elegidos.
+    T.airfield(g, es, cap); const [q] = T.squad(g, es, cap, 1), [w] = T.swarm(g, es, cap, 1);
+    ui.clickCell(cap);
+    T.ok(/Escuadrones en/.test(card()) && /Drones en/.test(card()), 'las dos secciones');
+    T.eq([[...ui.air.picked], [...ui.air.drones]], [[q.id], [w.id]], 'elegidos');
+    document.querySelector(`[data-action="drone-pick"][data-id="${w.id}"]`).click();
+    T.eq(ui.air.drones.size, 0, 'se desmarca');
+    return true;
+}],
+['B5i · misión de reconocimiento con clic', () => {
+    const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr'), card = () => document.querySelector('#card').textContent;
+    g.declareWar(es, fr); T.bare(g); T.noIntegrated(g); T.learn(g, es, 'drones1');
+    const [base, target] = T.pair(g, es, fr, () => true, 2, g.droneRange(es));
+    T.swarm(g, es, base, 2);
+    ui.setTool('air'); ui.clickCell(base);
+    T.eq(ui.air.drones.size, 2, 'elegidos los dos');
+    T.eq([ui.view.airPick.bases, ui.view.airPick.range], [[base], g.droneRange(es)], 'el alcance de los drones en el mapa');
+    ui.clickCell(target);
+    T.eq(ui.air.target, target, 'blanco');
+    const b = document.querySelector('[data-action="drone-mission"][data-kind="recon"]');
+    T.ok(b && /% de que salga bien/.test(b.closest('.air-mission').textContent), 'previsión del reconocimiento');
+    T.ok(/Puede haber defensas que no conoces/.test(card()), 'avisa de lo que no conoce');
+    // Una batería francesa conocida a su alcance cuenta en la previsión y sale en el velo del mapa.
+    T.learn(g, fr, 'defensa1');
+    const near = hexDisc(target, 1).find(c => isLand(c) && g.owner[c] === fr && c !== target) ?? target;
+    T.battery(g, fr, near).known.add(es); ui.render();
+    T.ok(ui.view.airPick.known.some(k => k.cell === near && k.kind === 'battery'), 'la batería conocida en el velo');
+    T.ok(/Las defensas que conoces pararían/.test(card()), 'la batería en la previsión');
+    g.batteries.clear(); g.airVersion++;
+    T.luck(g, 0.99);
+    document.querySelector('[data-action="drone-mission"][data-kind="recon"]').click();
+    T.ok(g.droneRevealed(es, target) && g.logs.some(l => /Tus 2 enjambres reconocen/.test(l.msg)), 'reconocido y en el parte');
+    T.ok(/Ya ha volado/.test(card()), 'su estado');
+    T.ok(ui.view.reconAreas().has(target), 'la zona reconocida en el mapa');
+    T.ok(/Reconocida por tus drones/.test(T.hover(target)), 'y en la tarjeta del ratón');
+    return true;
+}],
+['B5i · construir batería', () => {
+    const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr'), card = () => document.querySelector('#card').textContent;
+    T.bare(g); g.nations[es].gold = 5000;
+    const cell = T.clear(g, es, 1);
+    ui.setTool('air'); ui.clickCell(cell);
+    T.ok(!document.querySelector('[data-action="air-build-battery"]'), 'sin Defensa de punto no se ofrece');
+    T.learn(g, es, 'defensa1'); ui.clickCell(cell);
+    document.querySelector('[data-action="air-build-battery"]').click();
+    T.eq(g.batteries.get(cell)?.left, CONFIG.BATTERY.TURNS, 'en obra');
+    T.ok(/Batería automática en obra: lista en 2 turnos/.test(card()), 'en la ficha');
+    T.ok(ui.view.marks().some(m => m.kind === 'battery' && m.cell === cell && m.left === 2), 'en el mapa, en obra');
+    g.batteries.get(cell).left = 0; g.airVersion++; ui.render();
+    T.ok(/Batería automática en servicio/.test(card()), 'en servicio');
+    T.ok(/Tu batería automática: cubre/.test(T.hover(cell)), 'en la tarjeta del ratón');
+    // La francesa no se ve hasta que se conoce.
+    const c2 = T.clear(g, fr, 1);
+    T.learn(g, fr, 'defensa1'); const b = T.battery(g, fr, c2);
+    T.ok(!ui.view.marks().some(m => m.kind === 'battery' && m.cell === c2) && !/Batería/.test(T.hover(c2)), 'desconocida: ni mapa ni tarjeta');
+    b.known.add(es); g.airVersion++;
+    T.ok(ui.view.marks().some(m => m.kind === 'battery' && m.cell === c2), 'conocida: en el mapa');
+    T.ok(/Batería automática de Francia/.test(T.hover(c2)), 'y en la tarjeta');
+    return true;
+}],
+['B5i · niebla: enjambres ajenos solo con información exacta', () => {
+    const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr');
+    T.bare(g);
+    const city = PROVINCES.find(p => g.owner[p.city] === fr && !g.sees(es, p.city)).city;
+    T.swarm(g, fr, city, 3);
+    T.ok(!ui.view.marks().some(m => m.kind === 'swarm' && m.cell === city) && !/enjambre/i.test(T.hover(city)), 'no se ve');
+    g.droneSeen.set(es * G.N + city, g.turn); g.airVersion++;
+    T.ok(ui.view.marks().some(m => m.kind === 'swarm' && m.cell === city && m.n === 3), 'reconocida: se ve');
+    T.ok(/Enjambres de drones de Francia: 3/.test(T.hover(city)), 'y en la tarjeta');
+    return true;
+}],
+['B5i · asignar escolta desde la ficha del ejército', () => {
+    const g = T.uiStart('es'), es = g.player, card = () => document.querySelector('#card').textContent;
+    T.bare(g); T.learn(g, es, 'drones1', 'drones2');
+    const [n, c] = T.plainPair(g, es), base = T.baseFor(g, es, c);
+    T.airfield(g, es, base); const [q] = T.squad(g, es, base, 1), [w] = T.swarm(g, es, base, 1);
+    const a = T.army(g, es, c, 5), b = T.army(g, es, n, 5);
+    ui.setTool('command'); ui.select(c);
+    T.ok(/Escolta/.test(card()), 'sección');
+    const pick = document.querySelector(`#card select[data-escort-pick="a${a.id}"]`);
+    T.ok(pick && [...pick.options].some(o => o.value === `sw:${w.id}`), 'ofrece escuadrones y enjambres a su alcance');
+    pick.value = `sq:${q.id}`;
+    document.querySelector('#card [data-action="escort-mode"][data-value="ataque"]').click();
+    document.querySelector(`#card select[data-escort-pick="a${a.id}"]`).value = `sq:${q.id}`;
+    document.querySelector(`#card [data-action="escort-add"][data-ref="a${a.id}"]`).click();
+    T.eq(q.task, { kind: 'escort', army: a.id, group: 0, mode: 'ataque' }, 'encargada');
+    T.ok(/Escuadrón \d+/.test(card()) && /en ataque/.test(card()), 'en la ficha');
+    T.ok(ui.view.marks().some(m => m.kind === 'escort' && m.army === a.id && m.sq === 1), 'en el mapa');
+    T.ok(/Escoltado por 1 escuadrón/.test(T.hover(c)), 'en la tarjeta del ratón');
+    // Fuera de su alcance queda suspendida y la ficha lo dice.
+    const far = PROVINCES.filter(p => g.owner[p.city] === es).sort((x, y) => hexDist(y.city, c) - hexDist(x.city, c))[0].city;
+    T.ok(hexDist(far, c) > g.airRange(es), 'una base lejos');
+    T.airfield(g, es, far); q.base = far; g.airVersion++; ui.render();
+    T.ok(/suspendida/i.test(card()), 'suspendida');
+    T.ok(!ui.view.marks().some(m => m.kind === 'escort' && m.army === a.id), 'suspendida no se dibuja');
+    document.querySelector(`#card [data-action="escort-clear"][data-kind="squadron"][data-id="${q.id}"]`).click();
+    T.eq(q.task, null, 'quitada');
+    // La agrupación, desde la pestaña Batalla.
+    const gr = g.createGroup(es, [b.id]);
+    ui.tab = 'batalla'; ui.drawerOpen = true; ui.obOpen.add(gr.id); ui.render();
+    const gp = document.querySelector(`#drawer-body select[data-escort-pick="g${gr.id}"]`);
+    T.ok(gp, 'sección en la agrupación');
+    gp.value = `sw:${w.id}`;
+    document.querySelector(`#drawer-body [data-action="escort-add"][data-ref="g${gr.id}"]`).click();
+    T.eq(w.task, { kind: 'escort', army: 0, group: gr.id, mode: ui.escortMode }, 'el enjambre escolta la agrupación');
+    T.ok(/Enjambre \d+/.test(document.querySelector('#drawer-body').textContent), 'en la fila');
+    return true;
+}],
+['B5i · móvil: la ficha de los drones cabe en la hoja inferior', () => {
+    const g = T.uiStart('es');
+    T.bare(g); T.learn(g, g.player, 'drones1');
+    const cap = g.nations[g.player].capitalCell;
+    T.swarm(g, g.player, cap, 2);
+    ui.setSheet('media'); ui.setTool('air'); ui.clickCell(cap);
+    const m = T.mobileCard(), card = document.querySelector('#card');
+    T.ok(!m.hidden && m.card > 0 && m.card <= m.stage * 0.42, `media: ${JSON.stringify(m)}`);
+    T.ok(card.scrollWidth - card.clientWidth <= 2, 'sin desbordar a lo ancho');
+    return true;
+}],
 ];
 
 const exe = process.env.CHROME ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome'].find(existsSync);
@@ -809,6 +941,101 @@ try {
         }
         if (errors.length) { failed++; console.log(`FALLA ${SHOTS}\n      ${errors.join('\n      ')}`); }
         else console.log(`ok    ${SHOTS} (${join(out, 'drones-investigacion.png')}, drones-investigacion-movil.png)`);
+    }
+    // Capturas de los drones en las dos vistas: enjambres en una ciudad española, una patrulla de drones, una batería
+    // propia y otra francesa conocida, un ejército escoltado por un escuadrón y un enjambre y la zona que acaban de
+    // reconocer; y de las fichas (la herramienta Aviación con un blanco, la del ejército con su escolta) en el escritorio
+    // y en el móvil.
+    const MAP_SHOTS = 'B5i · capturas de drones, baterías y escolta en las dos vistas';
+    if (!filter || MAP_SHOTS.includes(filter)) {
+        ran++;
+        const out = join(root, 'tools/cache/smoke');
+        mkdirSync(out, { recursive: true });
+        const page = await browser.newPage({ viewport: { width: 1200, height: 800 }, deviceScaleFactor: 2 });
+        page.errors = [];
+        page.on('pageerror', e => page.errors.push(e.message));
+        await page.goto(`http://localhost:${port}/?seed=7&mapa=europa`);
+        await page.waitForFunction(() => typeof GameEngine === 'function' && typeof ui === 'object');
+        await page.evaluate(setup);
+        const problems = await page.evaluate(() => {
+            const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr');
+            g.declareWar(es, fr); T.learn(g, es, 'drones1', 'drones2', 'defensa1'); T.learn(g, fr, 'defensa1'); g.nations[es].gold = 1e5;
+            // La base, la ciudad española más cercana a una francesa por tierra (todo el camino en tierra).
+            const [base, target] = T.pair(g, es, fr, (x, y) => flightPath(x, y).every(c => isLand(c)), 2, g.droneRange(es));
+            T.swarm(g, es, base, 4);
+            // Junto a la base, hacia el blanco: un ejército propio escoltado por un escuadrón (ataque) y un enjambre
+            // (defensa), una casilla patrullada por drones y una batería propia.
+            const path = flightPath(base, target), around = hexDisc(base, 3).filter(c => isLand(c) && g.owner[c] === es && CITY_OF[c] < 0 && !g.armyAt[c] && CELL_TERRAIN[c] !== 'lake')
+                .sort((x, y) => hexDist(x, target) - hexDist(y, target) || x - y);
+            // Cada cosa en su casilla, a dos o más de las demás, para que se lean por separado.
+            const picks = [base];
+            for (const c of around) if (picks.length < 4 && picks.every(p => hexDist(p, c) >= 2)) picks.push(c);
+            const [, spot, guard, mine] = picks;
+            const a = T.army(g, es, spot, 6, 2, 1);
+            if (!g.airfields.has(base)) T.airfield(g, es, base);
+            const [q] = T.squad(g, es, base, 1), w = g.swarmsAt(base)[0];
+            g.setEscort(q, { army: a.id }, 'ataque'); g.setEscort(w, { army: a.id }, 'defensa');
+            // Una batería propia junto a la base, una patrulla de drones y una batería francesa conocida junto al blanco.
+            T.battery(g, es, mine);
+            g.swarmsAt(base)[1].patrol = guard;
+            const theirs = hexDisc(target, 2).find(c => isLand(c) && g.owner[c] === fr && CITY_OF[c] < 0 && CELL_TERRAIN[c] !== 'lake');
+            T.battery(g, fr, theirs).known.add(es);
+            T.luck(g, 0.99);
+            g.playerDroneMission([g.swarmsAt(base)[2].id], 'recon', target);
+            g.airVersion++;
+            window.SHOT = { base, target, spot, mine, mid: path[Math.floor(path.length / 2)], army: a.id };
+            const m = ui.view.marks(), kinds = new Set(m.map(x => x.kind));
+            return ['swarm', 'dpatrol', 'battery', 'escort'].filter(k => !kinds.has(k));
+        });
+        if (problems.length) page.errors.push(`faltan marcas: ${problems.join(', ')}`);
+        await page.waitForFunction(() => ui.view.realistic.state === 'ready' || ui.view.realistic.state === 'failed', null, { timeout: 60000 });
+        const shot = async (name, mode, zoom, at = 'mid') => {
+            await page.evaluate(([m, z, c]) => new Promise(r => {
+                ui.setTool('command'); ui.select(-1); ui.view.setMode(m); ui.view.scale = 1; ui.view.centerOn(SHOT[c], z); ui.view.ox += 170;
+                ui.render(); ui.view.draw(); requestAnimationFrame(() => requestAnimationFrame(r));
+            }), [mode, zoom, at]);
+            await page.waitForTimeout(800);
+            // De cerca, solo el recorte alrededor de la base, a doble resolución.
+            const clip = at === 'mid' ? undefined : await page.evaluate(c => {
+                const [x, y] = ui.view.toScreen(G.cx[SHOT[c]], G.cy[SHOT[c]]), r = ui.view.canvas.getBoundingClientRect();
+                return { x: r.left + x - 260, y: r.top + y - 190, width: 520, height: 340 };
+            }, at);
+            await page.screenshot({ path: join(out, `${name}.png`), clip });
+        };
+        await shot('drones-sencilla', 'sencilla', 34);
+        await shot('drones-realista', 'realista', 34);
+        await shot('drones-sencilla-cerca', 'sencilla', 34, 'base');
+        await shot('drones-realista-cerca', 'realista', 34, 'base');
+        await shot('drones-sencilla-bateria', 'sencilla', 60, 'mine');
+        await shot('drones-realista-bateria', 'realista', 60, 'mine');
+        // La herramienta Aviación con los enjambres de la base y un blanco, y la ficha del ejército con su escolta.
+        const cards = async suffix => {
+            await page.evaluate(() => new Promise(r => {
+                ui.view.setMode('sencilla'); ui.setTool('air'); ui.clickCell(SHOT.base); ui.clickCell(SHOT.target);
+                ui.view.centerOn(SHOT.target, 10); ui.render();
+                document.querySelector('#card [data-action="drone-mission"]')?.scrollIntoView({ block: 'center' });
+                requestAnimationFrame(() => requestAnimationFrame(r));
+            }));
+            await page.waitForTimeout(300);
+            await page.screenshot({ path: join(out, `drones-ficha${suffix}.png`) });
+            await page.evaluate(() => new Promise(r => {
+                ui.setTool('command'); ui.select(SHOT.spot); ui.view.centerOn(SHOT.spot, 10); ui.render(); ui.view.draw();
+                document.querySelector('#card .esc-row')?.scrollIntoView({ block: 'center' });
+                requestAnimationFrame(() => requestAnimationFrame(r));
+            }));
+            await page.waitForTimeout(300);
+            await page.screenshot({ path: join(out, `drones-escolta${suffix}.png`) });
+            const over = await page.evaluate(() => { const c = document.querySelector('#card'); return c.scrollWidth - c.clientWidth; });
+            if (over > 2) page.errors.push(`la ficha desborda ${over}px${suffix}`);
+        };
+        await cards('');
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.evaluate(() => { ui.drawerOpen = false; ui.setSheet('media'); ui.render(); });
+        await cards('-movil');
+        const state = await page.evaluate(() => ui.view.realistic.state);
+        if (state !== 'ready' || page.errors.length) { failed++; console.log(`FALLA ${MAP_SHOTS}\n      vista realista: ${state}; ${page.errors.join('; ')}`); }
+        else console.log(`ok    ${MAP_SHOTS} (${join(out, 'drones-sencilla.png')}, drones-realista.png, drones-ficha.png, drones-escolta.png y sus -movil)`);
+        await page.close();
     }
     for (const page of pages.values()) if (page.errors.length) { failed++; console.log(`FALLA errores en la página:\n      ${page.errors.join('\n      ')}`); }
 } finally {

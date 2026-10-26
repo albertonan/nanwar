@@ -901,6 +901,8 @@ class RealisticMap {
     drawAirfield(ctx, o) { this.drawMini(ctx, o, 'field', this.paintAirfield); }
     drawSquadrons(ctx, o) { this.drawMini(ctx, o, 'sq', this.paintSquadrons); }
     drawAASite(ctx, o) { this.drawMini(ctx, o, 'aa', this.paintAASite); }
+    drawBattery(ctx, o) { this.drawMini(ctx, o, 'battery', this.paintBattery); }
+    drawSwarm(ctx, o) { this.drawMini(ctx, o, 'swarm', this.paintSwarm); }
     // Cada miniatura se pinta una vez por aspecto (clase, color, tamaño, nivel, estado y etiqueta) en una imagen aparte y
     // luego solo se copia: a media distancia se ven cientos. El tamaño va en píxeles enteros para que el zoom no las
     // repinte en cada fotograma; se guardan las 300 últimas.
@@ -1024,6 +1026,57 @@ class RealisticMap {
         }
         ctx.restore();
     }
+    // Batería automática: un lanzador de contenedores verticales (seis tubos de pie con su tapa) y un radar de panel en
+    // su mástil, sobre la peana. En obra, solo la plataforma y el andamio, atenuados.
+    paintBattery(ctx, o) {
+        const { x, y, hexPx, color, U } = o, k = U / 16;
+        ctx.save();
+        ctx.globalAlpha = o.left > 0 ? 0.6 : 1;
+        if (hexPx < 6) { ctx.fillStyle = color; ctx.fillRect(x - 2.5, y - 4, 5, 5); ctx.strokeStyle = INK; ctx.lineWidth = 1; ctx.strokeRect(x - 2.5, y - 4, 5, 5); ctx.restore(); return; }
+        this.drawPlinth(ctx, x, y, U * 0.85, color, o.level);
+        ctx.translate(x, y + U * 0.2); ctx.scale(k, k);
+        ctx.fillStyle = '#3e4428'; miniRect(ctx, -10, -3.5, 20, 4, 1.2); ctx.fill();   // la plataforma
+        if (o.left > 0) {   // el andamio de la obra
+            ctx.strokeStyle = '#3a3222'; ctx.lineWidth = 0.9;
+            ctx.beginPath(); ctx.moveTo(-7, -3.5); ctx.lineTo(-7, -15); ctx.moveTo(5, -3.5); ctx.lineTo(5, -15); ctx.moveTo(-7, -15); ctx.lineTo(5, -15);
+            ctx.moveTo(-7, -9); ctx.lineTo(5, -9); ctx.moveTo(-7, -3.5); ctx.lineTo(5, -15); ctx.stroke();
+            ctx.restore();
+            return;
+        }
+        // el radar: un mástil con su panel, detrás a la derecha
+        ctx.fillStyle = '#3e4428'; ctx.fillRect(6.6, -15, 1.4, 12);
+        ctx.fillStyle = '#5f6b3c'; miniPoly(ctx, [[4.6, -21], [10.4, -19.6], [10.4, -14.4], [4.6, -15.8]]); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,230,0.35)'; ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(5.6, -19.6); ctx.lineTo(9.4, -18.6); ctx.moveTo(5.6, -17.6); ctx.lineTo(9.4, -16.6); ctx.stroke();
+        // el lanzador: dos filas de tres contenedores de pie; los de atrás, más altos y más oscuros
+        for (const [row, dy, shade] of [[0, -2.4, '#4b5530'], [1, 0, '#5f6b3c']]) {
+            for (let i = 0; i < 3; i++) {
+                const cx = -8.6 + i * 4.3 + row * 1.2, top = -16 + dy + row * 1.4;
+                ctx.fillStyle = shade; miniRect(ctx, cx, top, 3.6, -3.5 - top, 0.8); ctx.fill();
+                ctx.fillStyle = '#d9d6c8'; ctx.beginPath(); ctx.ellipse(cx + 1.8, top + 0.4, 1.8, 0.7, 0, 0, TAU); ctx.fill();   // la tapa
+            }
+        }
+        ctx.fillStyle = color; ctx.fillRect(-8.6, -6.4, 14.2, 1.3);   // la franja del país
+        ctx.restore();
+    }
+    // Enjambre de drones: un dron de ala fija sobre el soporte de una peana pequeña (más alto si está en el aire,
+    // o.flying), con una etiqueta con cuántos son; atenuado si ninguno puede volar.
+    paintSwarm(ctx, o) {
+        const { x, y, hexPx, color, U } = o, k = U / 16;
+        if (hexPx < 6) return;
+        ctx.save();
+        ctx.globalAlpha = o.down ? 0.6 : 1;
+        this.drawPlinth(ctx, x, y, U * 0.6, color, o.level);
+        const py = y - U * (o.flying ? 1.05 : 0.4);
+        ctx.strokeStyle = 'rgba(225,235,240,0.8)'; ctx.lineWidth = Math.max(1, U * 0.08);
+        ctx.beginPath(); ctx.moveTo(x, y + U * 0.15); ctx.lineTo(x, py + U * 0.15); ctx.stroke();
+        ctx.translate(x, py); ctx.scale(k * 0.95, k * 0.95); ctx.rotate(-0.2);
+        miniDrone(ctx, color);
+        ctx.restore();
+        ctx.save();
+        this.miniLabel(ctx, x, y + U * 0.75, String(o.n), o.mine, U);
+        ctx.restore();
+    }
 }
 
 const BASE_RIM = [null, '#b87333', '#c9ced6', '#e8b931'];
@@ -1074,6 +1127,20 @@ function miniJet(ctx, color) {
     ctx.fillStyle = '#b2b8bc'; ctx.beginPath(); ctx.moveTo(13, 0); ctx.quadraticCurveTo(8, -1.7, 0, -1.6); ctx.lineTo(-14, -1); ctx.lineTo(-14, 1); ctx.lineTo(0, 1.6); ctx.quadraticCurveTo(8, 1.7, 13, 0); ctx.fill(); ctx.stroke();   // fuselaje
     ctx.fillStyle = 'rgba(40,60,80,0.8)'; ctx.beginPath(); ctx.ellipse(7, 0, 2.4, 0.8, 0, 0, TAU); ctx.fill();   // cabina
     ctx.fillStyle = color; miniPoly(ctx, [[-3.6, -5], [-5.4, -5], [-6.3, -6.8], [-4.4, -6.8]]); ctx.fill(); miniPoly(ctx, [[-3.6, 5], [-5.4, 5], [-6.3, 6.8], [-4.4, 6.8]]); ctx.fill();
+}
+// Dron de ala fija visto desde arriba, con el morro a la derecha: alas rectas y largas, cola en V, el morro abultado del
+// sensor y la hélice propulsora detrás; una franja del color del país en las alas.
+function miniDrone(ctx, color) {
+    ctx.fillStyle = 'rgba(20,16,8,0.22)'; miniPoly(ctx, [[2.6, 3], [1.6, 17.5], [-0.2, 17.5], [-0.4, 3]]); ctx.fill();   // la sombra de un ala
+    ctx.fillStyle = '#7d847c'; ctx.strokeStyle = '#363a35'; ctx.lineWidth = 0.6;
+    miniPoly(ctx, [[2, -0.6], [1.3, -16.5], [-0.5, -16.5], [-1, -0.6], [-1, 0.6], [-0.5, 16.5], [1.3, 16.5], [2, 0.6]]); ctx.fill(); ctx.stroke();   // alas largas y estrechas
+    miniPoly(ctx, [[-7.6, -0.4], [-10.2, -4.6], [-11.4, -4.6], [-10, -0.4], [-10, 0.4], [-11.4, 4.6], [-10.2, 4.6], [-7.6, 0.4]]); ctx.fill(); ctx.stroke();   // cola en V
+    ctx.fillStyle = '#959c93'; ctx.beginPath();
+    ctx.moveTo(8.6, 0); ctx.quadraticCurveTo(8.2, -2.1, 5, -1.7); ctx.lineTo(-10.4, -0.6); ctx.lineTo(-10.4, 0.6); ctx.lineTo(5, 1.7); ctx.quadraticCurveTo(8.2, 2.1, 8.6, 0);
+    ctx.fill(); ctx.stroke();   // fuselaje, con el morro abultado
+    ctx.fillStyle = '#20262c'; ctx.beginPath(); ctx.arc(6.6, 0, 1.15, 0, TAU); ctx.fill();   // la torreta del sensor
+    ctx.strokeStyle = '#1f201c'; ctx.lineWidth = 1.1; ctx.beginPath(); ctx.moveTo(-11, -3.2); ctx.lineTo(-11, 3.2); ctx.stroke();   // la hélice propulsora
+    ctx.fillStyle = color; miniPoly(ctx, [[1.6, -11], [-0.7, -11], [-0.6, -14], [1.4, -14]]); ctx.fill(); miniPoly(ctx, [[1.6, 11], [-0.7, 11], [-0.6, 14], [1.4, 14]]); ctx.fill();
 }
 // Antiaéreo autopropulsado: un camión con la rampa alzada hacia delante y dos misiles en ella.
 function miniAA(ctx, now, moving) {

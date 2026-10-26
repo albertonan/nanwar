@@ -185,6 +185,14 @@
         .air-task select { min-width: 0; }
         .air-sat { display: flex; gap: 7px; align-items: center; margin-top: 5px; }
         .air-sat svg { width: 20px; height: 20px; flex: none; color: var(--signal); }
+        /* Escolta de un ejército o una agrupación: cada pieza con su estado y «Quitar», y encargar otra */
+        .esc-row { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: 7px; align-items: center; margin-top: 6px; font: 600 13px var(--font); }
+        .esc-row svg { width: 24px; height: 24px; display: block; }
+        .esc-row small { display: block; font-weight: 400; font-size: 12px; color: var(--muted); }
+        .esc-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; margin-top: 6px; }
+        .esc-add select { min-width: 0; }
+        .ob-escort { margin: 6px 8px 2px; }
+        .ob-escort .group-title { margin: 4px 0 0; }
 
         /* Avisos */
         #toasts { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); display: grid; gap: 8px; width: min(460px, calc(100% - 24px)); z-index: 3; }
@@ -715,6 +723,8 @@ const CONFIG = {
 const AIR_KINDS = { army: 'Atacar ejército', roads: 'Cortar carreteras', fort: 'Bajar fortificación', aa: 'Destruir antiaéreo', airfield: 'Atacar aeródromo', patrol: 'Proteger casilla' };
 const AIR_KIND_INDEX = Object.fromEntries(Object.keys(AIR_KINDS).map((k, i) => [k, i]));
 const AIR_BLOCKED = 'Ese blanco ya ha recibido un acierto este turno.';
+// Las misiones de un enjambre que se mandan a mano (la escolta se encarga desde la ficha del ejército).
+const DRONE_KINDS = { recon: 'Reconocer', army: 'Atacar ejército', patrol: 'Patrullar' };
 // Aviación en el mando: blancos por operación y turno, casillas que protege como mucho, previsión mínima para
 // arriesgarse (acierto y derribo de cada escuadrón) y radio de una orden de zona.
 const AIR_TARGETS = 8, AIR_PATROLS = 2, AIR_MIN_HIT = 0.5, AIR_MAX_DOWN = 0.2, AIR_ZONE_KM = 170;
@@ -3178,6 +3188,11 @@ class GameEngine {
         return { why, hit: (1 - o.fail) * (known ? 1 : this.rules(owner).blindHit) * def.through / fly.length, down: o.down, damaged: o.damaged, known,
             get unknown() { return def.unknown || c.unknown; }, fire: c.seen.fire * k, loss: c.seen.loss * k, power, patrol, through: def.through };
     }
+    // Unidades que quita al ejército `a` un acierto de drones de `owner` con el azar `rand` (0..1): droneHit, al menos una.
+    droneLoss(owner, a, rand) {
+        const n = countUnits(a.units), [base, more] = this.rules(owner).droneHit;
+        return Math.min(n, Math.max(1, Math.round(n * (base + more * rand))));
+    }
     // Lo que hace un acierto de drones de `owner` en `cell`; devuelve cómo lo cuenta el parte a quien lo manda.
     // - recon: desvela a `owner` las casillas a RECON_KM (tipo y número; con Drones 3, también niveles) este turno y el
     //   siguiente, y le deja conocidos los antiaéreos fijos y las baterías de la zona.
@@ -3193,8 +3208,7 @@ class GameEngine {
             this.airVersion++;
             return `ves lo que hay a ${plural(R, 'casilla', 'casillas')} a la redonda hasta el final de tu próximo turno`;
         }
-        const a = this.armyOn(cell), n = countUnits(a.units), [base, rand] = r.droneHit;
-        const lost = Math.min(n, Math.max(1, Math.round(n * (base + rand * this.rng()))));
+        const a = this.armyOn(cell), lost = this.droneLoss(owner, a, this.rng());
         this.takeUnits(a, lost);
         if (r.droneSwarm) a.disorgUntil = Math.max(a.disorgUntil || 0, this.nextOwnTurn(a.owner));
         this.droneHits.set(this.hitKey('army', cell), this.turn);
@@ -8062,6 +8076,7 @@ class GameEngine {
 const $ = sel => document.querySelector(sel);
 const INK = '#151a12';
 const SIGNAL = '#f0c419';
+const RECON = '#9fd8e8';   // zona que ven tus drones: celeste, distinta del amarillo del satélite
 const HUNGER = '#b98cf0';   // borde de la ficha sin víveres: violeta, distinto del rojo de rodeado y del naranja de sin suministro
 
 // Partidas guardadas (localStorage del navegador; también exportables a archivo). Cada mapa tiene sus ranuras.
@@ -8100,6 +8115,14 @@ function propellerPath(x, y, half) {
         + `C${n(x + a)} ${n(y - h)} ${n(x + b)} ${n(y - h)} ${n(x + half)} ${y}C${n(x + b)} ${n(y + h)} ${n(x + a)} ${n(y + h)} ${x} ${y}z`;
 }
 
+// Símbolo APP-6 del vehículo aéreo no tripulado: las alas en gaviota y el fuselaje hacia abajo, con el vértice en
+// (x, y) y `half` de media envergadura. La misma forma para todos los drones: el SVG (uavPath) y el lienzo (strokeUAV).
+const UAV_SHAPE = { end: 0.35, ctl: 0.5, up: 0.48, tail: 0.5 };
+function uavPath(x, y, half) {
+    const n = v => +v.toFixed(2), U = UAV_SHAPE;
+    return `M${n(x - half)} ${n(y + half * U.end)}Q${n(x - half * U.ctl)} ${n(y - half * U.up)} ${x} ${y}Q${n(x + half * U.ctl)} ${n(y - half * U.up)} ${n(x + half)} ${n(y + half * U.end)}M${x} ${y}V${n(y + half * U.tail)}`;
+}
+
 const ICONS = {
     command: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M5 21V3.5M5 4h12l-2.5 4L17 12H5"/></svg>',
     road: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 3 5 21M16 3l3 18M12 4v3M12 10.5v3M12 17v3"/></svg>',
@@ -8114,7 +8137,9 @@ const ICONS = {
     line: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M2 16h3v-5h4v5h4v-5h4v5h5"/></svg>',
     zone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="3.2 2.4"><ellipse cx="12" cy="12" rx="9.5" ry="7"/></svg>',
     // Marco de unidad con el icono APP-6 de aviación de ala fija: la hélice de dos palas en horizontal.
-    plane: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="1"/><path stroke-width="1.6" d="${propellerPath(12, 12, 7.2)}"/></svg>`
+    plane: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="1"/><path stroke-width="1.6" d="${propellerPath(12, 12, 7.2)}"/></svg>`,
+    // El mismo marco con el símbolo de UAV: un enjambre de drones.
+    uav: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"><rect x="2" y="5" width="20" height="14" rx="1"/><path stroke-width="1.7" d="${uavPath(12, 11.4, 7.4)}"/></svg>`
 };
 // Selector de mapa: un mapa plegado para Europa y el globo para el mundo.
 const MAP_ICON = {
@@ -8257,13 +8282,26 @@ function strokePropeller(ctx, x, y, half) {
     }
     ctx.stroke();
 }
+function strokeUAV(ctx, x, y, half) {
+    const U = UAV_SHAPE;
+    ctx.beginPath();
+    ctx.moveTo(x - half, y + half * U.end);
+    ctx.quadraticCurveTo(x - half * U.ctl, y - half * U.up, x, y);
+    ctx.quadraticCurveTo(x + half * U.ctl, y - half * U.up, x + half, y + half * U.end);
+    ctx.moveTo(x, y); ctx.lineTo(x, y + half * U.tail);
+    ctx.stroke();
+}
 // Símbolos de la aviación para el panel (el mapa los dibuja en canvas): escuadrón, marco de unidad con la hélice de ala
 // fija; aeródromo, marco de instalación (el rectángulo negro de arriba) con la hélice; antiaéreo fijo, instalación con la
-// cúpula de defensa aérea.
+// cúpula de defensa aérea; enjambre, marco de unidad con el símbolo de UAV; batería automática, instalación con la cúpula
+// y el modificador de misil (la flecha hacia arriba).
 const AIR_PROP = `<path d="${propellerPath(13, 10, 7.4)}" fill="none" stroke="#151a12" stroke-width="1.3"/>`;
+const AIR_DOME = '<path d="M5.5 17A7.5 8 0 0 1 20.5 17" fill="none" stroke="#151a12" stroke-width="1.4"/>';
 const airIcon = (kind, color) => `<svg class="nato" viewBox="0 0 26 18" aria-hidden="true"><rect x="1" y="3" width="24" height="14" fill="${color}" stroke="#151a12" stroke-width="1.5"/>`
-    + (kind === 'sq' ? '' : '<rect x="8.5" y="0" width="9" height="3" fill="#151a12"/>')
-    + (kind === 'aa' ? '<path d="M5.5 17A7.5 8 0 0 1 20.5 17" fill="none" stroke="#151a12" stroke-width="1.4"/>' : AIR_PROP) + '</svg>';
+    + (kind === 'sq' || kind === 'uav' ? '' : '<rect x="8.5" y="0" width="9" height="3" fill="#151a12"/>')
+    + (kind === 'aa' ? AIR_DOME
+        : kind === 'battery' ? `${AIR_DOME}<path d="M13 15.5V6M10.8 8.6L13 5.8l2.2 2.8" fill="none" stroke="#151a12" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>`
+        : kind === 'uav' ? `<path d="${uavPath(13, 9.6, 8)}" fill="none" stroke="#151a12" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>` : AIR_PROP) + '</svg>';
 const unitIcon = (type, color) =>
     `<svg class="nato" viewBox="0 0 26 16" aria-hidden="true"><rect x="1" y="1" width="24" height="14" fill="${color}" stroke="#151a12" stroke-width="1.5"/>${NATO_MARK[type]}</svg>`;
 // Tipo que más pesa en un ejército: decide el símbolo de su ficha en el mapa. Las antiaéreas, solo si son la mayoría
@@ -8681,6 +8719,7 @@ class MapView {
 
         if (this.airPick) this.drawAirPick(ctx, s);
         this.drawSatAreas(ctx, s);
+        this.drawReconAreas(ctx, s);
 
         if (!real) {
         // Carreteras
@@ -8921,6 +8960,7 @@ class MapView {
             }
         }
         if (!far) this.drawAir(air, hexPx, font, real, visible, true);   // las patrullas vuelan por encima
+        if (!far && g.player !== null) this.drawEscorts(air, tokens, hexPx, font, real);
         this.drawSats(hexPx, font, visible);   // encima de todo y también de lejos: el círculo que vigila es grande
         drawAirTrails(ctx, this, now);
         this.motion.effects(now);
@@ -9224,11 +9264,12 @@ class MapView {
     }
 
     // --- Aviación en el mapa ---
-    // Lo que cambia las marcas de la aviación: escuadrones, aeródromos y antiaéreos, el turno, el país del jugador, los
-    // espías, la investigación, los dueños, los ejércitos (lo que se ve) y las fortificaciones.
+    // Lo que cambia las marcas de la aviación: escuadrones, enjambres, aeródromos, antiaéreos y baterías, el turno, el país
+    // del jugador, los espías, la investigación, los dueños, los ejércitos (lo que se ve), las fortificaciones y los
+    // encargos (la escolta).
     airKey() {
         const g = this.game;
-        return `${g.airVersion}:${g.turn}:${g.player}:${g.spyVersion}:${g.techVersion}:${g.version}:${g.armyVersion}:${g.fortVersion}`;
+        return `${g.airVersion}:${g.turn}:${g.player}:${g.spyVersion}:${g.techVersion}:${g.version}:${g.armyVersion}:${g.fortVersion}:${g.orderVersion}`;
     }
     marks() {
         if (this.airFor !== this.game || this.airBuilt !== this.airKey()) this.buildAir();
@@ -9239,9 +9280,15 @@ class MapView {
     //   es tuyo o de un aliado o si la información de la casilla es exacta; si no, null;
     // - escuadrones en tierra (`sq`): los de un aeródromo del que sabes cuántos tiene, sin los que patrullan;
     // - antiaéreo fijo (`aa`): el tuyo y el de tus aliados, y el ajeno solo si lo conoces (aaKnown);
-    // - patrullas (`patrol`): las tuyas, y las ajenas solo con la casilla a la vista e información exacta.
-    // `level`: los galones (Aviación; Defensa aérea en el antiaéreo), si conoces sus niveles. `down`: aeródromo
-    // inservible, antiaéreo dañado o, en `sq`, ninguno puede volar. `left`: turnos de obra que le quedan.
+    // - patrullas (`patrol`): las tuyas, y las ajenas solo con la casilla a la vista e información exacta;
+    // - enjambres en su ciudad (`swarm`) y patrullando (`dpatrol`): los tuyos y los de tus aliados, y los ajenos solo con
+    //   la casilla a la vista e información exacta;
+    // - baterías automáticas (`battery`): como el antiaéreo fijo, la ajena solo si la conoces (batteryKnown);
+    // - escolta (`escort`): en la casilla del ejército escoltado, cuántos escuadrones (`sq`) y enjambres (`sw`) lo
+    //   acompañan ahora (sin las suspendidas) y en qué modo (`mode`: 'defensa', 'ataque' o 'mixta'); la ajena, con
+    //   información exacta de su casilla.
+    // `level`: los galones (Aviación; Defensa aérea en el antiaéreo; Drones; Defensa automática), si conoces sus niveles.
+    // `down`: aeródromo inservible, antiaéreo dañado o, en `sq` y `swarm`, ninguno puede volar. `left`: turnos de obra.
     // Antes de elegir país solo se ven los aeródromos.
     buildAir() {
         const g = this.game, p0 = g.player, out = [];
@@ -9273,6 +9320,59 @@ class MapView {
             if (owner !== p0 && !exact(owner, cell)) continue;
             out.push({ kind: 'patrol', cell, owner, n, level: level(owner, cell, 'aviacion'), down: false, left: 0 });
         }
+        for (const [cell, b] of g.batteries) {
+            if (!friend(b.owner) && (b.left > 0 || g.owner[cell] !== b.owner || !g.batteryKnown(p0, cell))) continue;
+            out.push({ kind: 'battery', cell, owner: b.owner, n: null, level: level(b.owner, cell, 'defensa'), down: false, left: b.left });
+        }
+        const nests = new Map(), flights = new Map();   // ciudad → { owner, n, ready }; dueño × casilla → enjambres
+        for (const q of g.swarms.values()) {
+            if (q.patrol >= 0) { const k = q.owner * G.N + q.patrol; flights.set(k, (flights.get(k) ?? 0) + 1); continue; }
+            const b = nests.get(q.base) ?? { owner: q.owner, n: 0, ready: 0 };
+            nests.set(q.base, b);
+            b.n++;
+            if (g.canFlySwarm(q)) b.ready++;
+        }
+        for (const [cell, b] of nests) {
+            if (!friend(b.owner) && !exact(b.owner, cell)) continue;
+            out.push({ kind: 'swarm', cell, owner: b.owner, n: b.n, level: level(b.owner, cell, 'drones'), down: !b.ready, left: 0 });
+        }
+        for (const [k, n] of flights) {
+            const owner = Math.floor(k / G.N), cell = k % G.N;
+            if (!friend(owner) && !exact(owner, cell)) continue;
+            out.push({ kind: 'dpatrol', cell, owner, n, level: level(owner, cell, 'drones'), down: false, left: 0 });
+        }
+        const escorted = new Map();   // ejército → la marca de su escolta
+        for (const q of g.escortPieces()) {
+            const t = q.task, list = t.group ? g.groupMembers(q.owner, t.group) : [g.armies.get(t.army)];
+            for (const a of list) {
+                if (!a || g.armyOn(a.cell) !== a || !g.escorts(q, a) || !g.escortReach(q, a)) continue;
+                if (!friend(a.owner) && !exact(a.owner, a.cell)) continue;
+                let m = escorted.get(a.id);
+                if (!m) escorted.set(a.id, m = { kind: 'escort', cell: a.cell, owner: a.owner, army: a.id, sq: 0, sw: 0, mode: t.mode, n: 0, level: null, down: false, left: 0 });
+                if (g.isSwarm(q)) m.sw++; else m.sq++;
+                m.n++;
+                if (m.mode !== t.mode) m.mode = 'mixta';
+            }
+        }
+        out.push(...escorted.values());
+    }
+    // Casillas que el reconocimiento de tus drones deja a la vista ahora (droneRevealed), por si hay que dibujarlas.
+    reconAreas() {
+        const g = this.game, p0 = g.player, key = `${g.airVersion}:${g.turn}:${p0}`;
+        if (this.reconCache?.key === key) return this.reconCache.cells;
+        const cells = new Set();
+        if (p0 !== null) for (const [k, until] of g.droneSeen) if (until >= g.turn && Math.floor(k / G.N) === p0) cells.add(k % G.N);
+        this.reconCache = { key, cells, edge: cells.size ? this.outline(cells) : null };
+        return cells;
+    }
+    // La zona que ven tus drones (en coordenadas del mapa), a trazos cortos, mientras dura.
+    drawReconAreas(ctx, s) {
+        if (!this.reconAreas().size) return;
+        const edge = this.reconCache.edge;
+        ctx.setLineDash([3.5 / s, 3 / s]);
+        ctx.strokeStyle = INK; ctx.lineWidth = 3.2 / s; ctx.stroke(edge);
+        ctx.strokeStyle = RECON; ctx.lineWidth = 1.6 / s; ctx.stroke(edge);
+        ctx.setLineDash([]);
     }
     // Casillas a `r` o menos de `c` (hexDist), por vecinas: el conjunto es convexo.
     cellsWithin(c, r) {
@@ -9371,36 +9471,89 @@ class MapView {
     }
     // La aviación en píxeles de pantalla. Vista sencilla, con los símbolos de la OTAN (APP-6): el aeródromo es un marco
     // de instalación con la hélice de ala fija, arriba a la izquierda de su ciudad para no tapar la ficha del ejército;
-    // el antiaéreo fijo, una instalación con la cúpula de defensa aérea (a su izquierda si comparten casilla); la
-    // patrulla, una ficha de escuadrón a la derecha de la casilla que protege. Vista realista: miniaturas sobre peana.
-    // Con `flying`, solo las patrullas, que se dibujan encima de los ejércitos; sin él, todo lo demás, debajo.
+    // el antiaéreo fijo, una instalación con la cúpula de defensa aérea, y la batería automática, la cúpula con el
+    // modificador de misil (en fila hacia la izquierda si comparten casilla); los enjambres de una ciudad, una ficha
+    // pequeña con el símbolo de UAV abajo a su izquierda; la patrulla, una ficha de escuadrón a la derecha de la casilla
+    // que protege, y la de drones, debajo de ella. Vista realista: miniaturas sobre peana (los enjambres de una ciudad, en
+    // la fila de las instalaciones).
+    // Con `flying`, solo las patrullas, que se dibujan encima de los ejércitos; sin él, todo lo demás, debajo. La escolta
+    // va aparte (drawEscorts), junto a la ficha del ejército.
     drawAir(marks, hexPx, font, real, visible, flying) {
         const g = this.game, ctx = this.ctx;
         const cw = Math.max(22, Math.min(40, hexPx * 2.2)), ch = cw * 0.62;   // la ficha de un ejército, para esquivarla
         const iw = Math.max(15, Math.min(26, hexPx * 1.4)), ih = iw * 0.66;   // el marco de instalación
         const U = Math.max(8, Math.min(24, hexPx * 0.82));                     // la miniatura de un ejército
-        const fields = new Set();
-        for (const m of marks) if (m.kind === 'field') fields.add(m.cell);
+        const pw = Math.max(22, Math.min(40, hexPx * 0.72 * 2.2));             // el ancho de una ficha pequeña, como en drawCounter
+        // Puesto de cada instalación en la fila de su casilla (aeródromo, antiaéreo, batería y, en la realista, los enjambres).
+        const slot = new Map(), used = new Map();
+        for (const m of marks) if (m.kind === 'field' || m.kind === 'aa' || m.kind === 'battery' || (real && m.kind === 'swarm')) { const k = used.get(m.cell) ?? 0; slot.set(m, k); used.set(m.cell, k + 1); }
         for (const m of marks) {
-            if ((m.kind === 'patrol') !== flying || (m.kind === 'sq' && !real)) continue;   // en la sencilla, cuántos van en la esquina del aeródromo
+            const air = m.kind === 'patrol' || m.kind === 'dpatrol';
+            if (air !== flying || m.kind === 'escort' || (m.kind === 'sq' && !real)) continue;   // en la sencilla, cuántos van en la esquina del aeródromo
             const [x, y] = this.toScreen(G.cx[m.cell], G.cy[m.cell]);
             if (!visible(x, y)) continue;
-            const color = g.nations[m.owner].color, mine = m.owner === g.player, shared = m.kind === 'aa' && fields.has(m.cell);
+            const color = g.nations[m.owner].color, mine = m.owner === g.player, k = slot.get(m) ?? 0;
             if (real) {
-                const o = { x: x - U * (shared ? 3.6 : 1.8), y: y - U * 0.55, hexPx, color, n: m.n, level: m.level, down: m.down, left: m.left, mine };
+                const o = { x: x - U * 1.8 * (k + 1), y: y - U * 0.55, hexPx, color, n: m.n, level: m.level, down: m.down, left: m.left, mine };
                 if (m.kind === 'patrol') Object.assign(o, { x: x + U * 1.7, y: y - U * 0.2, flying: true });
+                else if (m.kind === 'dpatrol') Object.assign(o, { x: x + U * 1.7, y: y + U * 1.05, flying: true });
                 if (m.kind === 'field') this.realistic.drawAirfield(ctx, o);
                 else if (m.kind === 'aa') this.realistic.drawAASite(ctx, o);
+                else if (m.kind === 'battery') this.realistic.drawBattery(ctx, o);
+                else if (m.kind === 'swarm' || m.kind === 'dpatrol') this.realistic.drawSwarm(ctx, o);
                 else this.realistic.drawSquadrons(ctx, o);
-            } else if (m.kind === 'patrol') {
-                const pw = Math.max(22, Math.min(40, hexPx * 0.72 * 2.2));   // el ancho de su ficha, como en drawCounter
-                this.drawCounter({ type: 'air', owner: m.owner, n: m.n, level: m.level, mine, alpha: 1 }, x + cw / 2 + Math.max(7, ch * 0.42) + pw / 2 + 2, y - ch * 0.15, hexPx * 0.72, font);   // pasada la cifra de la ficha
-            } else this.drawInstallation(m, x - cw / 2 - iw * (shared ? 1.45 : 0.3), y - ch / 2 - ih * 0.5, iw, ih, color, mine, font);
+            } else if (m.kind === 'patrol') {   // pasada la cifra de la ficha
+                this.drawCounter({ type: 'air', owner: m.owner, n: m.n, level: m.level, mine, alpha: 1 }, x + cw / 2 + Math.max(7, ch * 0.42) + pw / 2 + 2, y - ch * 0.15, hexPx * 0.72, font);
+            } else if (air) {   // la de drones, más pequeña y debajo de la de escuadrones
+                const sw = Math.max(22, cw * 0.62);
+                this.drawCounter({ type: 'uav', owner: m.owner, n: m.n, level: m.level, mine, alpha: 1 }, x + cw / 2 + Math.max(7, ch * 0.42) + sw / 2 + 2, y + ch * 0.75, sw / 2.2, font);
+            } else if (m.kind === 'swarm') {   // pequeña, a la izquierda de la ficha del ejército, con su cifra fuera de ella
+                const sw = Math.max(22, cw * 0.62);
+                this.drawCounter({ type: 'uav', owner: m.owner, n: m.n, level: 0, mine, alpha: m.down ? 0.7 : 1 }, x - cw / 2 - sw / 2 - 9, y + ch * 0.42, sw / 2.2, font);
+            } else this.drawInstallation(m, x - cw / 2 - iw * (0.3 + 1.15 * k), y - ch / 2 - ih * 0.5, iw, ih, color, mine, font);
+        }
+    }
+    // La escolta de cada ejército que se ve (tokens: las fichas ya dibujadas, con su posición), en píxeles de pantalla:
+    // una ficha pequeña de escuadrón y otra de dron arriba a la izquierda de la suya, con cuántos van, y una línea fina
+    // hasta ella, continua en ataque y a trazos en defensa (en la realista, sus miniaturas en vuelo).
+    drawEscorts(marks, tokens, hexPx, font, real) {
+        const g = this.game, ctx = this.ctx, at = new Map();
+        for (const m of marks) if (m.kind === 'escort') at.set(m.army, m);
+        if (!at.size) return;
+        const cw = Math.max(22, Math.min(40, hexPx * 2.2)), ch = cw * 0.62, U = Math.max(8, Math.min(24, hexPx * 0.82));
+        const pw = Math.max(22, cw * 0.62), sh = pw / 2.2, ph = pw * 0.62;   // la ficha pequeña (drawCounter con `sh`)
+        for (const t of tokens) {
+            const m = at.get(t.id);
+            if (!m || t.moving || t.alpha < 1) continue;
+            const [x, y] = this.toScreen(t.wx, t.wy), mine = m.owner === g.player, color = g.nations[m.owner].color;
+            const pieces = [['air', m.sq], ['uav', m.sw]].filter(([, n]) => n > 0);
+            const line = (x1, y1, x2, y2) => {
+                ctx.save();
+                if (m.mode === 'defensa') ctx.setLineDash([3, 2.5]);
+                ctx.lineCap = 'round';
+                ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+                ctx.strokeStyle = INK; ctx.lineWidth = 2.8; ctx.stroke();
+                ctx.strokeStyle = real ? 'rgba(255,255,255,0.9)' : '#ebe7d8'; ctx.lineWidth = 1.2; ctx.stroke();
+                ctx.restore();
+            };
+            // Una sola línea, de la ficha más cercana al ejército; la otra va a su lado.
+            if (real) line(x - U * 1.75, y - U * 0.75, x - U * 0.55, y - U * 0.15);
+            else line(x - cw / 2 - 10, y - ch / 2 - ph * 0.45, x - cw / 2, y - ch / 2 - hexPx * 0.12 + 2);
+            pieces.forEach(([type, n], i) => {
+                if (real) {
+                    const o = { x: x - U * (2.1 + 1.6 * i), y: y - U * 0.75, hexPx: hexPx * 0.7, color, n, level: null, down: false, left: 0, mine, flying: true };
+                    if (type === 'air') this.realistic.drawSquadrons(ctx, o); else this.realistic.drawSwarm(ctx, o);
+                } else {
+                    const px = x - cw / 2 - pw / 2 - 10 - i * (pw + 10), py = y - ch / 2 - ph * 0.55;   // sin pisar las cifras
+                    this.drawCounter({ type, owner: m.owner, n, level: 0, mine, alpha: 1 }, px, py, sh, font);
+                }
+            });
         }
     }
     // Marco de instalación de la OTAN: el rectángulo negro sobre el borde de arriba, y dentro la hélice de ala fija
-    // (aeródromo) o la cúpula de defensa aérea (antiaéreo; a trazos si está dañado). En obra, el marco a trazos; un
-    // aeródromo inservible, atenuado y con un aspa, y en su esquina cuántos escuadrones tiene («?» si no lo sabes).
+    // (aeródromo) o la cúpula de defensa aérea (antiaéreo; a trazos si está dañado; la batería automática, con el
+    // modificador de misil: una flecha hacia arriba). En obra, el marco a trazos; un aeródromo inservible, atenuado y con
+    // un aspa, y en su esquina cuántos escuadrones tiene («?» si no lo sabes).
     drawInstallation(m, x, y, w, h, color, mine, font) {
         const ctx = this.ctx, x0 = x - w / 2, y0 = y - h / 2;
         ctx.save();
@@ -9417,6 +9570,13 @@ class MapView {
             if (m.down) ctx.setLineDash([2.5, 2]);
             ctx.beginPath(); ctx.ellipse(x, y0 + h, w * 0.3, h * 0.62, 0, Math.PI, 0); ctx.stroke();
             ctx.setLineDash([]);
+            if (m.kind === 'battery') {
+                const top = y0 + h * 0.12, aw = w * 0.1;
+                ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+                ctx.beginPath(); ctx.moveTo(x, y0 + h * 0.92); ctx.lineTo(x, top);
+                ctx.moveTo(x - aw, top + h * 0.22); ctx.lineTo(x, top); ctx.lineTo(x + aw, top + h * 0.22); ctx.stroke();
+                ctx.lineCap = 'butt'; ctx.lineJoin = 'miter';
+            }
         }
         if (m.kind === 'field' && m.down && !m.left) {
             ctx.strokeStyle = '#e05a47'; ctx.lineWidth = 2;
@@ -9436,7 +9596,7 @@ class MapView {
 
     // Ficha OTAN de la vista sencilla: color del país, símbolo del tipo dominante y número de unidades. Embarcado
     // (t.afloat), el marco es el círculo de superficie marítima de APP-6, tan alto como la ficha, con el mismo símbolo. Un
-    // escuadrón (t.type 'air') lleva la hélice de ala fija. De una agrupación propia (t.group: { num, color }), una franja
+    // escuadrón (t.type 'air') lleva la hélice de ala fija, y un enjambre (t.type 'uav'), el símbolo de UAV. De una agrupación propia (t.group: { num, color }), una franja
     // de su color bajo la ficha y su número en la casilla de designación de APP-6, abajo a la izquierda del marco; con la
     // capa Agrupaciones, t.tint rellena la ficha con ese color en vez del del país.
     drawCounter(t, x, y, hexPx, font) {
@@ -9468,6 +9628,7 @@ class MapView {
             ctx.stroke();
         }
         else if (t.type === 'air') strokePropeller(ctx, x, cy, w * 0.36);   // escuadrón: aviación de ala fija
+        else if (t.type === 'uav') { ctx.lineCap = 'round'; strokeUAV(ctx, x, cy - hh * 0.08, w * 0.32); ctx.lineCap = 'butt'; }   // enjambre de drones
         // sin tipo conocido: el marco queda vacío, como en un mapa militar
         ctx.lineWidth = t.selected ? 3 : t.starving || t.flanked || t.noSupply ? 2.6 : 1.6;
         ctx.strokeStyle = t.selected ? '#fff' : t.starving ? HUNGER : t.flanked ? '#e05a47' : t.noSupply ? '#ff9f1c' : INK;
@@ -9567,6 +9728,7 @@ class GameUI {
         this.obFilter = 'todas';     // pestaña Orden de batalla: 'todas', 'pantalla' u 'op:<id>'
         this.obBy = 'provincia';     // cómo se agrupan los sueltos: 'provincia' u 'operacion'
         this.obOpen = new Set();     // agrupaciones desplegadas
+        this.escortMode = 'defensa';  // modo con el que se encarga la siguiente escolta
         this.obSel = new Set();      // ejércitos marcados con la casilla
         this.proposal = null;        // { ids, ghost, skip }: lo que proponen las operaciones asistidas al terminar el turno
         this.orderRatio = 1.3;       // ventaja mínima para atacar de las órdenes nuevas
@@ -9651,6 +9813,9 @@ class GameUI {
             <li>${airIcon('field', '#9aa57a')} Aeródromo: hasta ${CONFIG.AIR.PER_AIRFIELD} escuadrones, con cuántos tiene en la esquina («?» si no lo sabes); atenuado y con un aspa, inservible. Los de todos los países se ven. En la vista realista, una pista con su hangar y un avión</li>
             <li>${airIcon('aa', '#9aa57a')} Antiaéreo fijo: cubre <span data-legend="aa-range"></span> con fuerza <span data-legend="aa-power"></span> (dañado, la cúpula a trazos y la mitad); unas casamatas en una ciudad traen el doble. El del enemigo solo se ve si lo conoces: con Reconocimiento 2 a la vista, con un espía o porque te ha disparado. En la vista realista, un lanzador con dos misiles</li>
             <li>${unitIcon('antiair', '#9aa57a')} Antiaérea (tropa, con Defensa aérea 3): va con su ejército y cubre su casilla y las vecinas; cada una vale la mitad de un antiaéreo fijo. En el mar es el único antiaéreo que protege a un barco. La del enemigo la conoces si conoces su ejército, y «Destruir antiaéreo» contra él le quita una parte (el doble embarcado). En la vista realista, un camión lanzador con dos misiles</li>
+            <li>${airIcon('uav', '#9aa57a')} Enjambre de drones (rama Drones; se compra en cualquier ciudad tuya con la herramienta Aviación): reconoce, ataca ejércitos o patrulla a ${BASE_RULES.droneRangeKm} km de su ciudad (más con investigación), con la mitad de la fuerza de un escuadrón. En el mapa, la ficha pequeña abajo a la izquierda de su ciudad, con cuántos hay; patrullando, debajo de la casilla que cubre. La zona que ven tus drones al reconocer, a trazos celestes. En la vista realista, un dron de ala fija sobre su peana</li>
+            <li>${airIcon('battery', '#9aa57a')} Batería automática (rama Defensa automática): dispara sola contra los drones, cohetes y misiles que van a su radio, con un tope por ronda. La del enemigo solo se ve si la conoces, como el antiaéreo fijo. En la vista realista, un lanzador de contenedores verticales</li>
+            <li>Escolta: la ficha pequeña de escuadrón o de dron arriba a la izquierda de un ejército, con una línea fina hasta él (continua en ataque, a trazos en defensa). Se encarga en la ficha del ejército o en la de su agrupación (pestaña Batalla)</li>
             <li><svg class="nato" viewBox="0 0 32 32" aria-hidden="true" style="color:${SIGNAL}">${RS_ICON.sat}</svg> Satélite (rama Espacio; se lanza desde la herramienta Aviación): ve el tipo y el número de los ejércitos, el antiaéreo fijo y los aeródromos dentro de su círculo, a trazos amarillos (<span data-legend="sat-range"></span>); con Óptica de alta resolución, también galones y fortificaciones. A la derecha del satélite, los turnos que le quedan. No lo derriban, y lo que ve no lo ven tus aliados</li>
             <li>Aviación (herramienta Aviación, tecla 6): elige un aeródromo tuyo y marca los escuadrones que vuelan; luego haz clic en un blanco a su alcance. Cada misión dice su probabilidad de acierto y lo que puedes perder según lo que sabes: con niebla, el antiaéreo que no conoces no cuenta y la ficha te avisa. Cada escuadrón vuela una vez por turno y cada blanco recibe como mucho un acierto por turno. En tu territorio se construyen aeródromos (en una ciudad) y antiaéreo (en cualquier casilla)</li>
             <li>Aviación en el mando: una ofensiva o una línea llevan escuadrones, igual que ejércitos (pestaña Mando o «Encargo» en la ficha de Aviación), y marcan sus fines: golpear ejércitos, cortar carreteras, bajar fortificaciones, destruir antiaéreo o proteger y escoltar. Cada turno eligen, con lo que conoces, hasta ${AIR_TARGETS} blancos a su alcance y solo vuelan si la previsión es buena; respetan el modo manual, asistido o automático. La reserva manda sus escuadrones a la operación que pide ayuda. Orden de zona: un escuadrón suelto ataca turno a turno con sus fines a ${AIR_ZONE_KM} km de la casilla que marques. Una misión a mano gana a su encargo ese turno; al siguiente vuelve a él</li>
@@ -9843,8 +10008,22 @@ class GameUI {
                 out.push(`Antiaéreo fijo${who(m.owner)}${m.down ? ' (dañado)' : ''}: cubre ${plural(R, 'casilla', 'casillas')} (${km} km)`);
             } else if (m.kind === 'patrol') {
                 out.push(`${m.owner === g.player ? 'Protegida por tus escuadrones hasta tu próximo turno' : `Protegida por escuadrones${who(m.owner)}`}: ${plural(m.n, 'escuadrón', 'escuadrones')}`);
+            } else if (m.kind === 'dpatrol') {
+                out.push(`${m.owner === g.player ? 'Patrullada por tus drones hasta tu próximo turno' : `Patrullada por drones${who(m.owner)}`}: ${plural(m.n, 'enjambre', 'enjambres')}`);
+            } else if (m.kind === 'swarm') {
+                out.push(`${m.owner === g.player ? 'Tus enjambres de drones' : `Enjambres de drones${who(m.owner)}`}: ${m.n}${m.down ? ' (ninguno puede volar ahora)' : ''}`);
+            } else if (m.kind === 'battery') {
+                const what = m.owner === g.player ? 'Tu batería automática' : `Batería automática${who(m.owner)}`;
+                if (m.left) { out.push(`${what} en obras: ${plural(m.left, 'turno', 'turnos')}`); continue; }
+                // Como el antiaéreo: el radio y la capacidad de verdad si se conoce la investigación de su dueño; si no, el mayor.
+                const known = g.knowsResearch(g.player, m.owner), L = known ? g.batteryLevel(m.owner) : BATTERY_LEVELS[BATTERY_LEVELS.length - 1];
+                out.push(L ? `${what}: cubre ${known ? '' : 'hasta '}${plural(kmCells(L.km), 'casilla', 'casillas')} (${L.km} km) y para ${known ? '' : 'hasta '}${L.cap} drones o armas por ronda` : `${what}: sin Defensa de punto no dispara`);
+            } else if (m.kind === 'escort') {
+                const parts = [m.sq ? plural(m.sq, 'escuadrón', 'escuadrones') : '', m.sw ? plural(m.sw, 'enjambre', 'enjambres') : ''].filter(Boolean).join(' y ');
+                out.push(`Escoltado por ${parts}${who(m.owner)} (${m.mode === 'mixta' ? 'en defensa y en ataque' : `en ${m.mode}`})`);
             }
         }
+        if (g.droneRevealed(g.player, cell)) out.push(`Reconocida por tus drones: la ves hasta el turno ${g.droneSeen.get(g.player * G.N + cell)}`);
         return out;
     }
 
@@ -10210,23 +10389,39 @@ class GameUI {
     // --- Herramienta Aviación ---
     // mode 'zone': el siguiente clic fija el centro de la orden de zona del escuadrón `zoneSq`, con los fines `zoneAims`;
     // mode 'sat': el siguiente clic lanza un satélite sobre esa casilla.
-    noAir() { return { base: -1, picked: new Set(), target: -1, mode: null, zoneSq: 0, zoneAims: [] }; }
+    // nest: la ciudad cuyos enjambres se ven; drones: los enjambres elegidos (aparte de los escuadrones de `picked`).
+    noAir() { return { base: -1, picked: new Set(), target: -1, mode: null, zoneSq: 0, zoneAims: [], nest: -1, drones: new Set() }; }
     // Escuadrones del jugador en el aeródromo `cell` que pueden volar ahora.
     readyAt(cell) { const g = this.game; return g.squadronsAt(cell).filter(q => q.owner === g.player && g.canFly(q)).sort((a, b) => a.id - b.id); }
-    // Elige el aeródromo `cell` con sus escuadrones que pueden volar; el blanco se olvida.
-    pickBase(cell) { Object.assign(this.air, { base: cell, picked: new Set(this.readyAt(cell).map(q => q.id)), target: -1 }); }
-    // Lo elegido deja de valer si el aeródromo ya no es tuyo o si un escuadrón ha volado, ha caído o se ha ido.
+    // Enjambres del jugador en la ciudad `cell` que pueden volar ahora.
+    swarmsReady(cell) { const g = this.game; return g.swarmsAt(cell).filter(q => q.owner === g.player && g.canFlySwarm(q)).sort((a, b) => a.id - b.id); }
+    // Elige el aeródromo `cell` con sus escuadrones que pueden volar, y los enjambres listos de su ciudad; el blanco se olvida.
+    pickBase(cell) {
+        Object.assign(this.air, { base: cell, picked: new Set(this.readyAt(cell).map(q => q.id)), target: -1 });
+        this.pickNest(cell, true);
+    }
+    // Elige la ciudad `cell` con sus enjambres listos (sin `keep`, sin escuadrones); el blanco se olvida.
+    pickNest(cell, keep = false) {
+        const g = this.game, mine = CITY_OF[cell] >= 0 && g.owner[cell] === g.player;
+        Object.assign(this.air, { nest: mine ? cell : -1, drones: new Set(mine ? this.swarmsReady(cell).map(q => q.id) : []), target: -1 });
+        if (!keep) Object.assign(this.air, { base: -1, picked: new Set() });
+    }
+    // Lo elegido deja de valer si el aeródromo o la ciudad ya no son tuyos o si un escuadrón o un enjambre ha volado, ha
+    // caído o se ha ido.
     airTidy() {
         const g = this.game, A = this.air;
         if (A.base >= 0 && g.airfields.get(A.base)?.owner !== g.player) Object.assign(A, { base: -1, target: -1 });
+        if (A.nest >= 0 && g.owner[A.nest] !== g.player) Object.assign(A, { nest: -1, target: A.base >= 0 ? A.target : -1 });
         for (const id of A.picked) { const q = g.squadrons.get(id); if (!q || q.base !== A.base || !g.canFly(q)) A.picked.delete(id); }
+        for (const id of A.drones) { const q = g.swarms.get(id); if (!q || q.base !== A.nest || !g.canFlySwarm(q)) A.drones.delete(id); }
     }
     // Un clic con la herramienta Aviación:
     // - esperando el centro de un satélite o de una orden de zona, es ese centro;
-    // - en un aeródromo tuyo en servicio, lo elige con sus escuadrones listos (con escuadrones ya elegidos en otro, es
-    //   el blanco: para trasladarlos o proteger la casilla);
-    // - con escuadrones elegidos, cualquier otra casilla es el blanco (también el mar);
-    // - sin escuadrones, una casilla tuya enseña lo que se puede construir en ella.
+    // - en un aeródromo tuyo en servicio, lo elige con sus escuadrones y los enjambres de su ciudad que están listos (con
+    //   algo ya elegido en otro sitio, es el blanco: para trasladarlos o proteger la casilla);
+    // - en otra ciudad tuya, igual con sus enjambres;
+    // - con escuadrones o enjambres elegidos, cualquier otra casilla es el blanco (también el mar);
+    // - sin nada elegido, una casilla tuya enseña lo que se puede construir en ella.
     airClick(cell) {
         const g = this.game, A = this.air, f = g.airfields.get(cell);
         if (A.mode === 'sat') {   // satélite: esta casilla es el centro de lo que vigila
@@ -10241,24 +10436,38 @@ class GameUI {
             this.render();
             return;
         }
-        if (f && f.owner === g.player && g.airfieldUp(cell) && (cell === A.base || !A.picked.size)) this.pickBase(cell);
-        else if (A.picked.size) {
+        const busy = A.picked.size || A.drones.size, here = cell === A.base || cell === A.nest;
+        if (f && f.owner === g.player && g.airfieldUp(cell) && (here || !busy)) this.pickBase(cell);
+        else if (CITY_OF[cell] >= 0 && g.owner[cell] === g.player && (here || !busy)) this.pickNest(cell);
+        else if (busy) {
             A.target = cell;
             if (isMobile()) this.view.centerOn(cell, 5, 0.27);   // que el blanco quede a la vista encima de la hoja
-        } else if (isLand(cell) && g.owner[cell] === g.player) Object.assign(A, { base: -1, target: -1 });
+        } else if (isLand(cell) && g.owner[cell] === g.player) Object.assign(A, { base: -1, nest: -1, target: -1 });
         else {
-            this.flash(A.base >= 0 ? 'Ningún escuadrón elegido: marca en la ficha alguno que pueda volar.' : 'Elige primero uno de tus aeródromos con escuadrones listos.');
+            this.flash(A.base >= 0 || A.nest >= 0 ? 'Nada elegido: marca en la ficha algún escuadrón o enjambre que pueda volar.' : 'Elige primero uno de tus aeródromos o una ciudad tuya con enjambres listos.');
             return;
         }
         this.selected = cell;
         this.render();
     }
-    // Lo que dibuja el mapa con la herramienta: el alcance desde el aeródromo, el camino al blanco y el antiaéreo enemigo que conoces.
+    // ¿Enseña la ficha los enjambres de la ciudad elegida? Si tiene alguno tuyo o si ya puedes comprarlos.
+    nestShown() {
+        const g = this.game, A = this.air;
+        return A.nest >= 0 && (g.rules(g.player).drones >= 1 || g.swarmsAt(A.nest).some(q => q.owner === g.player));
+    }
+    // Lo que dibuja el mapa con la herramienta: el alcance desde el aeródromo (o, si solo van enjambres, el suyo desde su
+    // ciudad), el camino al blanco y el antiaéreo enemigo que conoces; con los enjambres, también las baterías.
     airPick() {
         const g = this.game, p0 = g.player, A = this.air;
-        if (p0 === null || A.base < 0) return null;
+        const drones = this.nestShown() && (A.base < 0 || (!A.picked.size && A.drones.size > 0)), from = drones ? A.nest : A.base;
+        if (p0 === null || from < 0) return null;
         const known = g.aaList().filter(s => g.atWar(p0, s.owner) && g.aaKnown(p0, s)).map(s => ({ cell: s.cell, owner: s.owner, radius: g.knowsResearch(p0, s.owner) ? s.radius : AA_MAX_RADIUS, kind: s.kind }));
-        return { bases: [A.base], range: g.airRange(p0), target: A.target, path: A.target >= 0 ? flightPath(A.base, A.target) : null, known };
+        if (drones) for (const [c, b] of g.batteries) {
+            if (b.left > 0 || g.owner[c] !== b.owner || !g.atWar(p0, b.owner) || !g.batteryKnown(p0, c)) continue;
+            const L = g.knowsResearch(p0, b.owner) ? g.batteryLevel(b.owner) : BATTERY_LEVELS[BATTERY_LEVELS.length - 1];
+            if (L?.p.drone) known.push({ cell: c, owner: b.owner, radius: kmCells(L.km), kind: 'battery' });
+        }
+        return { bases: [from], range: drones ? g.droneRange(p0) : g.airRange(p0), target: A.target, path: A.target >= 0 ? flightPath(from, A.target) : null, known };
     }
     // Estado de un escuadrón, en pocas palabras.
     squadronState(q) {
@@ -10276,12 +10485,29 @@ class GameUI {
         if (op) return `${esc(op.name)}${mode ? ` · escolta en ${mode}` : ''}`;
         return mode ? `Escolta en ${mode}` : t ? `Orden de zona: ${esc(g.placeName(t.cell))}` : '';
     }
+    // Estado de un enjambre, en pocas palabras.
+    swarmState(q) {
+        const g = this.game;
+        if (q.patrol >= 0) return `Patrulla ${esc(g.placeName(q.patrol))}`;
+        if (g.turn < q.ready) return q.damaged ? `Dañado: vuelve a volar el turno ${q.ready}` : `Nuevo: vuela a partir del turno ${q.ready}`;
+        return q.flown === g.turn ? 'Ya ha volado' : 'Listo';
+    }
+    // Lo que escolta un escuadrón o un enjambre, en pocas palabras: el ejército (por su casilla) o la agrupación.
+    escortWhat(q) {
+        const g = this.game, t = q.task;
+        if (t?.kind !== 'escort') return '';
+        return t.group ? esc(g.groupById(q.owner, t.group)?.name ?? 'una agrupación') : `el ejército de ${esc(g.placeName(g.armies.get(t.army)?.cell ?? q.base))}`;
+    }
     renderAirCard() {
         const g = this.game, el = $('#card'), p0 = g.player, A = this.air;
         const focus = A.target >= 0 ? A.target : this.selected;
-        const base = A.base >= 0 ? this.airBaseSection() : '', target = A.target >= 0 ? this.airTargetSection() : '', task = A.base >= 0 ? this.airTaskSection() : '';
+        const base = A.base >= 0 ? this.airBaseSection() : '', task = A.base >= 0 ? this.airTaskSection() : '', nest = this.nestShown() ? this.droneNestSection() : '';
+        // Contra el blanco, una sección para los escuadrones y otra para los enjambres, cada una si van o si no van los otros.
+        const sqT = A.target >= 0 && A.base >= 0 && (A.picked.size > 0 || !A.drones.size), drT = A.target >= 0 && !!nest && (A.drones.size > 0 || !sqT);
+        const target = sqT ? this.airTargetSection() : '', drones = drT ? this.droneTargetSection() : '';
         // En el móvil, el blanco va primero (o la orden de zona que se está dando): es lo que se ve en la hoja a media altura.
-        const sections = [...(isMobile() ? (A.mode === 'zone' ? [task, target, base] : [target, base, task]) : [base, task, target]), focus >= 0 && isLand(focus) && g.owner[focus] === p0 ? this.airBuildSection(focus) : ''].filter(Boolean);
+        const order = isMobile() ? (A.mode === 'zone' ? [task, target, drones, base, nest] : [target, drones, base, nest, task]) : [base, task, nest, target, drones];
+        const sections = [...order, focus >= 0 && isLand(focus) && g.owner[focus] === p0 ? this.airBuildSection(focus) : ''].filter(Boolean);
         // Los satélites, al final y solo con la ficha ya abierta (en el móvil no se abre la hoja por ellos); mientras se
         // elige su centro, en el móvil van primero.
         const sat = sections.length || A.mode === 'sat' ? this.airSatSection() : '';
@@ -10289,11 +10515,11 @@ class GameUI {
         if (!sections.length) { el.hidden = true; return; }
         el.hidden = false;
         el.style.setProperty('--owner', g.nations[p0].color);
-        const R = g.airRange(p0);
+        const R = g.airRange(p0), r = g.rules(p0), D = g.droneRange(p0);
         el.innerHTML = `
             <header class="card-head">
                 <div><h2>Aviación</h2>
-                <p class="small muted">Tus escuadrones llegan a ${plural(R, 'casilla', 'casillas')} (${g.rules(p0).airRangeKm} km) y vuelan una vez por turno.</p></div>
+                <p class="small muted">Tus escuadrones llegan a ${plural(R, 'casilla', 'casillas')} (${r.airRangeKm} km)${r.drones >= 1 ? ` y tus enjambres, a ${plural(D, 'casilla', 'casillas')} (${r.droneRangeKm} km); vuelan` : ' y vuelan'} una vez por turno.</p></div>
                 <button class="btn ghost" data-action="tool" data-tool="command" aria-label="Cerrar" title="Cerrar (Esc)">✕</button>
             </header>${sections.join('')}`;
     }
@@ -10370,6 +10596,59 @@ class GameUI {
             <p class="note">Trasladarse gasta la misión del turno${g.hangar(p0, c) ? '' : `; ${g.airfieldUp(c) ? `ya tiene ${CONFIG.AIR.PER_AIRFIELD} escuadrones` : 'no está en servicio'}`}.</p>` : '';
         return `${head}${rows.join('')}${away}${notes}${move}</section>`;
     }
+    // «Drones en X»: los enjambres de la ciudad, cada uno con su estado y su encargo (los que pueden volar se marcan con
+    // un clic), y la compra de otro.
+    droneNestSection() {
+        const g = this.game, p0 = g.player, A = this.air, D = CONFIG.DRONE, r = g.rules(p0);
+        const sws = g.swarmsAt(A.nest).filter(q => q.owner === p0).sort((a, b) => a.id - b.id);
+        const rows = sws.map(q => {
+            const on = A.drones.has(q.id), task = q.task?.kind === 'escort' ? `Escolta en ${q.task.mode}: ${this.escortWhat(q)}` : q.op ? esc(g.ops.get(q.op)?.name ?? '') : '';
+            return `<button class="air-sq ${on ? 'on' : ''}" data-action="drone-pick" data-id="${q.id}" aria-pressed="${on}" ${g.canFlySwarm(q) ? '' : 'disabled'}>
+                <span class="box">${on ? uiIcon('check', 11) : ''}</span>${ICONS.uav}<span>Enjambre ${q.id}<small>${this.swarmState(q)}${task ? ` · ${task}` : ''}</small></span></button>`;
+        }).join('');
+        const n = A.drones.size, full = sws.length >= D.PER_CITY, can = r.drones >= 1 && g.droneNest(p0, A.nest) && g.nations[p0].gold >= D.COST;
+        return `<section class="sec"><h3>Drones en ${esc(g.placeName(A.nest))}</h3>
+            ${rows ? `<div class="air-sqs">${rows}</div>` : '<p class="small muted">Esta ciudad no tiene enjambres.</p>'}
+            ${sws.length ? `<p class="small muted">${n ? `${n === 1 ? 'Va uno' : `Van ${n}`}: haz clic en un blanco a su alcance.` : 'Ninguno elegido: marca los que pueden volar.'}</p>` : ''}
+            ${r.drones >= 1 ? `<div class="row" style="margin-top:8px"><button class="btn" data-action="drone-buy" ${can ? '' : 'disabled'}>Comprar un enjambre (${D.COST} de oro)</button></div>
+            <p class="note">Vuela a partir del turno que viene, con la mitad de la fuerza de un escuadrón y sin aeródromo. Caben ${D.PER_CITY} por ciudad${full ? ' y esta ya está llena' : ''}; si toman la ciudad, se pierden.</p>`
+                : '<p class="note">Para comprar más hace falta investigar Drones tácticos.</p>'}</section>`;
+    }
+    // «Drones contra X»: las misiones de los enjambres elegidos con su previsión, hecha solo con lo que sabes (también las
+    // baterías y los drones que patrullan y conoces), y sus avisos.
+    droneTargetSection() {
+        const g = this.game, p0 = g.player, A = this.air, c = A.target, r = g.rules(p0), pct = x => Math.round(x * 100);
+        const sws = [...A.drones].map(id => g.swarms.get(id)).filter(Boolean), fly = g.fliers(p0, sws, c, true);
+        const head = `<section class="sec"><h3>Drones contra ${esc(afloat(c) ? `el mar junto a ${PROVINCES[SEA_PROV[c]].name}` : g.placeName(c))}</h3>`;
+        if (!sws.length) return `${head}<p class="small muted">Ningún enjambre listo: marca en ${esc(g.placeName(A.nest))} los que pueden volar.</p></section>`;
+        if (!fly.length) return `${head}<p class="note warn">Fuera de alcance: está a ${plural(hexDist(A.nest, c), 'casilla', 'casillas')} y tus enjambres llegan a ${g.droneRange(p0)}.</p></section>`;
+        const rows = [], warn = new Set(), R = kmCells(CONFIG.DRONE.RECON_KM);
+        let seen = '', stop = '';
+        for (const kind of Object.keys(DRONE_KINDS)) {
+            const o = g.droneOdds(p0, sws, kind, c);
+            if (o.why && o.why !== AIR_BLOCKED) continue;   // la misión no cabe en esta casilla
+            let what;
+            if (o.why) what = '<span class="small muted">Ya ha recibido un acierto de drones este turno.</span>';
+            else if (kind === 'patrol') what = '<span class="small">Sale al paso de los drones y cohetes enemigos contra esta casilla y sus vecinas hasta tu próximo turno.</span>';
+            else {
+                // Lo que se pierde: lo que paran las defensas que conoces y, de lo que pasa, lo que derriba el antiaéreo.
+                const lost = fly.length - o.through + o.through * o.down, a = kind === 'army' ? g.armyOn(c) : null;
+                const k = a && g.armyView(p0, a).n !== null ? g.droneLoss(p0, a, 0.5) : 0;
+                const gain = kind === 'recon' ? `; verías ${plural(R, 'casilla', 'casillas')} a la redonda este turno y el siguiente` : k ? `; le quitarías ${k === 1 ? 'una unidad' : `unas ${k} unidades`}` : '';
+                what = `<span class="small" title="Cada enjambre que pasa las defensas: ${pct(o.down)} % de que lo derriben y ${pct(o.damaged)} % de que vuelva dañado">${pct(o.hit)} % de ${kind === 'recon' ? 'que salga bien' : 'acierto'}, ${lost >= 0.5 ? `pierdes unos ${Math.round(lost)}` : 'casi sin pérdidas'}${gain}</span>`;
+                if (!o.known) warn.add(`A ciegas: rinde ${r.blindHit === 0.5 ? 'la mitad' : `el ${pct(r.blindHit)} %`}. Reconócelo antes con tus drones, o ten la casilla a la vista con Reconocimiento 2 o un espía.`);
+                if (o.unknown) warn.add('Puede haber defensas que no conoces: antiaéreo, baterías automáticas o drones que patrullan. Lo aclaran ver la zona (Reconocimiento 2, un satélite o un reconocimiento con drones) y espiar su investigación.');
+                if (o.patrol) warn.add(`Lo protegen cazas enemigos: ${Math.round(o.patrol)} de fuerza contra los ${Math.round(o.power)} de tus enjambres.`);
+                if (o.through < fly.length - 0.05) stop = `Las defensas que conoces pararían unos ${decimal(Math.round((fly.length - o.through) * 10) / 10)} de tus ${fly.length} enjambres (baterías automáticas y drones que patrullan).`;
+                if (o.fire || o.loss) seen = `Antiaéreo que conoces: ${Math.round(o.fire)} de fuerza sobre el blanco${o.loss > o.fire ? ' y más en el camino' : ''}, contra los ${Math.round(o.power)} de tus enjambres. A los drones los derriba con más facilidad que a los aviones.`;
+            }
+            rows.push(`<div class="air-mission"><button class="btn" data-action="drone-mission" data-kind="${kind}" ${o.why ? 'disabled' : ''}>${DRONE_KINDS[kind]}</button>${what}</div>`);
+        }
+        if (!rows.length) rows.push(`<p class="small muted">${isLand(c) && g.owner[c] !== p0 && !g.allied(p0, g.owner[c]) && !g.atWar(p0, g.owner[c]) ? 'Solo contra un país con el que estás en guerra.' : 'Aquí no hay nada que hacer con drones.'}</p>`);
+        const away = fly.length < sws.length ? `<p class="note">Va${fly.length === 1 ? '' : 'n'} ${fly.length}: los demás no llegan.</p>` : '';
+        const notes = [seen, stop].filter(Boolean).map(x => `<p class="note">${x}</p>`).join('') + [...warn].map(w => `<p class="note warn">${w}</p>`).join('');
+        return `${head}${rows.join('')}${away}${notes}</section>`;
+    }
     // «Satélites» (con Espacio): los tuyos en órbita, con los turnos que les quedan, y el lanzamiento de otro; el siguiente
     // clic en el mapa elige el centro de lo que vigila.
     airSatSection() {
@@ -10397,9 +10676,14 @@ class GameUI {
         if (s && s.owner === p0) out.push(`<p class="small">${s.left > 0 ? `Antiaéreo en obra: listo en ${plural(s.left, 'turno', 'turnos')}.`
             : `Antiaéreo en servicio${s.hits ? ', dañado: dispara a media fuerza' : ''}. Cubre ${plural(g.aaRadius(p0), 'casilla', 'casillas')} alrededor.`}</p>`);
         else if (g.planAA(p0, cell)) out.push(`<div class="row" style="margin-top:6px"><button class="btn" data-action="air-build-aa" data-cell="${cell}" ${gold >= A.AA_COST ? '' : 'disabled'}>Antiaéreo (${A.AA_COST} de oro, ${plural(A.AA_TURNS, 'turno', 'turnos')})</button></div>`);
+        // La batería automática (con Defensa de punto), como el antiaéreo: una por casilla, en cualquier casilla tuya.
+        const B = CONFIG.BATTERY, bat = g.batteries.get(cell), L = g.batteryLevel(p0);
+        if (bat && bat.owner === p0) out.push(`<p class="small">${bat.left > 0 ? `Batería automática en obra: lista en ${plural(bat.left, 'turno', 'turnos')}.`
+            : L ? `Batería automática en servicio: cubre ${plural(kmCells(L.km), 'casilla', 'casillas')} (${L.km} km) y para hasta ${L.cap} drones o armas por ronda; en esta le quedan ${Math.max(0, L.cap - bat.used)}.` : 'Batería automática sin Defensa de punto: no dispara.'}</p>`);
+        else if (g.planBattery(p0, cell)) out.push(`<div class="row" style="margin-top:6px"><button class="btn" data-action="air-build-battery" data-cell="${cell}" ${gold >= B.COST ? '' : 'disabled'}>Batería automática (${B.COST} de oro, ${plural(B.TURNS, 'turno', 'turnos')})</button></div>`);
         if (!out.length) return '';
         return `<section class="sec"><h3>Construir en ${esc(g.placeName(cell))}</h3>${out.join('')}
-            <p class="note">El aeródromo, solo en una ciudad tuya; el antiaéreo, en cualquier casilla tuya, uno por casilla. Cubre ${plural(g.aaRadius(p0), 'casilla', 'casillas')} y dispara a las misiones enemigas que pasan por encima.</p></section>`;
+            <p class="note">El aeródromo, solo en una ciudad tuya; el antiaéreo, en cualquier casilla tuya, uno por casilla. Cubre ${plural(g.aaRadius(p0), 'casilla', 'casillas')} y dispara a las misiones enemigas que pasan por encima.${L ? ` La batería automática, también una por casilla: dispara sola contra ${L.p.missile ? 'drones, cohetes y misiles' : 'drones y cohetes'} que van a ${plural(kmCells(L.km), 'casilla', 'casillas')} o menos, hasta ${L.cap} por ronda; lo que pasa de ahí, llega.` : ''}</p></section>`;
     }
 
     flash(msg) { this.game.log(msg); this.hintOverride = msg; this.render(); }
@@ -10442,8 +10726,8 @@ class GameUI {
             const A = this.air;
             if (A.mode === 'zone') Object.assign(A, { mode: null, zoneSq: 0, zoneAims: [] });
             else if (A.mode === 'sat') A.mode = null;
-            else if (A.target >= 0) { A.target = -1; this.selected = A.base; }
-            else if (A.base >= 0 || this.selected >= 0) { this.air = this.noAir(); this.selected = -1; }
+            else if (A.target >= 0) { A.target = -1; this.selected = A.base >= 0 ? A.base : A.nest; }
+            else if (A.base >= 0 || A.nest >= 0 || this.selected >= 0) { this.air = this.noAir(); this.selected = -1; }
             else { this.setTool('command'); return; }
             this.render();
             return;
@@ -10836,6 +11120,24 @@ class GameUI {
             case 'air-buy': if (this.air.base >= 0) g.playerBuySquadron(this.air.base); break;
             case 'air-build-field': g.playerBuildAirfield(+d.cell); break;
             case 'air-build-aa': g.playerBuildAA(+d.cell); break;
+            case 'air-build-battery': g.playerBuildBattery(+d.cell); break;
+            case 'drone-pick': { const A = this.air, id = +d.id; if (A.drones.has(id)) A.drones.delete(id); else A.drones.add(id); break; }
+            case 'drone-buy': if (this.air.nest >= 0) g.playerBuySwarm(this.air.nest); break;
+            case 'drone-mission': {   // después vuelven a quedar elegidos los de la ciudad que sigan listos
+                const A = this.air;
+                g.playerDroneMission([...A.drones], d.kind, A.target);
+                if (A.nest >= 0) A.drones = new Set(this.swarmsReady(A.nest).map(q => q.id));
+                break;
+            }
+            case 'escort-mode': this.escortMode = d.value; break;
+            case 'escort-add': {   // la pieza elegida en el desplegable de esa ficha o fila escolta al ejército o a la agrupación
+                const pick = document.querySelector(`select[data-escort-pick="${d.ref}"]`)?.value ?? '', [kind, id] = pick.split(':');
+                if (!id) return;
+                const ref = d.ref[0] === 'g' ? { group: +d.ref.slice(1) } : { army: +d.ref.slice(1) };
+                g.playerEscort(kind === 'sw' ? 'swarm' : 'squadron', +id, ref, this.escortMode);
+                break;
+            }
+            case 'escort-clear': g.playerEscort(d.kind, +d.id, null); break;
             case 'air-sat':   // el siguiente clic, su centro; en el móvil, la hoja vuelve arriba, donde lo explica
                 Object.assign(this.air, { mode: 'sat', zoneSq: 0, zoneAims: [] });
                 this.render();
@@ -11363,6 +11665,8 @@ class GameUI {
                 ${this.selTools()}
             </section>`);
             sections.push(this.orderSection(a));
+            const escort = this.escortBox({ army: a.id });
+            if (escort) sections.push(`<section class="sec"><h3>Escolta</h3>${escort}</section>`);
             sections.push(`<section class="sec"><h3>Refuerzos</h3>${this.reinforceBox({ army: a.id })}</section>`);
         }
         if (sea) {
@@ -11465,6 +11769,43 @@ class GameUI {
                     <p class="row">${this.nationChip(o)} ${this.relationChip(o)}${g.isDisputed(cell) ? ` <span class="small warn-text">en disputa con ${g.nm(g.legal[cell])}</span>` : o !== p.country ? ` <span class="small muted">antes de ${g.nm(p.country)}</span>` : ''}</p></div>
                 <button class="btn ghost" data-action="close-card" aria-label="Cerrar" title="Cerrar (Esc)">✕</button>
             </header>${sections.join('')}`;
+    }
+
+    // La escolta de un ejército ({ army }) o de una agrupación ({ group }) del jugador: los escuadrones y enjambres que la
+    // tienen encargada, con su modo (y, los que han quedado fuera de su alcance, suspendidos) y un botón para quitarla;
+    // debajo, encargarla a otro de los que llegan, en defensa o en ataque. En la ficha de un ejército salen también los de
+    // su agrupación. '' si el jugador no tiene con qué escoltar. `short`: sin la nota larga (la fila de la pestaña Batalla).
+    escortBox(ref, short = false) {
+        const g = this.game, p0 = g.player, r = g.rules(p0), E = CONFIG.ESCORT;
+        const members = ref.group ? g.groupMembers(p0, ref.group) : [g.armies.get(ref.army)].filter(Boolean);
+        const key = ref.group ? `g${ref.group}` : `a${ref.army}`, gid = ref.group || members[0]?.group || 0;
+        const on = [], free = [];
+        let any = false;
+        for (const [m, sw] of [[g.squadrons, false], [g.swarms, true]]) for (const q of m.values()) {
+            if (q.owner !== p0 || (sw && !r.droneEscort)) continue;
+            any = true;
+            const t = q.task;
+            if (t?.kind === 'escort' && ((!ref.group && t.army === ref.army) || (gid && t.group === gid))) on.push(q);
+            else if (members.some(a => g.escortReach(q, a))) free.push(q);
+        }
+        if (!any && !on.length) return '';
+        const name = q => `${g.isSwarm(q) ? 'Enjambre' : 'Escuadrón'} ${q.id}`;
+        const state = q => (g.isSwarm(q) ? this.swarmState(q) : this.squadronState(q));
+        const rows = on.map(q => {
+            const near = members.filter(a => g.escortReach(q, a)).length, sw = g.isSwarm(q), t = q.task;
+            const reach = !members.length ? '' : !near ? '<b class="warn-text">suspendida: está fuera de su alcance</b>' : near < members.length ? `alcanza a ${near} de ${members.length}` : '';
+            const why = [!ref.group && t.group ? `de la agrupación ${esc(g.groupById(p0, t.group)?.name ?? '')}` : '', q.op && g.ops.has(q.op) ? `la reparte ${esc(g.ops.get(q.op).name)}` : ''].filter(Boolean);
+            return `<div class="esc-row">${sw ? ICONS.uav : ICONS.plane}<span>${name(q)} · en ${t.mode}<small>Desde ${esc(g.placeName(q.base))} · ${[state(q), ...why, reach].filter(Boolean).join(' · ')}</small></span>
+                <button class="btn ghost" data-action="escort-clear" data-kind="${sw ? 'swarm' : 'squadron'}" data-id="${q.id}" title="Deja la escolta">Quitar</button></div>`;
+        }).join('');
+        free.sort((a, b) => g.isSwarm(a) - g.isSwarm(b) || a.id - b.id);
+        const mode = this.escortMode;
+        const add = free.length ? `<div class="seg" style="margin-top:8px">${ESCORT_MODES.map(m => `<button data-action="escort-mode" data-value="${m}" class="${mode === m ? 'on' : ''}">En ${m}</button>`).join('')}</div>
+            <div class="esc-add"><select data-escort-pick="${key}" aria-label="Escuadrón o enjambre que escolta">${free.map(q => `<option value="${g.isSwarm(q) ? 'sw' : 'sq'}:${q.id}">${name(q)} · desde ${esc(g.placeName(q.base))}${q.task ? ` (ahora: ${q.task.kind === 'escort' ? `escolta, ${this.escortWhat(q)}` : 'orden de zona'})` : q.op ? ` (ahora: ${esc(g.ops.get(q.op)?.name ?? '')})` : ''}</option>`).join('')}</select>
+                <button class="btn" data-action="escort-add" data-ref="${key}">Escoltar</button></div>`
+            : `<p class="small muted" style="margin-top:6px">Ningún escuadrón${r.droneEscort ? ' ni enjambre' : ''} tuyo llega hasta aquí desde su base.</p>`;
+        const note = short ? '' : `<p class="note">En defensa protege su casilla: tus cazas salen al paso de las misiones enemigas, tus drones paran drones y cohetes, y defiende ×${decimal(E.SQ)} por escuadrón (hasta ×${decimal(E.SQ_CAP)}) y ×${decimal(E.SW)} por enjambre (hasta ×${decimal(E.SW_CAP)}). En ataque, antes de cada ataque golpea gratis al defensor y ataca con el mismo apoyo. Gasta la misión de cada turno.${r.droneEscort ? '' : ' Con Municiones merodeadoras escoltan también los enjambres.'}</p>`;
+        return `${rows || '<p class="small muted">Sin escolta.</p>'}${add}${note}`;
     }
 
     // «Seleccionar zona» (para el dedo, que no tiene Ctrl) y «Sumar a todos los vecinos», en la ficha de un ejército y en
@@ -11895,7 +12236,7 @@ class GameUI {
         else if (this.tool === 'op') text = `${OP_KINDS[this.opDraft.kind].name}: ${OP_KINDS[this.opDraft.kind].how}`;
         else if (this.tool === 'air' && this.air.mode === 'sat') text = `Satélite: ${this.touch ? 'toca' : 'haz clic en'} el centro de la región que quieres vigilar.${this.touch ? '' : ' Esc para cancelar.'}`;
         else if (this.tool === 'air' && this.air.mode === 'zone') text = `Orden de zona: ${this.touch ? 'toca' : 'haz clic en'} el centro de la zona del escuadrón ${this.air.zoneSq}.${this.touch ? '' : ' Esc para cancelar.'}`;
-        else if (this.tool === 'air') text = 'Aviación: elige uno de tus aeródromos y luego un blanco a su alcance. En tu territorio, construye aeródromos y antiaéreo.';
+        else if (this.tool === 'air') text = 'Aviación: elige un aeródromo o una ciudad con drones y luego un blanco a su alcance. En tu territorio, construye aeródromos, antiaéreo y baterías.';
         else if (this.boxMode) text = `Seleccionar zona: ${this.touch ? 'arrastra el dedo' : 'arrastra'} sobre el mapa para elegir tus ejércitos de dentro del rectángulo.${this.touch ? '' : ' Esc para cancelar.'}`;
         else if (this.ordering?.kind?.startsWith('group-')) text = `${{ 'group-march': 'Marchar: haz clic en el destino; cada uno irá a una casilla libre a su alrededor',
             'group-gather': 'Reunir: haz clic en la casilla donde juntarlos en un solo ejército (o en uno de ellos para que vayan a él)',
@@ -12263,7 +12604,8 @@ class GameUI {
                     <button class="btn ghost" data-action="ob-disband" data-id="${gr.id}" title="Disolver la agrupación: sus ejércitos quedan sueltos">Disolver</button></div>
                 ${this.rf?.key === `g${gr.id}` ? this.reinforceEditor({ group: gr.id }) : gr.reinforce ? `<div class="rf-status-row"><p class="small rf-status">${this.rfStatus({ group: gr.id })}</p>
                     <button class="btn ghost" data-action="rf-stop" data-rf="g${gr.id}">Parar</button></div>` : ''}
-                ${open ? `<div class="ob-list">${ms.filter(pass).map(a => row(a, true)).join('') || '<p class="note">Ninguno cumple el filtro.</p>'}</div>` : ''}</div>`;
+                ${open ? `<div class="ob-list">${ms.filter(pass).map(a => row(a, true)).join('') || '<p class="note">Ninguno cumple el filtro.</p>'}</div>` : ''}
+                ${open ? (escort => (escort ? `<div class="ob-escort"><p class="group-title">Escolta</p>${escort}</div>` : ''))(this.escortBox({ group: gr.id }, true)) : ''}</div>`;
         }).join('');
         // Los sueltos, por provincia (o por operación).
         const buckets = new Map();
