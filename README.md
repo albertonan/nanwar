@@ -56,7 +56,7 @@ Cada investigación se paga al empezar (entre 4 y 12 turnos de renta según el n
 
 En el mapa, los galones bajo la ficha (o el borde de bronce, plata u oro de la peana en la vista realista) indican el nivel investigado en la rama de su tipo de tropa, y las fortificaciones cambian de material con el nivel de su dueño: sacos terreros, hormigón, búnkeres y casamatas.
 
-La niebla de guerra es obligatoria (y antes de elegir país no se ve ningún ejército): de un ejército enemigo a la vista solo se sabe de quién es y su tamaño aproximado, con el escalón de la OTAN sobre una ficha vacía (II batallón, III regimiento, X brigada, XX división). Su tipo y su número se conocen con Reconocimiento 2 o con un espía en la provincia; sus galones y el nivel de sus fortificaciones, con Reconocimiento 3 o con Agentes dobles.
+La niebla de guerra es obligatoria (y antes de elegir país no se ve ningún ejército): de un ejército enemigo a la vista solo se sabe de quién es y su tamaño aproximado, con el escalón de la OTAN sobre una ficha vacía (II batallón, III regimiento, X brigada, XX división, XXX cuerpo de ejército, XXXX ejército y XXXXX grupo de ejércitos). Su tipo y su número se conocen con Reconocimiento 2 o con un espía en la provincia; sus galones y el nivel de sus fortificaciones, con Reconocimiento 3 o con Agentes dobles.
 
 ## Mando estratégico
 
