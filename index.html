@@ -336,6 +336,15 @@
         .op-members { display: grid; gap: 2px; }
         .op-member { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; font-size: 13.5px; }
         .op-member .btn { padding: 2px 8px; }
+        .op-member.ech { grid-template-columns: auto 1fr auto auto; }
+        .op-sub { margin: 8px 0 2px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+        .doc-opts { display: grid; gap: 6px; }
+        .doc-opt { display: grid; gap: 2px; text-align: left; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--raised); color: var(--text); font: 14px var(--font); cursor: pointer; }
+        .doc-opt:hover { border-color: var(--muted); }
+        .doc-opt.on { border-color: var(--signal); box-shadow: inset 0 0 0 1px var(--signal); }
+        .doc-opt b { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+        .doc-opt small { color: var(--muted); font-size: 12.5px; line-height: 1.3; }
+        .chip.rec { background: rgba(143, 209, 107, 0.22); color: var(--go); font-size: 11.5px; }
         .link { background: none; border: 0; padding: 0; color: var(--text); font: 600 13.5px var(--font); text-decoration: underline; text-decoration-color: var(--line); cursor: pointer; }
         .tpl-box { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 8px; }
         .tpl-box.directive { margin-top: 0; border-top: 0; padding-top: 0; }
@@ -839,6 +848,7 @@ const OP_LOGISTICS = [0, 25, 50, 75];   // parte del oro de la operación (%) pa
 const OP_SPEAR_SPEED = 6;    // un ejército de esta velocidad o más va en la punta de lanza
 const OP_SPEAR_KM = 120;     // la punta se detiene a esta distancia por delante del seguimiento, a lo largo de la flecha
 const OP_SPEAR_MIN = 6;      // y nunca a menos de estas casillas (en el mapa del mundo, 120 km son una casilla)
+const OP_WIDE_IDLE = 6;      // un frente amplio con el objetivo tomado termina tras estos turnos sin tomar ninguna provincia
 // Directiva nacional: la postura fija la ventaja con la que atacan las ofensivas nuevas y un reparto de la renta.
 const POSTURES = {
     defensa: { name: 'Defensa total', ratio: 1.8, budget: { recruit: 45, research: 10, forts: 35, roads: 5 }, desc: 'Ofensivas nuevas en «cauta» (1,8 a 1). Mucho oro para fortificar.' },
@@ -1431,7 +1441,8 @@ class GameEngine {
                 form: o.form ? { name: o.form.name, units: o.form.units, zone: o.form.zone, recruited: o.form.recruited, pending: o.form.pending } : null,
                 ...(o.kind === 'ofensiva' ? { phase: o.phase, launch: o.launch, go: o.go, wp: o.wp, zone: o.zone, gatherSince: o.gatherSince, body: o.body,
                     doctrine: o.doctrine, width: o.width, logistics: o.logistics, echelon: Object.entries(o.echelon ?? {}).filter(([x]) => this.armies.get(+x)?.op === o.id).map(([x, e]) => [+x, e]),
-                    pockets: o.pockets, garrisons: o.garrisons, workPool: o.workPool ?? 0, lanes: Array.isArray(o.lanes) ? o.lanes.filter(x => this.armies.get(x)?.op === o.id) : null } : {}) })),
+                    pockets: o.pockets, garrisons: o.garrisons, workPool: o.workPool ?? 0, lanes: Array.isArray(o.lanes) ? o.lanes.filter(x => this.armies.get(x)?.op === o.id) : null,
+                    wideIdle: o.wideIdle ?? 0, wideLast: o.wideLast ?? -1 } : {}) })),
             armyForms: [...this.armies.values()].filter(a => a.form).map(a => [a.id, a.form]),
             nextOpId: this.nextOpId,
             armyOps: [...this.armies.values()].filter(a => a.op).map(a => [a.id, a.op]),
@@ -1667,7 +1678,9 @@ class GameEngine {
                     logistics: OP_LOGISTICS.includes(o.logistics) ? o.logistics : 0, pockets: cellList(o.pockets), garrisons: cellList(o.garrisons), workPool: int(o.workPool, 0, 1e7, 0),
                     echelon: Object.fromEntries(list(o.echelon).slice(0, 5000).map(x => [int(x?.[0], 1, 1e9, 0), x?.[1]]).filter(([x, e]) => x && (e === 'punta' || e === 'seguimiento'))),
                     // Franjas del frente amplio (D4): ids de ejército de un lado al otro; sin ellas, se reparten al avanzar.
-                    lanes: Array.isArray(o.lanes) ? [...new Set(o.lanes.slice(0, 500).filter(x => Number.isInteger(x) && x >= 1 && x <= 1e9))] : null });
+                    lanes: Array.isArray(o.lanes) ? [...new Set(o.lanes.slice(0, 500).filter(x => Number.isInteger(x) && x >= 1 && x <= 1e9))] : null,
+                    // Cuenta del frente amplio con el objetivo tomado: turnos sin tomar provincias y las que quedaban.
+                    wideIdle: int(o.wideIdle, 0, 1e4, 0), wideLast: int(o.wideLast, -1, 1e5, -1) });
                 op.bySea = g.opAxisSea(op);
                 if (old) firstWp.push(op);
             }
@@ -4998,7 +5011,7 @@ class GameEngine {
             // Doctrina (D1): asalto si no se pide otra; la anchura y la logística, las de serie de la doctrina si no se piden.
             const doctrine = Object.hasOwn(OP_DOCTRINES, opts.doctrine) ? opts.doctrine : 'asalto', D = OP_DOCTRINES[doctrine];
             Object.assign(op, { doctrine, width: Object.hasOwn(OP_WIDTHS, opts.width) ? opts.width : D.width,
-                logistics: OP_LOGISTICS.includes(opts.logistics) ? opts.logistics : D.logistics, echelon: {}, pockets: [], garrisons: [], workPool: 0, lanes: null });
+                logistics: OP_LOGISTICS.includes(opts.logistics) ? opts.logistics : D.logistics, echelon: {}, pockets: [], garrisons: [], workPool: 0, lanes: null, wideIdle: 0, wideLast: -1 });
             op.bySea = this.opAxisSea(op);
         }
         this.ops.set(op.id, op);
@@ -5180,6 +5193,48 @@ class GameEngine {
         }
         if (tally) tally.notes.push(msg);
         else if (op.owner === this.player) this.log(`${op.name}. ${msg}.`);
+    }
+    // --- Doctrina recomendada (D5) ---
+    // La misma regla para la IA y para la propuesta al jugador: { key, why }. Asalto contra una capital o un objetivo
+    // fortificado; punta de lanza si un tercio o más del ataque de sus ejércitos (`members`) es rápido (velocidad 6 o más)
+    // y el enemigo no tiene en el pasillo una masa mayor que la mayor de las suyas; frente amplio si la fuerza enemiga del
+    // pasillo es la mitad de la suya o menos; asalto en los demás casos. Fuerza: ataque más defensa, del enemigo lo que se
+    // sabe (seenPower) de los ejércitos a la vista. El pasillo es siempre el estrecho, para que la anchura de la doctrina
+    // no cambie la respuesta.
+    suggestDoctrine(op, members = this.opMembers(op)) {
+        const id = op.owner, rules = this.rules(id), obj = op.cells[op.cells.length - 1], place = this.placeName(obj);
+        const theirs = this.owner[obj] !== id;
+        if (theirs && CAPITAL_OF[obj] >= 0) return { key: 'asalto', why: `${place} es una capital: hace falta toda la fuerza junta` };
+        if (theirs && this.fort[obj]) return { key: 'asalto', why: `${place} está fortificada: hace falta toda la fuerza junta` };
+        if (!members.length) return { key: 'asalto', why: 'aún no tiene ejércitos' };
+        let atk = 0, fast = 0, own = 0, big = 0;
+        for (const a of members) {
+            const x = unitPower(a.units, 'atk', rules), f = x + unitPower(a.units, 'def', rules);
+            atk += x; own += f; big = Math.max(big, f);
+            if (this.opSpeedy(a)) fast += x;
+        }
+        let narrow = op;
+        if (op.width !== 'estrecha') { narrow = op._narrow ??= { kind: 'ofensiva', owner: id, width: 'estrecha' }; narrow.cells = op.cells; }
+        const lane = this.opCorridor(narrow);
+        let foe = 0, mass = 0;
+        for (const e of this.armies.values()) {
+            if (!lane.has(e.cell) || !this.atWar(id, e.owner) || this.armyOn(e.cell) !== e || !this.sees(id, e.cell)) continue;
+            const f = this.seenPower(id, e, 'atk', 'linea') + this.seenPower(id, e, 'def', 'linea');
+            foe += f; mass = Math.max(mass, f);
+        }
+        const share = atk > 0 ? fast / atk : 0, pct = x => `${Math.round(x * 100)} %`;
+        if (share >= 1 / 3 && mass <= big) return { key: 'lanza', why: `el ${pct(share)} del ataque es rápido (velocidad 6 o más) y el enemigo no tiene en el pasillo masas mayores que las tuyas` };
+        if (foe <= own * 0.5) return { key: 'amplio', why: foe ? `el enemigo es mucho más débil en el pasillo (${pct(foe / own)} de tu fuerza): conviene ocupar terreno a lo ancho`
+            : 'no hay enemigos a la vista en el pasillo: conviene ocupar terreno a lo ancho' };
+        return { key: 'asalto', why: share >= 1 / 3 ? 'el enemigo tiene en el pasillo una masa mayor que las tuyas: mejor avanzar juntos y atacar en masa'
+            : `poco ataque rápido (el ${pct(share)}) y el enemigo no es débil en el pasillo: mejor avanzar juntos y atacar en masa` };
+    }
+    // La recomendada para una ofensiva aún por crear (herramienta Operación), con los ejércitos que se le asignarían.
+    draftDoctrine(owner, cells) {
+        cells = cells.filter(c => Number.isInteger(c) && c >= 0 && c < G.N && isLand(c));
+        if (cells.length < 2) return { key: 'asalto', why: '' };
+        const op = { id: 0, owner, kind: 'ofensiva', cells, width: 'estrecha', zone: cells[0] };
+        return this.suggestDoctrine(op, this.offensiveFree(op));
     }
     // --- Punta de lanza (D2) ---
     // ¿Va en la punta por su velocidad? La del ejército, la de su unidad más lenta según la investigación de su dueño.
@@ -6176,6 +6231,14 @@ class GameEngine {
                 this.opLogistics(op, tally);   // tras moverse (D3)
                 const left = wide && this.owner[obj] === id ? this.opWideLeft(op) : [];
                 this.opSay(op, tally, 'left', left.length ? `${this.placeName(obj)} es tuya, pero quedan provincias enemigas en el pasillo: ${left.map(c => PROVINCES[CITY_OF[c]].cityName).join(', ')}` : '');
+                // Y si pasan OP_WIDE_IDLE turnos sin tomar ninguna (sin que baje la cuenta de las que quedan) ni asediar
+                // ninguna (un asedio en curso es avanzar), termina: las que quedan están demasiado defendidas.
+                if (left.length) {
+                    const fresh = (op.wideLast ?? -1) < 0 || left.length < op.wideLast || left.some(c => this.sieges.get(c)?.by === id);
+                    op.wideIdle = fresh ? 0 : (op.wideIdle ?? 0) + 1;
+                    op.wideLast = left.length;
+                    if (op.wideIdle >= OP_WIDE_IDLE) done = `${left.length === 1 ? 'queda 1 ciudad demasiado defendida' : `quedan ${left.length} ciudades demasiado defendidas`} en el pasillo`;
+                } else { op.wideIdle = 0; op.wideLast = -1; }
             }
         } else if (op.kind === 'defensa') {
             this.defenseStep(op, free, tally, live);
@@ -8296,15 +8359,16 @@ class GameEngine {
             else if (/^c\d+$/.test(op.template) && +op.template.slice(1) > i) op.template = `c${+op.template.slice(1) - 1}`;
         }
     }
-    playerCreateOp(kind, cells) {
+    // Con `opts.doctrine`, la doctrina que eligió el jugador (la interfaz le propone la recomendada: draftDoctrine).
+    playerCreateOp(kind, cells, opts = {}) {
         if (this.over || this.player === null) return null;
-        const op = this.createOp(this.player, kind, cells);
+        const op = this.createOp(this.player, kind, cells, { doctrine: opts.doctrine });
         if (!op) return null;
         const got = this.nearbyFree(op, kind === 'reserva' ? 2 : 3);
         for (const a of got) this.assignArmy(a, op.id);
         this.shareForces(this.player, { free: false });
         const from = new Set(got.map(a => G.prov[a.cell])).size;
-        this.log(`Nueva operación: ${op.name}${got.length ? `, con ${plural(got.length, 'ejército', 'ejércitos')}${kind === 'ofensiva' && from > 1 ? ` de ${from} provincias` : ''}` : ''}.`);
+        this.log(`Nueva operación: ${op.name}${kind === 'ofensiva' && op.doctrine !== 'asalto' ? ` (${OP_DOCTRINES[op.doctrine].name.toLowerCase()})` : ''}${got.length ? `, con ${plural(got.length, 'ejército', 'ejércitos')}${kind === 'ofensiva' && from > 1 ? ` de ${from} provincias` : ''}` : ''}.`);
         return op;
     }
     playerRedrawOp(op, cells) {
@@ -9101,6 +9165,13 @@ class GameEngine {
             const want = op.kind === 'defensa' ? op.cells.length - this.opMembers(op).length : 6 - this.opMembers(op).length;
             if (want <= 0) continue;
             for (const a of this.nearbyFree(op, op.kind === 'defensa' ? 4 : 6).slice(0, want)) this.assignArmy(a, op.id);
+        }
+        // Doctrina de las ofensivas que aún se reúnen (D5): la recomendada con los ejércitos que ya tienen, con su anchura y
+        // su logística de serie. Una vez en marcha no se cambia.
+        for (const op of ops) {
+            if (op.kind !== 'ofensiva' || op.phase === 'avance') continue;
+            const key = this.suggestDoctrine(op).key;
+            if (key !== op.doctrine) Object.assign(op, { doctrine: key, width: OP_DOCTRINES[key].width, logistics: OP_DOCTRINES[key].logistics, echelon: {}, lanes: null });
         }
         this.aiWings(id, ops);   // y escuadrones, en el mismo orden
         this.executeOrders(id);
@@ -10100,8 +10171,8 @@ class MapView {
     drawOps(hexPx, font) {
         const g = this.game, ctx = this.ctx, ui = this.ui;
         const scr = c => this.toScreen(G.cx[c], G.cy[c]);
-        const list = !this.showOps ? [] : g.opsOf(g.player).map(op => ({ op, kind: op.kind, cells: op.cells, color: opColor(op), name: op.name, dim: op.paused }));
-        if (this.showOps) for (const op of g.knownEnemyOps(g.player)) list.push({ kind: 'ofensiva', cells: op.cells, color: '#e05a47', name: `${op.name} (${g.nm(op.owner)})`, enemy: true });
+        const list = !this.showOps ? [] : g.opsOf(g.player).map(op => ({ op, kind: op.kind, cells: op.cells, color: opColor(op), name: op.name, dim: op.paused, doctrine: op.doctrine }));
+        if (this.showOps) for (const op of g.knownEnemyOps(g.player)) list.push({ kind: 'ofensiva', cells: op.cells, color: '#e05a47', name: `${op.name} (${g.nm(op.owner)})`, enemy: true, doctrine: op.doctrine });
         // Líneas replegadas: la dibujada, tenue, y la flecha de repliegue; en las manuales, el repliegue que harían.
         if (this.showOps) for (const op of g.opsOf(g.player)) {
             if (op.kind !== 'defensa' || op.paused) continue;
@@ -10111,15 +10182,20 @@ class MapView {
         }
         if (ui?.opPreview?.length) list.push({ kind: 'defensa', cells: ui.opPreview, color: '#ffffff', name: 'Línea propuesta', draft: true });
         const d = ui?.opDraft;
-        if (d?.cells.length) list.push({ kind: d.kind, cells: d.cells, color: '#ffffff', name: d.redraw ? 'Nuevo trazado' : 'Nueva operación', draft: true });
+        if (d?.cells.length) list.push({ kind: d.kind, cells: d.cells, color: '#ffffff', name: d.redraw ? 'Nuevo trazado' : 'Nueva operación', draft: true,
+            doctrine: d.kind !== 'ofensiva' ? null : d.redraw ? g.ops.get(d.redraw)?.doctrine : d.doctrine ?? ui.draftRec().key });
         ctx.lineCap = 'round'; ctx.lineJoin = 'round';
         const labels = [];
         // Zona de reunión de las ofensivas que aún se reúnen (y de la enfocada, en cualquier fase) y, con la enfocada, su
-        // pasillo en un tono suave: en coordenadas del mapa, casillas enteras.
+        // pasillo en un tono suave: en coordenadas del mapa, casillas enteras. Los frentes amplios en marcha, sus franjas en
+        // un tono aún más suave (una sí y otra no); las bolsas que dejó atrás una ofensiva, con un contorno a trazos (D6).
         if (this.showOps) {
             const s = this.scale, dpr = this.dpr, focus = ui?.focusOp ? g.ops.get(ui.focusOp) : null;
-            const marks = g.opsOf(g.player).filter(op => op.kind === 'ofensiva' && (op.phase !== 'avance' || op === focus));
-            if (marks.length || focus?.kind === 'ofensiva') {
+            const offs = g.opsOf(g.player).filter(op => op.kind === 'ofensiva');
+            const marks = offs.filter(op => op.phase !== 'avance' || op === focus);
+            const wides = offs.filter(op => op.doctrine === 'amplio' && op.phase === 'avance' && !op.paused);
+            const pockets = offs.filter(op => op.pockets?.length);
+            if (marks.length || focus?.kind === 'ofensiva' || wides.length || pockets.length) {
                 ctx.save();
                 ctx.setTransform(dpr * s, 0, 0, dpr * s, dpr * this.ox, dpr * this.oy);
                 if (focus?.kind === 'ofensiva' && !focus.paused) {
@@ -10130,7 +10206,28 @@ class MapView {
                         this._lane = p; this._laneKey = t.n; this._laneOp = focus.id;
                     }
                     ctx.globalAlpha = 0.11; ctx.fillStyle = opColor(focus); ctx.fill(this._lane);
-                    ctx.globalAlpha = 0.35; ctx.setLineDash([5 / s, 4 / s]); ctx.strokeStyle = opColor(focus); ctx.lineWidth = 1.2 / s; ctx.stroke(this._lane); ctx.setLineDash([]);
+                    // Con frente amplio en marcha, sin el contorno de cada casilla: se ven sus franjas (abajo).
+                    if (!wides.includes(focus)) { ctx.globalAlpha = 0.35; ctx.setLineDash([5 / s, 4 / s]); ctx.strokeStyle = opColor(focus); ctx.lineWidth = 1.2 / s; ctx.stroke(this._lane); ctx.setLineDash([]); }
+                }
+                for (const op of wides) {   // franjas: la geometría guardada del motor, sin repartir de nuevo
+                    const geo = g.opLaneGeo(op, Math.max(1, op.lanes?.length ?? 1));
+                    if (geo.lanes.length < 2) continue;
+                    if (op._lanePaths?.key !== geo.n) {   // una sí y otra no, y la raya entre franjas vecinas
+                        const seams = new Path2D();
+                        for (const [c, i] of geo.idx) for (let k = 0; k < 6; k++) { const v = G.nb[c * 6 + k]; if (v >= 0 && geo.idx.get(v) > i) this.edge(seams, c, k); }
+                        op._lanePaths = { key: geo.n, seams, paths: geo.lanes.map(l => { const p = new Path2D(); for (const c of l.cells) this.hexPath(p, c, 0.94); return p; }) };
+                    }
+                    ctx.fillStyle = opColor(op);
+                    for (const [i, p] of op._lanePaths.paths.entries()) if (i % 2) { ctx.globalAlpha = op === focus ? 0.16 : 0.1; ctx.fill(p); }
+                    ctx.globalAlpha = op === focus ? 0.8 : 0.5; ctx.strokeStyle = opColor(op); ctx.lineWidth = 1.8 / s; ctx.setLineDash([6 / s, 4 / s]); ctx.stroke(op._lanePaths.seams); ctx.setLineDash([]);
+                }
+                if (pockets.length) {
+                    const p = new Path2D();
+                    for (const op of pockets) for (const c of op.pockets) this.hexPath(p, c, 1.06);
+                    ctx.globalAlpha = 0.16; ctx.fillStyle = '#ff8a78'; ctx.fill(p);
+                    ctx.globalAlpha = 0.95; ctx.setLineDash([5 / s, 3.5 / s]);
+                    ctx.strokeStyle = 'rgba(21,26,18,0.85)'; ctx.lineWidth = 4 / s; ctx.stroke(p);
+                    ctx.strokeStyle = '#ff8a78'; ctx.lineWidth = 2.2 / s; ctx.stroke(p); ctx.setLineDash([]);
                 }
                 for (const op of marks) {
                     const key = `${op.zone ?? op.cells[0]}:${g.opMembers(op).length}:${g.turn}`;
@@ -10155,11 +10252,34 @@ class MapView {
             const pts = it.cells.map(scr);
             ctx.globalAlpha = it.dim ? 0.45 : 1;
             if (it.kind === 'ofensiva' && pts.length >= 2) {
-                const w = Math.max(9, Math.min(30, hexPx * 1.3));
-                const path = arrowOutline(smoothLine(pts), w * 0.8, w, w * 1.5, w * 2.3);
-                ctx.fillStyle = it.color; ctx.globalAlpha *= it.draft ? 0.18 : 0.32; ctx.fill(path); ctx.globalAlpha = it.dim ? 0.45 : 1;
+                // Según la doctrina (D6): el eje de avance de siempre (asalto); la flecha de penetración (punta de lanza),
+                // fina y con la punta larga y marcada; y la de avance en frente ancho (frente amplio), de cuerpo ancho y
+                // punta corta, con las líneas de sus franjas.
+                const w = Math.max(9, Math.min(30, hexPx * 1.3)), line = smoothLine(pts), doc = it.doctrine;
+                const path = doc === 'lanza' ? arrowOutline(line, w * 0.42, w * 0.62, w * 2.6, w * 1.9)
+                    : doc === 'amplio' ? arrowOutline(line, w * 1.5, w * 1.9, w * 1.1, w * 3)
+                    : arrowOutline(line, w * 0.8, w, w * 1.5, w * 2.3);
+                ctx.fillStyle = it.color; ctx.globalAlpha *= it.draft ? 0.18 : doc === 'amplio' ? 0.22 : 0.32; ctx.fill(path); ctx.globalAlpha = it.dim ? 0.45 : 1;
+                if (doc === 'lanza') {   // la punta, rellena
+                    const head = arrowOutline(line, 0.01, 0.01, w * 2.6, w * 1.9);
+                    ctx.globalAlpha *= it.draft ? 0.4 : 0.85; ctx.fill(head); ctx.globalAlpha = it.dim ? 0.45 : 1;
+                }
                 ctx.strokeStyle = 'rgba(21,26,18,0.85)'; ctx.lineWidth = 4; ctx.stroke(path);
                 ctx.strokeStyle = it.color; ctx.lineWidth = 2; if (it.draft) ctx.setLineDash([6, 4]); ctx.stroke(path); ctx.setLineDash([]);
+                if (doc === 'amplio') {   // dos líneas a lo largo del cuerpo: el avance a lo ancho
+                    const cut = Math.max(2, Math.floor(line.length * 0.75)), Lw = w * 0.42;
+                    for (const k of [-1, 1]) {
+                        ctx.beginPath();
+                        for (let i = 0; i < cut; i++) {
+                            const a = line[Math.max(0, i - 1)], b = line[Math.min(line.length - 1, i + 1)], len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+                            const x = line[i][0] - (b[1] - a[1]) / len * Lw * k, y = line[i][1] + (b[0] - a[0]) / len * Lw * k;
+                            if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+                        }
+                        ctx.strokeStyle = 'rgba(21,26,18,0.7)'; ctx.lineWidth = 3.5; ctx.globalAlpha = it.dim ? 0.45 : 1; ctx.stroke();
+                        ctx.strokeStyle = it.color; ctx.lineWidth = 1.6; ctx.stroke();
+                    }
+                    ctx.globalAlpha = it.dim ? 0.45 : 1;
+                }
                 const [ox, oy] = pts[pts.length - 1], rr = Math.max(14, hexPx * 1.8);   // objetivo
                 ctx.beginPath(); ctx.ellipse(ox, oy, rr * 1.15, rr * 0.85, 0, 0, Math.PI * 2);
                 ctx.strokeStyle = 'rgba(21,26,18,0.8)'; ctx.lineWidth = 4; ctx.stroke(); ctx.strokeStyle = '#ff8a78'; ctx.lineWidth = 2; ctx.stroke();
@@ -10217,15 +10337,25 @@ class MapView {
                 ctx.setLineDash([7, 5]); ctx.strokeStyle = 'rgba(21,26,18,0.8)'; ctx.lineWidth = 4; ctx.stroke(); ctx.strokeStyle = it.color; ctx.lineWidth = 2; ctx.stroke(); ctx.setLineDash([]);
                 labels.push({ x, y: y - rr * 0.9 - 9, text: `ZR · ${it.name}`, color: it.color });
             }
-            // Anillo bajo los ejércitos de la operación
+            // Anillo bajo los ejércitos de la operación. En una punta de lanza o un frente amplio en marcha, la marca de su
+            // escalón: la punta (o el frente), anillo entero con un triángulo encima; el seguimiento, anillo a trazos.
             if (it.op && hexPx >= FAR_HEX) {   // de lejos se ve la ficha de la operación, no las de cada ejército
-                const rr = Math.max(9, Math.min(24, hexPx * 1.25));
+                const rr = Math.max(9, Math.min(24, hexPx * 1.25)), op = it.op;
+                const ech = op.kind === 'ofensiva' && op.doctrine !== 'asalto' && op.phase === 'avance';
                 ctx.strokeStyle = it.color; ctx.lineWidth = 3;
-                for (const a of g.opMembers(it.op)) {
+                for (const a of g.opMembers(op)) {
                     if (this.motion.tracks.has(a.id)) continue;
                     const [x, y] = scr(a.cell);
                     if (x < -40 || y < -40 || x > this.w + 40 || y > this.h + 40) continue;
-                    ctx.beginPath(); ctx.arc(x, y, rr, 0, Math.PI * 2); ctx.stroke();
+                    const tip = ech && g.opEchelon(op, a) === 'punta';
+                    if (ech && !tip) ctx.setLineDash([4, 3.5]);
+                    ctx.beginPath(); ctx.arc(x, y, rr, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+                    if (tip) {
+                        const t = Math.max(4, rr * 0.38), ty = y - rr;
+                        ctx.beginPath(); ctx.moveTo(x, ty - t * 1.1); ctx.lineTo(x + t, ty + t * 0.6); ctx.lineTo(x - t, ty + t * 0.6); ctx.closePath();
+                        ctx.fillStyle = it.color; ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(21,26,18,0.9)'; ctx.stroke();
+                        ctx.strokeStyle = it.color; ctx.lineWidth = 3;
+                    }
                 }
             }
             ctx.globalAlpha = 1;
@@ -11465,6 +11595,25 @@ class GameUI {
                 <p class="note">Listas en ${g.rules(g.player).fortTurns} turnos. No cuentan las que ya están fortificadas o en obras${canFort < forts.length ? '; no te llega el oro para todas' : ''}.</p></section>` : ''}`;
     }
 
+    // Doctrina recomendada para la ofensiva que se está dibujando (D1): la de draftDoctrine con sus puntos, guardada mientras
+    // no cambien los puntos, el turno ni los ejércitos.
+    draftRec() {
+        const g = this.game, d = this.opDraft;
+        if (!d || d.kind !== 'ofensiva') return { key: 'asalto', why: '' };
+        const key = `${d.cells.join(',')}:${g.turn}:${g.version}:${g.armyVersion}`;
+        if (d._rec?.key !== key) d._rec = { key, val: g.draftDoctrine(g.player, d.cells) };
+        return d._rec.val;
+    }
+    // Selector de doctrina al dibujar una ofensiva: las tres con su explicación; la recomendada sale preseleccionada y
+    // marcada, con su motivo, hasta que el jugador elige (d.doctrine). Lo que elige no cambia solo.
+    draftDoctrineSection() {
+        const d = this.opDraft, ready = d.cells.length >= 2, rec = this.draftRec(), cur = d.doctrine ?? rec.key;
+        return `<p class="group-title" style="margin-left:0">Doctrina</p>
+            <div class="doc-opts">${Object.entries(OP_DOCTRINES).map(([k, v]) => `<button class="doc-opt ${cur === k ? 'on' : ''}" data-action="op-doctrine" data-value="${k}" aria-pressed="${cur === k}">
+                <b>${v.name}${ready && rec.key === k ? ' <span class="chip rec">recomendada</span>' : ''}</b><small>${esc(v.desc)}</small></button>`).join('')}</div>
+            <p class="small" style="margin-top:6px">${ready && rec.why ? `Recomendada: <b>${OP_DOCTRINES[rec.key].name}</b>, porque ${esc(rec.why)}.` : 'Al dibujar la flecha se propone la que más conviene.'}</p>
+            <p class="note">La anchura del frente y la logística siguen a la doctrina; las cambias luego en su ficha.</p>`;
+    }
     renderOpDraftCard() {
         const g = this.game, el = $('#card'), d = this.opDraft, p0 = g.player, redraw = d.redraw ? g.ops.get(d.redraw) : null;
         const used = g.opsOf(p0).length, cap = g.commandCap(p0), full = !redraw && used >= cap;
@@ -11482,6 +11631,7 @@ class GameUI {
                 ${redraw ? '' : `<div class="seg">${Object.entries(OP_KINDS).map(([k, v]) => `<button data-action="op-kind" data-kind="${k}" class="${d.kind === k ? 'on' : ''}">${v.name}</button>`).join('')}</div>`}
                 <p class="small" style="margin-top:8px">${OP_KINDS[d.kind].how}</p>
                 <p class="small muted" style="margin-top:6px">${count}</p>
+                ${d.kind === 'ofensiva' && !redraw ? this.draftDoctrineSection() : ''}
                 <div class="row" style="margin-top:10px">
                     <button class="btn primary" data-action="op-create" ${this.opDraftReady() && !full ? '' : 'disabled'}>${redraw ? 'Guardar el trazado' : 'Crear la operación'}</button>
                     <button class="btn ghost" data-action="op-undo" ${d.cells.length ? '' : 'disabled'}>Deshacer</button></div>
@@ -12183,11 +12333,13 @@ class GameUI {
             case 'run-orders': this.runOrders(); return;
             case 'op-kind': if (this.opDraft && !this.opDraft.redraw) this.opDraft = { kind: d.kind, cells: [], redraw: null }; break;
             case 'op-undo': this.opDraft?.cells.pop(); break;
+            case 'op-doctrine': if (this.opDraft?.kind === 'ofensiva' && Object.hasOwn(OP_DOCTRINES, d.value)) this.opDraft.doctrine = d.value; break;
             case 'op-new': this.setTool('op', { kind: d.kind, cells: [], redraw: null }); if (isMobile()) this.drawerOpen = false; return;
             case 'op-create': {
                 const dr = this.opDraft;
                 if (!this.opDraftReady()) return;
-                const op = dr.redraw ? g.playerRedrawOp(g.ops.get(dr.redraw), dr.cells) : g.playerCreateOp(dr.kind, dr.cells);
+                const op = dr.redraw ? g.playerRedrawOp(g.ops.get(dr.redraw), dr.cells)
+                    : g.playerCreateOp(dr.kind, dr.cells, dr.kind === 'ofensiva' ? { doctrine: dr.doctrine ?? this.draftRec().key } : {});
                 if (!op) { this.flash(dr.redraw ? 'No se puede usar ese trazado.' : `No caben más operaciones: tu estado mayor lleva ${g.commandCap(g.player)} a la vez.`); return; }
                 this.setTool('command');
                 this.focusOp = op.id; this.tab = 'mando'; this.drawerOpen = !isMobile() || this.drawerOpen;
@@ -12198,7 +12350,8 @@ class GameUI {
             case 'op-set': {
                 const op = g.ops.get(+d.id);
                 if (!op || op.owner !== g.player) return;
-                g.playerOpSet(op, d.key, d.key === 'ratio' || d.key === 'gold' ? +d.value : d.key === 'auto' || d.key === 'launch' ? d.value : !op[d.key]);
+                const text = ['auto', 'launch', 'doctrine', 'width'].includes(d.key) || d.key.startsWith('echelon:');
+                g.playerOpSet(op, d.key, ['ratio', 'gold', 'logistics'].includes(d.key) ? +d.value : text ? d.value : !op[d.key]);
                 break;
             }
             case 'op-launch': { const op = g.ops.get(+d.id); if (op) g.playerLaunchOp(op); break; }
@@ -12233,7 +12386,7 @@ class GameUI {
                 this.opPreview = null;
                 const sg = g.frontPlan(g.player, +d.enemy);
                 if (!sg) return;
-                const op = d.kind === 'defensa' ? g.playerCreateOp('defensa', sg.line) : g.playerCreateOp('ofensiva', sg.attack);
+                const op = d.kind === 'defensa' ? g.playerCreateOp('defensa', sg.line) : g.playerCreateOp('ofensiva', sg.attack, { doctrine: g.draftDoctrine(g.player, sg.attack).key });
                 if (op) { op.front = sg.enemy; this.focusOp = op.id; }
                 break;
             }
@@ -13725,6 +13878,72 @@ class GameUI {
             <p class="small">${zoneTxt}</p>
             <div class="row" style="margin-top:6px">${zoneBtn}</div>`;
     }
+    // Doctrina de una ofensiva (D6): la doctrina (con la recomendada mientras se reúne), la anchura del frente y la logística,
+    // con lo último que hicieron sus obras.
+    doctrineSection(op, members) {
+        const g = this.game, seg = (key, cur, items) => `<div class="seg">${items.map(([v, l, t]) => `<button data-action="op-set" data-id="${op.id}" data-key="${key}" data-value="${v}" class="${cur === v ? 'on' : ''}" title="${esc(t)}">${l}</button>`).join('')}</div>`;
+        const rec = op.phase !== 'avance' ? g.suggestDoctrine(op, members) : null, R = g.opLaneWidth(op);
+        const work = Math.round((op.gold ?? 0) * (op.logistics ?? 0) / 100);
+        const w = op._work, recent = w && w.turn >= g.turn - 1;
+        const did = !recent ? '' : w.repaired || w.built ? `Logística: ${[w.repaired ? `repara ${plural(w.repaired, 'tramo roto', 'tramos rotos')} del pasillo` : '', w.built ? `abre ${plural(w.built, 'tramo', 'tramos')} de carretera hacia la punta` : ''].filter(Boolean).join(' y ')} (${w.cost} de oro).`
+            : w.why ? `Logística sin obras: ${esc(w.why)}.` : '';
+        const lane = g.opCorridor(op);
+        let works = 0;
+        for (const [k, x] of g.roadWork) if (x.owner === op.owner && lane.has(Math.floor(k / 6))) works++;
+        return `<p class="group-title">Doctrina</p>
+            ${seg('doctrine', op.doctrine, Object.entries(OP_DOCTRINES).map(([k, v]) => [k, v.name, v.desc]))}
+            <p class="small" style="margin-top:6px">${esc(OP_DOCTRINES[op.doctrine].desc)}</p>
+            ${rec ? `<p class="small muted">${rec.key === op.doctrine ? 'Es la recomendada' : `Recomendada: ${OP_DOCTRINES[rec.key].name}`}${rec.why ? `, porque ${esc(rec.why)}` : ''}. La doctrina no cambia sola.</p>` : ''}
+            <p class="group-title">Anchura del frente</p>
+            ${seg('width', op.width, Object.keys(OP_WIDTHS).map(k => [k, k[0].toUpperCase() + k.slice(1), `${Math.max(kmCells(OP_WIDTHS[k]), OP_WIDTH_MIN[k])} casillas a cada lado de la flecha`]))}
+            <p class="note">El pasillo llega a ${plural(R, 'casilla', 'casillas')} a cada lado de la flecha (${OP_WIDTHS[op.width]} km).</p>
+            <p class="group-title">Logística</p>
+            ${seg('logistics', op.logistics, OP_LOGISTICS.map(v => [v, `${v} %`, v ? `El ${v} % del oro de la operación va a reparar y abrir carreteras hacia la punta` : 'Todo el oro de la operación va a refuerzos']))}
+            <p class="note">${op.logistics ? `${work} de oro por turno van a obras (fondo: ${op.workPool ?? 0}); primero repara los tramos rotos del pasillo y luego abre carretera hacia la punta.${op.gold ? '' : ' La operación no tiene oro: dáselo en Refuerzos.'}`
+                : 'Sin logística: todo el oro de la operación va a refuerzos.'}${works ? ` ${plural(works, 'tramo', 'tramos')} en reparación en el pasillo.` : ''}</p>
+            ${did ? `<p class="small">${did}</p>` : ''}`;
+    }
+    // Filas de los ejércitos de una operación. En una punta de lanza o un frente amplio en marcha, por escalones (punta o
+    // frente, y seguimiento), cada uno con el botón para pasarlo al otro.
+    memberRows(op, members, units) {
+        const g = this.game, row = (a, swap) => `<div class="op-member${swap ? ' ech' : ''}"><button class="link" data-action="goto" data-cell="${a.cell}">${esc(g.placeName(a.cell))}</button>
+            <span class="small muted">${units(a)}${a.order ? ' · con orden propia' : ''}</span>
+            ${swap ? `<button class="btn" data-action="op-set" data-id="${op.id}" data-key="echelon:${a.id}" data-value="${swap[0]}" title="Pasarlo ${swap[1]}">${swap[2]}</button>` : ''}
+            <button class="btn ghost" data-action="op-unassign" data-army="${a.id}" title="Sacarlo de la operación" aria-label="Quitar">✕</button></div>`;
+        if (op.kind !== 'ofensiva' || op.doctrine === 'asalto' || op.phase !== 'avance' || !members.length) return members.map(a => row(a)).join('');
+        const wide = op.doctrine === 'amplio', head = wide ? 'Frente' : 'Punta';
+        const tip = members.filter(a => g.opEchelon(op, a) === 'punta'), rest = members.filter(a => g.opEchelon(op, a) !== 'punta');
+        return `<p class="op-sub">${head} (${tip.length})</p>${tip.map(a => row(a, ['seguimiento', 'al seguimiento', '→ seguimiento'])).join('') || '<p class="note">Nadie.</p>'}
+            <p class="op-sub">Seguimiento (${rest.length})</p>${rest.map(a => row(a, ['punta', wide ? 'al frente' : 'a la punta', wide ? '→ frente' : '→ punta'])).join('') || '<p class="note">Nadie.</p>'}`;
+    }
+    // Lo de detrás de una ofensiva (D6): franjas del frente amplio, bolsas sorteadas, guarniciones dejadas y avisos.
+    rearSection(op) {
+        const g = this.game, out = [], goto = c => `<button class="link" data-action="goto" data-cell="${c}">${esc(g.placeName(c))}</button>`;
+        if (op.doctrine === 'amplio' && op.phase === 'avance') {
+            const lanes = g.opLanes(op);
+            out.push(`<p class="group-title">Franjas (${lanes.length})</p><div class="op-members">${lanes.map((L, i) => {
+                const m = L.member ? g.armies.get(L.member) : null;
+                const st = L.stalled ? `<span class="small warn-text">Masa enemiga en la franja ${i + 1}: el frente se detiene ahí</span>`
+                    : L.shift >= 0 ? `<span class="small warn-text">Masa enemiga: se aparta a la franja ${L.shift + 1}</span>` : `<span class="small muted">${m ? 'avanza' : 'sin ejército'}</span>`;
+                return `<div class="op-member"><span class="small"><b>Franja ${i + 1}</b></span>${m ? goto(m.cell) : '<span></span>'}${st}</div>`;
+            }).join('')}</div>`);
+            const obj = op.cells[op.cells.length - 1];
+            if (g.owner[obj] === op.owner) {
+                const left = g.opWideLeft(op);
+                if (left.length) out.push(`<p class="small warn-text" style="margin-top:6px">${esc(g.placeName(obj))} es tuya, pero quedan ${plural(left.length, 'provincia', 'provincias')} en el pasillo (${left.map(c => esc(PROVINCES[CITY_OF[c]].cityName)).join(', ')}). Si pasan ${OP_WIDE_IDLE} turnos sin tomar ni asediar ninguna, termina (lleva ${op.wideIdle ?? 0}).</p>`);
+            }
+        }
+        const pockets = (op.pockets ?? []).filter(c => { const e = g.armyOn(c); return e && g.atWar(op.owner, e.owner); });
+        if ((op.pockets ?? []).length) out.push(`<p class="group-title">Bolsas (${op.pockets.length})</p><div class="op-members">${op.pockets.map(c => {
+            const e = g.armyOn(c);
+            return `<div class="op-member">${goto(c)}<span class="small muted">${e && pockets.includes(c) ? (v => `ejército enemigo ${v.n !== null ? `de ${v.n}` : v.echelon} sorteado: el seguimiento lo limpia o lo cerca`)(g.armyView(op.owner, e)) : 'ya no queda nadie'}</span><span></span></div>`;
+        }).join('')}</div>`);
+        if ((op.garrisons ?? []).length) out.push(`<p class="group-title">Guarniciones (${op.garrisons.length})</p><div class="op-members">${op.garrisons.map(c => {
+            const sg = g.sieges.get(c);
+            return `<div class="op-member">${goto(c)}<span class="small muted">${sg?.by === op.owner ? `mantiene el asedio: ${sg.held} de ${g.rules(op.owner).siegeTurns} turnos` : 'asedio terminado'}</span><span></span></div>`;
+        }).join('')}</div>`);
+        return out.join('');
+    }
     // Pestaña Mando: operaciones del jugador y la abierta, con sus ejércitos y ajustes.
     renderCommand() {
         const g = this.game, p0 = g.player, body = $('#drawer-body'), ops = g.opsOf(p0), cap = g.commandCap(p0);
@@ -13768,11 +13987,11 @@ class GameUI {
                 <p class="small" style="margin-top:6px">${OP_KINDS[op.kind].name} desde el turno ${op.since}. ${where}.</p>
                 ${front}
                 ${op.kind === 'ofensiva' ? this.phaseSection(op, members) : ''}
+                ${op.kind === 'ofensiva' ? this.doctrineSection(op, members) : ''}
                 <p class="group-title">Ejércitos (${members.length}) · ataque ${Math.round(atk)}, defensa ${Math.round(def)}</p>
-                <div class="op-members">${members.map(a => `<div class="op-member"><button class="link" data-action="goto" data-cell="${a.cell}">${esc(g.placeName(a.cell))}</button>
-                    <span class="small muted">${units(a)}${a.order ? ' · con orden propia' : ''}</span>
-                    <button class="btn ghost" data-action="op-unassign" data-army="${a.id}" title="Sacarlo de la operación" aria-label="Quitar">✕</button></div>`).join('') || '<p class="note">Sin ejércitos. Añade los cercanos o asígnalos desde su ficha.</p>'}</div>
+                <div class="op-members">${this.memberRows(op, members, units) || '<p class="note">Sin ejércitos. Añade los cercanos o asígnalos desde su ficha.</p>'}</div>
                 <button class="btn" style="margin-top:6px" data-action="op-add-near" data-id="${op.id}" ${near ? '' : 'disabled'}>Añadir los ${near || ''} ${op.kind === 'ofensiva' ? `libres a ${OP_GATHER_TURNS} turnos de marcha` : 'cercanos sin operación'}</button>
+                ${op.kind === 'ofensiva' ? this.rearSection(op) : ''}
                 ${this.opAirSection(op)}
                 ${op.kind === 'reserva' ? '' : `<p class="group-title">Postura</p><div class="seg">${OP_STANCES.map(([v, l, t]) => `<button data-action="op-set" data-id="${op.id}" data-key="ratio" data-value="${v}" class="${op.ratio === v ? 'on' : ''}" title="${t}">${l}</button>`).join('')}</div>`}
                 <p class="group-title">Automatización</p>

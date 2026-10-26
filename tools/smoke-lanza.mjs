@@ -245,6 +245,24 @@ const setup = () => {
             g.opLaunch(op);
             return { g, es, fr, op, xs };
         },
+        // Partida con Portugal de jugador y España (IA) en guerra con Francia, sin ejércitos de ninguna de las dos: el plan
+        // de ataque de la IA, { g, es, fr, S: salida, O: objetivo }.
+        aiFront() {
+            const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+            g.start(T.nation('pt')); g.declareWar(es, fr);
+            for (const a of [...g.armies.values()]) if (a.owner === es || a.owner === fr) g.removeArmy(a);
+            const plan = g.frontPlan(es, fr);
+            T.ok(plan?.attack, 'plan de ataque');
+            return { g, es, fr, S: plan.attack[0], O: plan.attack[1] };
+        },
+        // Flecha de `len` casillas por la meseta, de cerca de Madrid hacia el este (para las capturas): [salida, objetivo].
+        meseta(g, es, len) {
+            const mad = g.nations[es].capitalCell;
+            const S = [...g.nearCells(mad, 3)].filter(([c, d]) => d === 3 && isLand(c) && T.free(g, c)).sort((x, y) => G.cx[y[0]] - G.cx[x[0]])[0][0];
+            const east = c => (G.cx[c] - G.cx[S]) - 2 * Math.abs(G.cy[c] - G.cy[S]);
+            const O = [...g.nearCells(S, len)].filter(([c, d]) => d === len && isLand(c) && CITY_OF[c] < 0).sort((x, y) => east(y[0]) - east(x[0]))[0][0];
+            return [S, O];
+        },
         // Empieza una partida en la interfaz con el país dado y devuelve su motor.
         uiStart(key, fog = false) {
             for (const d of document.querySelectorAll('dialog[open]')) d.close();
@@ -996,6 +1014,229 @@ const CHECKS = [
         T.ok(!after.some(l => l.member === gone.id), 'sin el que se fue');
         return true;
     }],
+    ['D4 · con el objetivo tomado, termina a los 6 turnos sin tomar provincias', () => {
+        // Una ciudad del pasillo demasiado defendida para el frente amplio: el objetivo ya es suyo y no toma nada más.
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        let X = -1, S = -1, O = -1;
+        for (const p of PROVINCES) {
+            if (g.owner[p.city] !== es || CAPITAL_OF[p.city] >= 0 || !p.cells.every(c => g.owner[c] === es)) continue;
+            const ok = c => isLand(c) && T.free(g, c) && g.owner[c] === es && G.prov[c] !== p.id && CELL_TERRAIN[c] === 'plain';
+            for (const [s, d] of g.nearCells(p.city, 3)) {
+                if (d !== 3 || !ok(s)) continue;
+                const o = [...g.nearCells(s, 2)].find(([c, k]) => k === 2 && ok(c) && hexDist(c, p.city) >= 3)?.[0];
+                if (o !== undefined && T.clearRoute(g, es, [s, o], 1)) { X = p.city; S = s; O = o; break; }
+            }
+            if (X >= 0) break;
+        }
+        T.ok(X >= 0, 'ciudad cerca de la flecha');
+        const P = PROVINCES[CITY_OF[X]];
+        for (const c of P.cells) { const x = g.armyOn(c); if (x) g.removeArmy(x); g.owner[c] = fr; g.legal[c] = fr; }
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        T.army(g, fr, X, 80, 0, 0);   // demasiado para el frente
+        const op = g.createOp(es, 'ofensiva', [S, O], { doctrine: 'amplio', width: 'estrecha' });
+        g.assignArmy(T.army(g, es, S, 8, 4, 0), op.id);
+        g.opLaunch(op);
+        T.eq(g.opWideLeft(op), [X], 'queda una provincia en el pasillo');
+        let t = 0;
+        for (; t < 8 && g.owner[O] !== es; t++) T.turns(g, es, 1);
+        T.ok(g.owner[O] === es && g.ops.has(op.id), 'toma el objetivo y sigue');
+        // Guardar y cargar no pierde la cuenta.
+        T.turns(g, es, 2);
+        T.ok(op.wideIdle >= 1 && op.wideIdle < 6 && op.wideLast === 1, `cuenta los turnos sin tomar nada (${op.wideIdle})`);
+        const data = JSON.parse(JSON.stringify(g.serialize())), h = GameEngine.load(JSON.parse(JSON.stringify(data)));
+        T.eq([h.ops.get(op.id).wideIdle, h.ops.get(op.id).wideLast], [op.wideIdle, op.wideLast], 'la cuenta se guarda');
+        for (const o of data.ops) { delete o.wideIdle; delete o.wideLast; }
+        const k = GameEngine.load(data).ops.get(op.id);
+        T.eq([k.wideIdle, k.wideLast], [0, -1], 'las viejas, sin cuenta');
+        for (t = 0; t < 8 && g.ops.has(op.id); t++) T.turns(g, es, 1);
+        T.ok(!g.ops.has(op.id), 'termina');
+        T.ok(g.owner[X] === fr, 'sin tomar la ciudad');
+        T.ok(g.logs.some(l => l.msg.includes('queda 1 ciudad demasiado defendida en el pasillo')), 'el parte dice por qué');
+        // Tomar una provincia pone la cuenta a cero.
+        const op2 = g.createOp(es, 'ofensiva', [S, O], { doctrine: 'amplio', width: 'estrecha' });
+        Object.assign(op2, { phase: 'avance', wideIdle: 4, wideLast: 2 });
+        g.executeOp(op2);
+        T.eq([op2.wideIdle, op2.wideLast], [0, 1], 'con una provincia menos, a cero');
+        return true;
+    }],
+    ['D5 · la IA elige punta con tanques contra un enemigo sin masas', () => {
+        const { g, es, fr, S, O } = T.aiFront();
+        T.ok(CAPITAL_OF[O] < 0 && !g.fort[O], 'objetivo ni capital ni fortificado');
+        // Dos tercios del ataque, rápido (tanques); el enemigo, sin ejércitos.
+        for (const [i, c] of T.cellsAt(g, es, S, [1, 1, 2]).entries()) T.army(g, es, c, i === 2 ? 12 : 0, i === 2 ? 0 : 8, 0);
+        g.aiCommand(es);
+        const op = g.opsOf(es).find(o => o.kind === 'ofensiva');
+        T.ok(op, 'la IA crea la ofensiva');
+        T.eq(g.opMembers(op).length, 3, 'con sus tres ejércitos');
+        T.eq([op.doctrine, op.width, op.logistics], ['lanza', 'estrecha', 50], 'punta de lanza, con su logística');
+        const s = g.suggestDoctrine(op);
+        T.eq(s.key, 'lanza', 'la misma regla');
+        T.ok(s.why.includes('rápid') && s.why.includes('masas'), `con su motivo (${s.why})`);
+        // Con una masa enemiga mayor que la suya en el pasillo, ya no.
+        const near = [...g.opCorridor(op)].find(c => isLand(c) && g.owner[c] === fr && T.free(g, c));
+        T.army(g, fr, near, 60, 10, 0);
+        T.eq(g.suggestDoctrine(op).key, 'asalto', 'contra una masa mayor, asalto');
+        return true;
+    }],
+    ['D5 · frente amplio contra un vecino débil', () => {
+        const { g, es, fr, S, O } = T.aiFront();
+        for (const c of T.cellsAt(g, es, S, [1, 1, 2, 2])) T.army(g, es, c, 12, 0, 0);   // solo infantería
+        T.army(g, fr, O, 3, 0, 0);   // una guarnición pequeña
+        g.aiCommand(es);
+        const op = g.opsOf(es).find(o => o.kind === 'ofensiva');
+        T.ok(op, 'la IA crea la ofensiva');
+        T.eq([op.doctrine, op.width, op.logistics], ['amplio', 'amplia', 50], 'frente amplio');
+        T.ok(g.suggestDoctrine(op).why.includes('débil'), 'por ser débil');
+        // La IA decide mientras se reúne; una vez en marcha no la cambia.
+        if (op.phase !== 'avance') g.opLaunch(op);
+        const far = [...g.opCorridor(op)].find(c => isLand(c) && g.owner[c] === fr && T.free(g, c));
+        T.army(g, fr, far, 90, 0, 0);
+        T.eq(g.suggestDoctrine(op).key, 'asalto', 'ya no es débil');
+        g.aiCommand(es);
+        T.eq(op.doctrine, 'amplio', 'en marcha no cambia');
+        return true;
+    }],
+    ['D5 · asalto contra una capital fortificada', () => {
+        const { g, es, fr, S, O } = T.aiFront();
+        const cap = g.nations[fr].capitalCell;
+        g.fort[cap] = 2;
+        for (const c of T.cellsAt(g, es, S, [1, 1, 2])) T.army(g, es, c, 0, 8, 0);   // todo tanques, y el enemigo sin ejércitos
+        const op = g.createOp(es, 'ofensiva', [S, cap], { auto: 'auto' });
+        op.front = fr;
+        g.aiCommand(es);
+        T.ok(g.ops.has(op.id) && g.opMembers(op).length === 3, 'con sus ejércitos');
+        T.eq([op.doctrine, op.width, op.logistics], ['asalto', 'estrecha', 0], 'asalto');
+        T.ok(g.suggestDoctrine(op).why.includes('capital'), 'por ser capital');
+        // Una ciudad que no es capital pero está fortificada, también.
+        const op2 = g.createOp(es, 'ofensiva', [S, O], { noCap: true });
+        T.eq(g.suggestDoctrine(op2, g.opMembers(op)).key, 'lanza', 'sin fortificar, punta');
+        g.fort[O] = 1;
+        const s = g.suggestDoctrine(op2, g.opMembers(op));
+        T.ok(s.key === 'asalto' && s.why.includes('fortificad'), `fortificada, asalto (${s.why})`);
+        // Sin ejércitos aún, asalto.
+        T.eq(g.suggestDoctrine(op2, []).key, 'asalto', 'sin ejércitos');
+        return true;
+    }],
+    ['D6 · al dibujar sale preseleccionada la recomendada con su motivo, y el jugador elige otra', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        for (const a of [...g.armies.values()]) if (a.owner === es || a.owner === fr) g.removeArmy(a);
+        const [S, O] = T.straight(g, es, 8);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        for (const c of T.cellsAt(g, es, S, [0, 1, 1])) T.army(g, es, c, 0, 6, 0);   // tanques: punta de lanza
+        const rec = g.draftDoctrine(es, [S, O]);
+        T.eq(rec.key, 'lanza', 'recomienda la punta');
+        const draw = () => { ui.setTool('op', { kind: 'ofensiva', cells: [], redraw: null }); ui.clickCell(S); ui.clickCell(O); };
+        draw();
+        const card = () => document.querySelector('#card');
+        let on = card().querySelector('[data-action="op-doctrine"].on');
+        T.eq(on?.dataset.value, 'lanza', 'preseleccionada');
+        T.ok(on.textContent.includes('recomendada'), 'marcada como recomendada');
+        T.ok(card().textContent.includes(rec.why), 'con su motivo');
+        T.ok(Object.values(OP_DOCTRINES).every(d => card().textContent.includes(d.name) && card().textContent.includes(d.desc)), 'cada una con su explicación');
+        card().querySelector('[data-action="op-doctrine"][data-value="amplio"]').click();
+        on = card().querySelector('[data-action="op-doctrine"].on');
+        T.eq(on.dataset.value, 'amplio', 'el jugador elige otra');
+        T.ok(card().querySelector('[data-action="op-doctrine"][data-value="lanza"]').textContent.includes('recomendada'), 'la recomendada sigue marcada');
+        ui.opClick(O);   // otro clic (en el mismo punto) no le cambia la elección
+        T.eq(card().querySelector('[data-action="op-doctrine"].on').dataset.value, 'amplio', 'se queda la suya');
+        card().querySelector('[data-action="op-create"]').click();
+        const op = g.opsOf(es).find(o => o.kind === 'ofensiva');
+        T.eq([op.doctrine, op.width, op.logistics], ['amplio', 'amplia', 50], 'la creada lleva la elegida');
+        // Sin tocarla, la recomendada.
+        g.endOp(op);
+        draw();
+        card().querySelector('[data-action="op-create"]').click();
+        const op2 = g.opsOf(es).find(o => o.kind === 'ofensiva');
+        T.eq([op2.doctrine, op2.width, op2.logistics], ['lanza', 'estrecha', 50], 'sin tocarla, la recomendada');
+        // Las otras clases de operación no tienen doctrina.
+        ui.setTool('op', { kind: 'defensa', cells: [], redraw: null });
+        T.ok(!card().querySelector('[data-action="op-doctrine"]'), 'la defensa no la tiene');
+        return true;
+    }],
+    ['D6 · la doctrina elegida por el jugador no cambia sola en los turnos siguientes', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        for (const a of [...g.armies.values()]) if (a.owner === es || a.owner === fr) g.removeArmy(a);
+        const [S, O] = T.straight(g, es, 10);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        for (const c of T.cellsAt(g, es, S, [0, 1, 1])) T.army(g, es, c, 0, 8, 0);
+        const op = g.playerCreateOp('ofensiva', [S, O], { doctrine: 'asalto' });
+        T.eq(g.opMembers(op).length, 3, 'con sus ejércitos');
+        T.eq(g.suggestDoctrine(op).key, 'lanza', 'la recomendada es otra');
+        g.playerOpSet(op, 'width', 'media'); g.playerOpSet(op, 'logistics', 25);
+        const pick = () => [op.doctrine, op.width, op.logistics];
+        for (let t = 0; t < 4 && g.ops.has(op.id); t++) {
+            g.endTurn();
+            T.eq(pick(), ['asalto', 'media', 25], `turno ${t + 1}`);
+        }
+        T.ok(op.phase === 'avance', 'ya en marcha');
+        // Una punta elegida contra la recomendación, igual.
+        const op2 = g.playerCreateOp('ofensiva', [S, O], { doctrine: 'lanza' });
+        g.playerOpSet(op2, 'logistics', 0);
+        for (const a of g.opMembers(op)) { g.assignArmy(a, op2.id); a.units = { infantry: 20, tank: 0, artillery: 0, antiair: 0 }; }
+        g.endOp(op);
+        T.ok(g.suggestDoctrine(op2).key !== 'lanza', 'la recomendada ya es otra');
+        g.endTurn(); g.endTurn();
+        T.eq([op2.doctrine, op2.width, op2.logistics], ['lanza', 'estrecha', 0], 'sigue la suya');
+        return true;
+    }],
+    ['D6 · cambiar doctrina en la ficha', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 9);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.playerCreateOp('ofensiva', [S, O]);
+        ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        const body = () => document.querySelector('#drawer-body'), click = (k, v) => body().querySelector(`[data-action="op-set"][data-key="${k}"][data-value="${v}"]`).click();
+        T.ok(body().textContent.includes('Doctrina') && body().textContent.includes(OP_DOCTRINES.asalto.desc), 'la ficha enseña la doctrina');
+        T.ok(body().querySelector('[data-action="op-set"][data-key="doctrine"][data-value="asalto"]').classList.contains('on'), 'la suya, marcada');
+        click('doctrine', 'lanza');
+        T.eq([op.doctrine, op.width, op.logistics], ['lanza', 'estrecha', 50], 'punta de lanza, con sus valores de serie');
+        T.ok(body().textContent.includes(OP_DOCTRINES.lanza.desc), 'y su explicación');
+        click('width', 'media');
+        click('logistics', 75);
+        T.eq([op.doctrine, op.width, op.logistics], ['lanza', 'media', 75], 'anchura y logística a mano');
+        T.ok(body().querySelector('[data-action="op-set"][data-key="width"][data-value="media"]').classList.contains('on'), 'anchura marcada');
+        T.ok(body().textContent.includes('casillas a cada lado'), 'dice cuántas casillas');
+        click('doctrine', 'amplio');
+        T.eq([op.doctrine, op.width, op.logistics], ['amplio', 'amplia', 50], 'frente amplio');
+        return true;
+    }],
+    ['D6 · pasar un miembro de escalón', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        for (const a of [...g.armies.values()]) if (a.owner === es || a.owner === fr) g.removeArmy(a);
+        const [S, O] = T.straight(g, es, 10);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const [c0, c1, c2] = T.cellsAt(g, es, S, [0, 1, 1]);
+        const tk = T.army(g, es, c0, 0, 8, 0), in1 = T.army(g, es, c1, 10, 0, 0);
+        T.army(g, es, c2, 10, 0, 0);
+        const op = g.playerCreateOp('ofensiva', [S, O], { doctrine: 'lanza' });
+        g.playerLaunchOp(op);
+        T.eq([g.opEchelon(op, tk), g.opEchelon(op, in1)], ['punta', 'seguimiento'], 'al lanzar');
+        // Bolsas, guarniciones y obras, en la ficha.
+        const P = PROVINCES.find(p => g.owner[p.city] === es && CAPITAL_OF[p.city] < 0);
+        op.pockets = [O]; op.garrisons = [P.city]; op._work = { turn: g.turn, repaired: 2, built: 3, cost: 40, why: '' };
+        ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        const body = () => document.querySelector('#drawer-body');
+        T.ok(body().textContent.includes('Punta (1)') && body().textContent.includes('Seguimiento (2)'), 'escalones en la ficha');
+        T.ok(body().textContent.includes('Bolsas') && body().textContent.includes(g.placeName(O)), 'bolsas');
+        T.ok(body().textContent.includes('Guarniciones') && body().textContent.includes(P.cityName), 'guarniciones');
+        T.ok(body().textContent.includes('2 tramos rotos') && body().textContent.includes('3 tramos'), 'obras');
+        body().querySelector(`[data-action="op-set"][data-key="echelon:${in1.id}"][data-value="punta"]`).click();
+        T.eq(g.opEchelon(op, in1), 'punta', 'pasa a la punta');
+        T.ok(body().textContent.includes('Punta (2)') && body().textContent.includes('Seguimiento (1)'), 'la ficha lo dice');
+        body().querySelector(`[data-action="op-set"][data-key="echelon:${tk.id}"][data-value="seguimiento"]`).click();
+        T.eq(g.opEchelon(op, tk), 'seguimiento', 'y vuelve');
+        // Se dibuja en las dos vistas sin errores, con la punta, las bolsas y las franjas de un frente amplio.
+        ui.view.setMode('sencilla'); ui.view.draw();
+        g.playerOpSet(op, 'doctrine', 'amplio');
+        g.opLanes(op); ui.render(); ui.view.draw();
+        T.ok(body().textContent.includes('Franjas') && body().textContent.includes('Frente ('), 'franjas en la ficha');
+        return true;
+    }],
 ];
 
 const exe = process.env.CHROME ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome'].find(existsSync);
@@ -1016,6 +1257,103 @@ try {
         else { failed++; console.log(`FALLA ${name}\n      ${String(result).split('\n').slice(0, 3).join('\n      ')}`); }
     }
     if (errors.length) { failed++; console.log(`FALLA errores en la página:\n      ${errors.join('\n      ')}`); }
+    // Capturas de las doctrinas (D6), en las dos vistas: una punta de lanza con su seguimiento, una bolsa y obras de
+    // logística; un frente amplio con sus franjas; la tarjeta de dibujo con la recomendada; y la ficha, en escritorio y
+    // en el móvil.
+    const D_SHOTS = 'D6 · capturas de la punta de lanza y el frente amplio';
+    if (!filter || D_SHOTS.includes(filter)) {
+        ran++;
+        const out = join(root, 'tools/cache/smoke');
+        mkdirSync(out, { recursive: true });
+        const sp = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+        const errs = [], names = [];
+        sp.on('pageerror', e => errs.push(e.message));
+        await sp.goto(`http://localhost:${port}/?seed=7`);
+        await sp.waitForFunction(() => typeof GameEngine === 'function' && typeof ui === 'object');
+        await sp.evaluate(setup);
+        const shot = async (name, mode, fn) => {
+            await sp.evaluate(m => { ui.prefs.view = m; ui.view.setMode(m); }, mode);
+            if (mode === 'realista') await sp.waitForFunction(() => ui.view.realistic.state === 'ready' || ui.view.realistic.state === 'failed', null, { timeout: 60000 });
+            if (fn) await sp.evaluate(fn);
+            await sp.waitForTimeout(mode === 'realista' ? 1500 : 300);
+            await sp.evaluate(() => ui.view.draw());
+            await sp.screenshot({ path: join(out, name) });
+            names.push(name);
+        };
+        // Punta de lanza: dos de tanques en la punta y tres de infantería detrás, ya en marcha; una bolsa sorteada y tramos
+        // rotos del pasillo en obra.
+        await sp.evaluate(() => {
+            const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+            g.declareWar(es, fr);
+            for (const a of [...g.armies.values()]) if (a.owner === es || a.owner === fr) g.removeArmy(a);
+            const [S, O] = T.meseta(g, es, 15);
+            const op = g.createOp(es, 'ofensiva', [S, O], { doctrine: 'lanza', gold: 100 });
+            for (const c of g.opCorridor(op)) if (isLand(c) && CAPITAL_OF[c] < 0) { const x = g.armyOn(c); if (x) g.removeArmy(x); if (g.opAlong(op, c) >= 4) { g.owner[c] = fr; g.legal[c] = fr; } }
+            g.version++;
+            const cs = T.cellsAt(g, es, S, [0, 1, 1, 2, 2]);
+            const xs = cs.map((c, i) => T.army(g, es, c, i < 2 ? 0 : 18, i < 2 ? 12 : 0, i < 2 ? 0 : 4));
+            for (const a of xs) g.assignArmy(a, op.id);
+            g.opLaunch(op);
+            T.turns(g, es, 6);
+            const tip = Math.max(...xs.filter(a => g.armies.has(a.id) && g.opEchelon(op, a) === 'punta').map(a => g.opAlong(op, a.cell)));
+            const back = Math.max(...xs.filter(a => g.armies.has(a.id) && g.opEchelon(op, a) !== 'punta').map(a => g.opAlong(op, a.cell)));
+            const pk = [...g.opCorridor(op)].find(c => isLand(c) && T.free(g, c) && g.owner[c] === fr && Math.abs(g.opPerp(op, c)) >= 1.5 && g.opAlong(op, c) > back && g.opAlong(op, c) < tip - 0.5);
+            if (pk !== undefined) { T.army(g, fr, pk, 9, 2, 0); op.pockets.push(pk); }
+            const C = T.roadAt(g, op, S, O, 2);
+            g.breakRoads(C);
+            op.workPool = 500; g.nations[es].gold = 5000;
+            g.opLogistics(op, { notes: [] });
+            g.motion.length = 0; ui.view.motion.clear();   // sin la animación de los turnos pasados
+            window.SHOT = { op: op.id, S, O, mid: G.cellAt(G.cx[S] * 0.6 + G.cx[O] * 0.4, G.cy[S] * 0.6 + G.cy[O] * 0.4) };
+            ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.select(-1); ui.render();
+        });
+        for (const mode of ['sencilla', 'realista']) await shot(`lanza-punta-${mode}.png`, mode, () => { ui.view.scale = 26 / G.S; ui.view.centerOn(SHOT.mid, 26); ui.view.ox -= 170; ui.render(); });
+        await sp.setViewportSize({ width: 390, height: 844 });
+        await shot('lanza-ficha-movil.png', 'sencilla', () => { ui.setSheet('grande'); ui.drawerOpen = true; ui.render(); document.querySelector('#drawer-body').scrollTop = 520; });
+        await sp.setViewportSize({ width: 1200, height: 800 });
+        await shot('lanza-ficha.png', 'sencilla', () => { ui.drawerOpen = true; ui.render(); document.querySelector('#drawer-body').scrollTop = 480; });
+        // Frente amplio: cuatro rápidos en el frente y dos lentos detrás, con una masa enemiga en una franja.
+        await sp.evaluate(() => {
+            const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+            g.declareWar(es, fr);
+            for (const a of [...g.armies.values()]) if (a.owner === es || a.owner === fr) g.removeArmy(a);
+            const [S, O] = T.meseta(g, es, 14);
+            const op = g.createOp(es, 'ofensiva', [S, O], { doctrine: 'amplio', width: 'media', gold: 100 });
+            for (const c of g.opCorridor(op)) if (isLand(c) && CAPITAL_OF[c] < 0) { const x = g.armyOn(c); if (x) g.removeArmy(x); if (g.opAlong(op, c) >= 3) { g.owner[c] = fr; g.legal[c] = fr; } }
+            g.version++;
+            const cs = T.cellsAt(g, es, S, [0, 1, 1, 1, 2, 2]);
+            const xs = cs.map((c, i) => T.army(g, es, c, i < 4 ? 0 : 20, i < 4 ? 8 : 0, 0));
+            for (const a of xs) g.assignArmy(a, op.id);
+            g.opLaunch(op);
+            const lanes = g.opLanes(op), L = lanes[lanes.length - 1];
+            const mass = [...L.cells].find(c => isLand(c) && T.free(g, c) && g.opAlong(op, c) >= 7 && g.opAlong(op, c) < 8);
+            if (mass !== undefined) T.army(g, fr, mass, 40, 10, 0);
+            T.turns(g, es, 5);
+            g.motion.length = 0; ui.view.motion.clear();   // sin la animación de los turnos pasados
+            window.SHOT = { op: op.id, S, O, mid: G.cellAt((G.cx[S] + G.cx[O]) / 2, (G.cy[S] + G.cy[O]) / 2) };
+            ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.select(-1); ui.render();
+            document.querySelector('#drawer-body').scrollTop = 99999;
+        });
+        for (const mode of ['sencilla', 'realista']) await shot(`lanza-amplio-${mode}.png`, mode, () => { ui.view.scale = 17 / G.S; ui.view.centerOn(SHOT.mid, 17); ui.view.ox -= 170; ui.render(); [...document.querySelectorAll('#drawer-body .group-title')].find(e => e.textContent.startsWith('Franjas'))?.scrollIntoView(); });
+        // Tarjeta de dibujo, con la recomendada preseleccionada y su motivo.
+        await sp.evaluate(() => {
+            const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+            g.declareWar(es, fr);
+            for (const a of [...g.armies.values()]) if (a.owner === es || a.owner === fr) g.removeArmy(a);
+            const [S, O] = T.straight(g, es, 9);
+            g.owner[O] = fr; g.legal[O] = fr; g.version++;
+            for (const c of T.cellsAt(g, es, S, [0, 1, 1])) T.army(g, es, c, 0, 8, 0);
+            ui.drawerOpen = false;
+            ui.setTool('op', { kind: 'ofensiva', cells: [], redraw: null }); ui.clickCell(S); ui.clickCell(O);
+            window.SHOT = { mid: G.cellAt((G.cx[S] + G.cx[O]) / 2, (G.cy[S] + G.cy[O]) / 2) };
+        });
+        await shot('lanza-dibujo.png', 'sencilla', () => { ui.view.scale = 20 / G.S; ui.view.centerOn(SHOT.mid, 20); ui.view.ox += 120; ui.render(); });
+        await sp.setViewportSize({ width: 390, height: 844 });
+        await shot('lanza-dibujo-movil.png', 'sencilla', () => { ui.render(); });
+        if (errs.length) { failed++; console.log(`FALLA ${D_SHOTS}\n      ${errs.join('\n      ')}`); }
+        else console.log(`ok    ${D_SHOTS} (${join(out, names[0])}, ${names.slice(1).join(', ')})`);
+        await sp.close();
+    }
 } finally {
     await browser.close();
     server.close();
