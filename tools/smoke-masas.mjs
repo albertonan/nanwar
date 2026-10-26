@@ -309,6 +309,21 @@ const CHECKS = [
         g.attackJoint(list, target);
         T.eq(g.owner[target], es, 'ganan');
         T.eq([g.armyOn(target)?.id, ship.cell, g.armyOn(ringSea)?.id], [land.id, ringSea, ship.id], 'entra el de tierra; el barco se queda');
+        // Todos desde el mar contra tierra: desembarca el de más ataque (como un barco solo) y el otro se queda a bordo.
+        g = T.game(); es = T.nation('es'); fr = T.nation('fr');
+        g.declareWar(es, fr);
+        const nbs = c => [0, 1, 2, 3, 4, 5].map(d => G.nb[c * 6 + d]).filter(j => j >= 0);
+        const coast = G.land.find(c => g.owner[c] === es && CITY_OF[c] < 0 && T.free(g, c) && nbs(c).filter(j => !isLand(j) && !g.armyAt[j]).length >= 2
+            && nbs(c).filter(isLand).every(j => T.free(g, j) && g.owner[j] === es));
+        g.owner[coast] = fr; g.legal[coast] = fr; g.version++;
+        const [s1, s2] = nbs(coast).filter(j => !isLand(j) && !g.armyAt[j]);
+        def = g.settle(g.newArmy(fr, coast, { infantry: 2, tank: 0, artillery: 0 }, 0));
+        const big = T.army(g, es, s1, 0, 0, 40), small = T.army(g, es, s2, 0, 0, 20);
+        const both = g.jointCandidates(es, coast);
+        T.eq(both.map(x => x.army.id).sort(), [big.id, small.id].sort(), 'los dos barcos pueden');
+        g.attackJoint(both, coast);
+        T.eq(g.owner[coast], es, 'ganan desde el mar');
+        T.eq([g.armyOn(coast)?.id, small.cell], [big.id, s2], 'desembarca el más fuerte; el otro se queda en el barco');
         return true;
     }],
     ['A3 · la IA suma ejércitos para atacar', () => {
@@ -702,6 +717,18 @@ const CHECKS = [
         T.eq(ui.selArmies().length, 0, 'nada');
         return true;
     }],
+    ['A4 · los muertos salen de watched; la espera del barco se guarda', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        const [c1, c2] = T.plainPair(g, es), a = T.army(g, es, c1, 3), b = T.army(g, es, c2, 3);
+        T.ok(g.setOrder(a, { kind: 'follow', target: b.id }) && g.watched.has(b.id), 'seguirlo lo vigila');
+        g.removeArmy(b);
+        T.ok(!g.watched.has(b.id), 'al morir deja de vigilarse');
+        a.seaWait = g.turn;
+        const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+        T.eq(h.armies.get(a.id).seaWait, g.turn, 'seaWait sobrevive a guardar y cargar');
+        return true;
+    }],
     ['A6 · oro de operación hasta 6400 y fondo mayor', () => {
         const g = T.game(), es = T.nation('es');
         g.start(es);
@@ -713,6 +740,11 @@ const CHECKS = [
         T.eq(op.pool, Math.max(6400 * 6, g.templateCost(es, TEMPLATES.campana.units) * 3), 'tope del fondo');
         const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
         T.eq([...h.ops.values()][0].gold, 6400, 'el oro sobrevive a guardar y cargar');
+        // La formación del ejército de campaña (más de 99 de un tipo) se carga entera.
+        g.stepReinforcements(es);
+        T.ok(op.form && op.form.units.infantry > 99, `formación de campaña: ${JSON.stringify(op.form?.units)}`);
+        const f2 = GameEngine.load(JSON.parse(JSON.stringify(g.serialize()))).ops.get(op.id).form;
+        T.eq([f2.units, f2.recruited, f2.pending], [op.form.units, op.form.recruited, op.form.pending], 'la formación sobrevive a guardar y cargar');
         return true;
     }],
     ['A4 · el cajón lista agrupaciones y sin agrupar', () => {
@@ -1163,6 +1195,28 @@ const CHECKS = [
         T.eq(out, OP_WAIT, `sale a los ${OP_WAIT} turnos`);
         T.ok(!op.body.includes(iso.id) && xs.every(a => op.body.includes(a.id)), 'sin el aislado');
         T.ok(g.logs.some(l => l.msg.includes('sin 1 ejército que no ha llegado')), 'el parte lo avisa');
+        return true;
+    }],
+    ['A5 · un miembro del grueso sin paso no congela la ofensiva', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+        g.start(es); g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 8, { m: 4 });
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O]);
+        // Uno, junto a la salida, encerrado por casillas portuguesas (neutrales): no tiene camino a ninguna parte.
+        const X = [...g.nearCells(S, 2)].find(([c, d]) => d === 2 && T.free(g, c) && g.owner[c] === es && g.opAlong(op, c) <= 0.5)[0];
+        for (let d = 0; d < 6; d++) { const j = G.nb[X * 6 + d]; if (j >= 0 && isLand(j) && !g.armyAt[j]) { g.owner[j] = pt; g.legal[j] = pt; } }
+        g.version++;
+        const t1 = T.army(g, es, S, 0, 6), t2 = T.army(g, es, [...g.nearCells(S, 1).keys()].find(c => c !== S && T.free(g, c) && g.owner[c] === es), 0, 6), stuck = T.army(g, es, X, 3);
+        for (const a of [t1, t2, stuck]) g.assignArmy(a, op.id);
+        T.ok(g.opReady(op).ready, 'reunidos, sale');
+        const logs0 = g.logs.length;
+        T.turns(g, es, 4);
+        T.ok(!g.ops.has(op.id) || Math.min(g.opAlong(op, t1.cell), g.opAlong(op, t2.cell)) > 3, `los carros avanzan: ${g.ops.has(op.id) && [t1, t2].map(a => g.opAlong(op, a.cell).toFixed(1))}`);
+        T.eq(stuck.cell, X, 'el encerrado sigue donde estaba');
+        T.ok(!g.ops.has(op.id) || !op.body.includes(stuck.id), 'ya no es del grueso');
+        const said = g.logs.slice(logs0).filter(l => l.msg.includes('1 ejército no tiene paso; siguen sin él'));
+        T.eq(said.length, 1, `el parte lo dice una vez: ${g.logs.slice(logs0).map(l => l.msg).join(' | ')}`);
         return true;
     }],
     ['A5 · ofensiva de una partida vieja carga en avance', () => {

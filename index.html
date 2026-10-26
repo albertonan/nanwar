@@ -780,6 +780,7 @@ const LINE_MAX_TURNS = 4;    // y, sumando todos, no se aleja más de la línea 
 const OP_MIN_ARMIES = 3;     // ejércitos que pide una ofensiva para empezar
 // Ofensivas por fases (A5): reunión en la salida de la flecha, avance juntos por su pasillo y asalto conjunto.
 const OP_WAIT = 8;           // turnos que la reunión espera a un ejército que no llega; luego sale sin él
+const OP_STALL = 2;          // turnos que un ejército del grueso puede seguir sin moverse (sin que nada lo frene) antes de dejar de marcar el paso
 const OP_LANE = 3;           // pasillo de la ofensiva: casillas a esta distancia o menos del trazado de la flecha
 const OP_LEAD = 2;           // ningún ejército termina el turno más adelantado que esto (a lo largo de la flecha) del más atrasado
 const OP_ZONE = 2;           // en la zona de reunión: a esta distancia o menos de su casilla (más si son muchos)
@@ -1341,6 +1342,7 @@ class GameEngine {
             armyGroups: [...this.armies.values()].filter(a => a.group).map(a => [a.id, a.group]),
             armyRein: [...this.armies.values()].filter(a => a.reinforce).map(a => [a.id, a.reinforce]),
             reinMarks: [...this.armies.values()].filter(a => a.rein).map(a => [a.id, a.rein]),
+            armySeaWait: [...this.armies.values()].filter(a => a.seaWait).map(a => [a.id, a.seaWait]),
             nextGroupId: this.nextGroupId,
             armyFrom: [...this.armies.values()].filter(a => a.from).map(a => [a.id, a.from]),
             orders: [...this.armies.values()].filter(a => a.order).map(a => [a.id, a.order.kind, a.order.dest, a.order.target, a.order.ratio, a.order.flee ? 1 : 0, a.order.since, a.order.stuck]),
@@ -1560,8 +1562,8 @@ class GameEngine {
             }
             const f = o.form;
             const zone = int(f?.zone, -1, G.N - 1, -1);
-            if (f && zone >= 0 && isLand(zone)) op.form = { name: str(f.name, 40), units: units(f.units), zone, recruited: units(f.recruited),
-                pending: list(f.pending).slice(0, 200).map(x => [int(x?.[0], -1, G.N - 1, -1), units(x?.[1])]).filter(([c]) => c >= 0 && CITY_OF[c] >= 0) };
+            if (f && zone >= 0 && isLand(zone)) op.form = { name: str(f.name, 40), units: units(f.units, TPL_MAX), zone, recruited: units(f.recruited, 1e7),
+                pending: list(f.pending).slice(0, 200).map(x => [int(x?.[0], -1, G.N - 1, -1), units(x?.[1], TPL_MAX)]).filter(([c]) => c >= 0 && CITY_OF[c] >= 0) };
         }
         g.nextOpId = Math.max(int(data.nextOpId, 1, 1e6, 1), ...[...g.ops.keys()].map(x => x + 1), 1);
         for (const x of list(data.armyForms)) {
@@ -1605,6 +1607,10 @@ class GameEngine {
         for (const x of list(data.armyRein)) {
             const a = g.armies.get(int(x?.[0], 1, 1e9, 0));
             if (a && !a.reinforce && (a.reinforce = reinOf(x?.[1]))) g.watched.add(a.id);
+        }
+        for (const x of list(data.armySeaWait)) {   // desde qué turno espera un barco junto a la costa (holdLanding, opHoldShip)
+            const a = g.armies.get(int(x?.[0], 1, 1e9, 0)), t = int(x?.[1], 0, g.turn, 0);
+            if (a && t) a.seaWait = t;
         }
         for (const x of list(data.reinMarks)) {
             const a = g.armies.get(int(x?.[0], 1, 1e9, 0)), k = str(x?.[1], 12), m = /^([ag])([1-9]\d{0,9})$/.exec(k);
@@ -3117,10 +3123,12 @@ class GameEngine {
         }
     }
     armyOn(cell) { const id = this.armyAt[cell]; return id ? this.armies.get(id) : null; }
-    removeArmy(a) {
+    // Con `back`, el ejército vuelve enseguida en otra casilla (retirada): sigue en `watched`.
+    removeArmy(a, back = false) {
         this.armyVersion++;
         if (this.armyAt[a.cell] === a.id) this.armyAt[a.cell] = 0;
         this.armies.delete(a.id);
+        if (!back) this.watched.delete(a.id);
     }
     settle(a) {
         this.armyVersion++;
@@ -4217,6 +4225,9 @@ class GameEngine {
     // todo lo que daría (por el paso de los demás o porque no hay sitio) toma de camino una casilla enemiga vacía del
     // pasillo si no se adelanta ni se queda atrás (opGrab); 4) los rezagados que han alcanzado al grueso pasan a contar
     // para los ataques.
+    // Un ejército del grueso en tierra sin camino a la meta (ni por el pasillo ni fuera), o que lleva OP_STALL turnos sin
+    // poder moverse sin que nadie lo frene ni tenga enemigo delante, deja de marcar el paso: vuelve a los rezagados y el
+    // parte lo dice una vez. `op.stall` (id → turnos atascado) no se guarda: tras cargar, la cuenta vuelve a empezar.
     opAdvance(op, free, tally, live) {
         const id = op.owner, last = op.cells.length - 1, lane = this.opCorridor(op);
         const members = this.opMembers(op), ids = new Set(members.map(a => a.id));
@@ -4225,6 +4236,8 @@ class GameEngine {
         const loose = new Set(free.map(a => a.id));
         const crew = members.filter(a => loose.has(a.id));
         const here = a => this.armies.has(a.id) && a.owner === id && a.op === op.id && this.armyOn(a.cell) === a;
+        const stall = op.stall ??= new Map();
+        for (const x of [...stall.keys()]) if (!ids.has(x)) stall.delete(x);
         // El grueso que marca el paso: los suyos en tierra que manda la operación (los barcos van a su ritmo).
         const pacers = () => crew.filter(a => body.has(a.id) && here(a) && !afloat(a.cell));
         const alongOf = a => this.opAlong(op, a.cell);
@@ -4242,6 +4255,14 @@ class GameEngine {
         const landState = () => { const g = pacers(); return !g.length ? 'none' : g.some(a => hexDist(a.cell, goal) <= 1) ? 'ready' : 'far'; };
         // 2) Asalto: cada casilla enemiga del pasillo a tiro del grueso, con todos los que pueden atacarla (A3).
         const short = this.opAssault(op, crew.filter(a => body.has(a.id)), landState, tally);
+        // Los atascados (sin un enemigo delante al que esperan poder atacar) salen del grueso, si en tierra queda alguien.
+        const noPath = a => this.opField(op, goal, a, true).to(a.cell) === Infinity && this.opField(op, goal, a, false).to(a.cell) === Infinity;
+        const landBody = pacers();
+        const stuck = landBody.filter(a => !short.has(a.id) && a.used < 999 && ((stall.get(a.id) ?? 0) >= OP_STALL || noPath(a)));
+        if (stuck.length && stuck.length < landBody.length) {
+            for (const a of stuck) { body.delete(a.id); stall.set(a.id, Math.max(OP_STALL, stall.get(a.id) ?? 0)); }
+            tally.notes.push(plural(stuck.length, 'ejército no tiene paso; siguen sin él', 'ejércitos no tienen paso; siguen sin ellos'));
+        }
         // 3) Marcha.
         const order = crew.filter(here).map(a => [a, afloat(a.cell) ? 1 : 0, alongOf(a)]).sort((x, y) => x[1] - y[1] || x[2] - y[2] || x[0].id - y[0].id).map(x => x[0]);
         let waiting = 0;
@@ -4263,12 +4284,17 @@ class GameEngine {
                 const grab = this.opGrab(op, a, f, r, lim, f.to(cell >= 0 ? cell : a.cell));
                 if (grab >= 0) cell = grab;
             }
-            if (cell >= 0) { this.moveArmy(a, cell, r); tally.moved++; }
-            else { this.reattach(a); if (!pick.held && short.has(a0.id)) waiting++; }
+            if (cell >= 0) { this.moveArmy(a, cell, r); tally.moved++; stall.delete(a0.id); }
+            else {
+                this.reattach(a);
+                if (!pick.held && short.has(a0.id)) waiting++;
+                if (!pick.held && !short.has(a0.id) && !afloat(a.cell) && a.used < 999) stall.set(a0.id, (stall.get(a0.id) ?? 0) + 1);   // nada lo frena y no se mueve
+            }
         }
-        // 4) Los rezagados que llegan a OP_LEAD o menos del más atrasado del grueso, dentro del pasillo, se suman a él.
+        // 4) Los rezagados que llegan a OP_LEAD o menos del más atrasado del grueso, dentro del pasillo, se suman a él (los
+        // atascados, cuando vuelvan a moverse).
         const rear = pacers().reduce((m, a) => Math.min(m, alongOf(a)), Infinity);
-        for (const a of this.opMembers(op)) if (!body.has(a.id) && (rear === Infinity || (lane.has(a.cell) && alongOf(a) >= rear - OP_LEAD))) body.add(a.id);
+        for (const a of this.opMembers(op)) if (!body.has(a.id) && (stall.get(a.id) ?? 0) < OP_STALL && (rear === Infinity || (lane.has(a.cell) && alongOf(a) >= rear - OP_LEAD))) body.add(a.id);
         const alive = new Set(this.opMembers(op).map(a => a.id));
         op.body = [...body].filter(x => alive.has(x));
         op.waiting = waiting;
@@ -5528,8 +5554,9 @@ class GameEngine {
     // El defensor vencido deja la casilla: se retira a una vecina propia o aliada libre, se rinde si no la hay o, en el mar
     // sin costa propia al lado, se hunde. Devuelve la coletilla del parte.
     rout(def, cell, sea, p, nD0) {
-        this.removeArmy(def);
+        this.removeArmy(def, true);
         const left = countUnits(def.units), retreat = left > 0 ? this.retreatCell(def, cell) : -1;
+        if (retreat < 0) this.watched.delete(def.id);   // no vuelve
         if (sea && retreat < 0) {   // sin costa propia a la que arrimarse, el barco vencido se va a pique entero
             if (this.involvesPlayer(def.owner)) this.log(`Hundido frente a ${p.name}: se pierden ${nD0} unidades.`);
             return left > 0 ? '; sus supervivientes se hunden' : '; el barco se hunde';
@@ -5550,8 +5577,9 @@ class GameEngine {
         if (this.owner[cell] !== att.owner) this.capture(cell, att.owner, true);
     }
     // Combate de varios atacantes contra un defensor: como battle, con su ataque sumado (jointFactors) y una sola tirada
-    // por bando. Todos pierden la misma fracción y gastan el turno; si ganan, entra el de más ataque que esté en tierra
-    // (ninguno si todos salen del mar o la casilla es de mar) y los demás se quedan donde están.
+    // por bando. Todos pierden la misma fracción y gastan el turno; si ganan una casilla de tierra, entra el de más ataque
+    // que esté en tierra (si todos salen del mar, el de más ataque, que desembarca como el atacante suelto de battle) y los
+    // demás se quedan donde están; en una de mar no entra nadie.
     jointBattle(atts, def, cell) {
         const roll = () => 0.8 + this.rng() * 0.4;
         const owner = atts[0].owner, sea = afloat(cell), p = PROVINCES[sea ? SEA_PROV[cell] : G.prov[cell]];
@@ -5559,7 +5587,7 @@ class GameEngine {
         const n0 = atts.map(a => countUnits(a.units)), nA0 = n0.reduce((s, n) => s + n, 0), nD0 = countUnits(def.units);
         const strongest = list => list.reduce((b, i) => (b < 0 || fx.members[i].atk > fx.members[b].atk ? i : b), -1);
         const idx = atts.map((_, i) => i), li = sea ? -1 : strongest(idx.filter(i => !afloat(atts[i].cell)));
-        const lead = li >= 0 ? atts[li] : null, head = atts[li >= 0 ? li : strongest(idx)], from = head.cell;
+        const lead = sea ? null : atts[li >= 0 ? li : strongest(idx)], head = lead ?? atts[strongest(idx)], from = head.cell;
         const total = emptyUnits();
         for (const a of atts) for (const k of UNIT_KEYS) total[k] += a.units[k] || 0;
         this.note({ kind: 'battle', att: head.id, def: def.id, from, cell, attOwner: owner, defOwner: def.owner,
@@ -6242,7 +6270,7 @@ class GameEngine {
                     queue.push(v);
                 }
             }
-            this.removeArmy(a);
+            this.removeArmy(a, dest >= 0);
             if (dest >= 0) { a.cell = dest; a.used = 999; this.armies.set(a.id, a); this.settle(a); }
         }
     }
@@ -9746,7 +9774,7 @@ class GameUI {
         this.view.selColor = gr ? GROUP_COLORS[gr.color] : null;
         // Elegida entera, la agrupación se rodea con su envolvente (MapView.focusGroup).
         this.view.selGroup = gr && g.groupMembers(g.player, gr.id).length === this.sel.size ? gr.id : 0;
-        this.view.multi =this.tool === 'cities' ? new Set([...this.multi].map(pid => PROVINCES[pid].city)) : null;
+        this.view.multi = this.tool === 'cities' ? new Set([...this.multi].map(pid => PROVINCES[pid].city)) : null;
         if (this.tool === 'air') this.airTidy();
         this.view.airPick = this.tool === 'air' ? this.airPick() : null;
     }
