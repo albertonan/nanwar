@@ -6215,6 +6215,9 @@ class GameEngine {
         else if (key === 'auto' && ['manual', 'asistida', 'auto'].includes(value)) op.auto = value;
         else if (key === 'paused' || key === 'fortify') op[key] = !!value;
         else if (key === 'name') op.name = String(value).trim().slice(0, 60) || op.name;
+        else if (key === 'launch' && op.kind === 'ofensiva' && (value === 'lista' || value === 'orden')) op.launch = value;
+        // Zona de reunión: una casilla propia de tierra. En el avance solo cambia adónde van los refuerzos tardíos.
+        else if (key === 'zone' && op.kind === 'ofensiva' && Number.isInteger(value) && value >= 0 && value < G.cx.length && isLand(value) && this.owner[value] === op.owner) op.zone = value;
         else if (key === 'gold' && OP_GOLD.includes(value)) op.gold = value;
         else if (key === 'template' && (value === 'auto' || this.templateOf(op.owner, value))) { op.template = value; if (op.form && !countUnits(op.form.recruited)) op.form = null; }
         this.orderVersion++;
@@ -7878,6 +7881,43 @@ class MapView {
         if (d?.cells.length) list.push({ kind: d.kind, cells: d.cells, color: '#ffffff', name: d.redraw ? 'Nuevo trazado' : 'Nueva operación', draft: true });
         ctx.lineCap = 'round'; ctx.lineJoin = 'round';
         const labels = [];
+        // Zona de reunión de las ofensivas que aún se reúnen (y de la enfocada, en cualquier fase) y, con la enfocada, su
+        // pasillo en un tono suave: en coordenadas del mapa, casillas enteras.
+        if (this.showOps) {
+            const s = this.scale, dpr = this.dpr, focus = ui?.focusOp ? g.ops.get(ui.focusOp) : null;
+            const marks = g.opsOf(g.player).filter(op => op.kind === 'ofensiva' && (op.phase !== 'avance' || op === focus));
+            if (marks.length || focus?.kind === 'ofensiva') {
+                ctx.save();
+                ctx.setTransform(dpr * s, 0, 0, dpr * s, dpr * this.ox, dpr * this.oy);
+                if (focus?.kind === 'ofensiva' && !focus.paused) {
+                    const t = g.opTrace(focus);
+                    if (this._laneKey !== t.n || this._laneOp !== focus.id) {
+                        const p = new Path2D();
+                        for (const c of t.lane) this.hexPath(p, c, 0.94);
+                        this._lane = p; this._laneKey = t.n; this._laneOp = focus.id;
+                    }
+                    ctx.globalAlpha = 0.11; ctx.fillStyle = opColor(focus); ctx.fill(this._lane);
+                    ctx.globalAlpha = 0.35; ctx.setLineDash([5 / s, 4 / s]); ctx.strokeStyle = opColor(focus); ctx.lineWidth = 1.2 / s; ctx.stroke(this._lane); ctx.setLineDash([]);
+                }
+                for (const op of marks) {
+                    const key = `${op.zone ?? op.cells[0]}:${g.opMembers(op).length}:${g.turn}`;
+                    if (op._zoneKey !== key) { op._zoneKey = key; op._zoneCells = g.opZone(op).cells; }
+                    const p = new Path2D(), zone = op.zone ?? op.cells[0];
+                    for (const c of [zone, ...op._zoneCells]) this.hexPath(p, c, 0.9);
+                    ctx.globalAlpha = op.paused ? 0.4 : 1;
+                    ctx.fillStyle = opColor(op); ctx.globalAlpha *= 0.38; ctx.fill(p); ctx.globalAlpha = op.paused ? 0.4 : 1;
+                    ctx.setLineDash([6 / s, 4 / s]); ctx.strokeStyle = 'rgba(21,26,18,0.8)'; ctx.lineWidth = 3.4 / s; ctx.stroke(p);
+                    ctx.strokeStyle = opColor(op); ctx.lineWidth = 1.8 / s; ctx.stroke(p); ctx.setLineDash([]);
+                }
+                ctx.restore();
+                ctx.globalAlpha = 1;
+                ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+                for (const op of marks) {
+                    const [x, y] = scr(op.zone ?? op.cells[0]);
+                    labels.push({ x, y: y + Math.max(14, hexPx * 1.5), text: op.phase === 'avance' ? 'ZR refuerzos' : 'ZR', color: opColor(op) });
+                }
+            }
+        }
         for (const it of list) {
             const pts = it.cells.map(scr);
             ctx.globalAlpha = it.dim ? 0.45 : 1;
@@ -8903,6 +8943,15 @@ class GameUI {
     // Destino de la orden que se está dando: casilla para marchar o atacar, ejército propio para seguir.
     pickOrderTarget(cell) {
         const g = this.game, kind = this.ordering?.kind, ids = this.ordering?.ids ?? [], army = this.selectedArmy();
+        // Zona de reunión de una ofensiva: una casilla propia de tierra; si no vale, sigue esperando otro clic.
+        if (kind === 'op-zone') {
+            const op = g.ops.get(this.ordering.id);
+            if (cell >= 0 && op && !(isLand(cell) && g.owner[cell] === g.player)) { this.flash('La zona de reunión tiene que ser una casilla de tierra tuya.'); return; }
+            this.ordering = null;
+            if (cell >= 0 && op) { g.playerOpSet(op, 'zone', cell); this.focusOp = op.id; this.tab = 'mando'; if (isMobile()) this.drawerOpen = true; }
+            this.render();
+            return;
+        }
         this.ordering = null;
         // Órdenes de la ficha de selección múltiple: marchar repartidos, reunir en uno o ataque coordinado.
         if (kind?.startsWith('group-')) {
@@ -9510,7 +9559,15 @@ class GameUI {
             case 'op-set': {
                 const op = g.ops.get(+d.id);
                 if (!op || op.owner !== g.player) return;
-                g.playerOpSet(op, d.key, d.key === 'ratio' || d.key === 'gold' ? +d.value : d.key === 'auto' ? d.value : !op[d.key]);
+                g.playerOpSet(op, d.key, d.key === 'ratio' || d.key === 'gold' ? +d.value : d.key === 'auto' || d.key === 'launch' ? d.value : !op[d.key]);
+                break;
+            }
+            case 'op-launch': { const op = g.ops.get(+d.id); if (op) g.playerLaunchOp(op); break; }
+            case 'op-zone': {   // pide un clic en una casilla propia; en el móvil, la hoja se baja para ver el mapa
+                const op = g.ops.get(+d.id);
+                if (!op || op.kind !== 'ofensiva') return;
+                this.ordering = this.ordering?.kind === 'op-zone' ? null : { kind: 'op-zone', id: op.id };
+                if (this.ordering && isMobile()) this.drawerOpen = false;
                 break;
             }
             case 'op-redraw': {
@@ -10696,6 +10753,7 @@ class GameUI {
         else if (this.ordering?.kind?.startsWith('group-')) text = `${{ 'group-march': 'Marchar: haz clic en el destino; cada uno irá a una casilla libre a su alrededor',
             'group-gather': 'Reunir: haz clic en la casilla donde juntarlos en un solo ejército (o en uno de ellos para que vayan a él)',
             'group-assault': 'Ataque coordinado: haz clic en la casilla enemiga; irán a sus casillas de partida y atacarán a la vez' }[this.ordering.kind]}.${this.touch ? '' : ' Esc para cancelar.'}`;
+        else if (this.ordering?.kind === 'op-zone') text = `Zona de reunión: ${this.touch ? 'toca' : 'haz clic en'} una casilla tuya donde se reúnan la ofensiva y sus refuerzos.${this.touch ? '' : ' Esc para cancelar.'}`;
         else if (this.ordering) text = this.ordering.kind === 'follow' ? 'Haz clic en el ejército tuyo al que debe seguir. Esc para cancelar.'
             : `Haz clic en el destino: ${this.ordering.kind === 'attack' ? 'irá hasta allí y atacará lo que haya cuando tenga ventaja' : 'irá hasta allí aunque tarde varios turnos'}.${this.touch ? '' : ' Esc para cancelar.'}`;
         else if (this.reachInfo) text = `${this.view.isRealistic() ? 'Zona clara: mover' : 'Verde: mover'}. Rojo: atacar.${this.touch ? ' Más lejos: «Marchar a…» en la ficha.' : ' Mayúsculas + clic más lejos: marchar en varios turnos. Esc para cancelar.'}`;
@@ -10819,6 +10877,7 @@ class GameUI {
             if (op.state === 'restablece') return ['Vuelve a su línea', 'ok'];
             const k = g.opNeed(op); return k ? [`Faltan ${k}`, 'warn'] : ['Línea cubierta', 'ok'];
         }
+        if (op.phase === 'reunion') return [op.launch === 'orden' ? 'Espera tu orden' : 'Reuniéndose', ''];
         return op.waiting ? ['Espera ventaja', 'warn'] : [op.auto === 'manual' ? 'Manual' : 'Avanzando', 'ok'];
     }
     // Qué haría una línea manual (sin hacerlo), guardado por turno y versión de la partida para no recalcularlo al dibujar.
@@ -10860,6 +10919,42 @@ class GameUI {
             <div class="op-members">${rows || '<p class="note">Sin escuadrones. Añade los libres o dales este encargo desde su ficha de Aviación.</p>'}</div>
             <button class="btn" style="margin-top:6px" data-action="op-add-air" data-id="${op.id}" ${free ? '' : 'disabled'}>Añadir ${free ? plural(free, 'escuadrón libre', 'escuadrones libres') : 'escuadrones libres'} a su alcance</button>
             ${aims}`;
+    }
+    // Fases de una ofensiva (A5): en qué va, a quién espera, cuándo sale y dónde se reúnen los refuerzos.
+    phaseSection(op, members) {
+        const g = this.game, zone = op.zone ?? op.cells[0], seg = (key, cur, items) => `<div class="seg">${items.map(([v, l, t]) => `<button data-action="op-set" data-id="${op.id}" data-key="${key}" data-value="${v}" class="${cur === v ? 'on' : ''}" title="${t}">${l}</button>`).join('')}</div>`;
+        const picking = this.ordering?.kind === 'op-zone';
+        const zoneBtn = `<button class="btn ${picking ? 'on' : ''}" data-action="op-zone" data-id="${op.id}">${picking ? 'Elige una casilla en el mapa…' : 'Mover la zona de reunión'}</button>`;
+        const zoneTxt = `Los refuerzos se reúnen en ${esc(g.placeName(zone))}${zone === op.cells[0] ? ', la salida de la flecha' : `, que no es la salida de la flecha (${esc(g.placeName(op.cells[0]))})`}.`;
+        if (op.phase === 'avance') {
+            const last = op.cells.length - 1, wp = Math.min(Math.max(1, op.wp ?? 1), last);
+            return `<p class="small">Avance: ${wp >= last ? 'hacia el objetivo' : `hacia el punto ${wp} de ${last} de la flecha`}, con ${plural(op.body ? op.body.filter(id => g.armies.get(id)?.op === op.id).length : members.length, 'ejército', 'ejércitos')} en el grueso. Van juntos y atacan a la vez cuando la ventaja conjunta llega a ${decimal(op.ratio)} a 1.</p>
+                <p class="small">${zoneTxt} Moverla ahora solo cambia adónde van los refuerzos que lleguen tarde.</p>
+                <div class="row" style="margin-top:6px">${zoneBtn}</div>`;
+        }
+        const st = g.opReady(op, members), waits = [];
+        if (st.missing.length) {
+            const names = st.missing.slice(0, 2).map(id => esc(g.placeName(g.armies.get(id).cell)));
+            waits.push(`esperando a ${plural(st.missing.length, 'ejército', 'ejércitos')} (${names.join(', ')}${st.missing.length > 2 ? ` y ${st.missing.length - 2} más` : ''}); a los ${OP_WAIT} turnos sale sin ellos (lleva ${st.waited})`);
+        }
+        if (st.forming) waits.push('esperando a que termine la formación de refuerzo');
+        const power = st.ratio === null ? ', sin enemigos conocidos en el primer tramo' : `, fuerza ${decimal(st.ratio)} de ${decimal(st.need)} a 1`;
+        let why;
+        if (op.launch === 'orden') why = 'espera tu orden de lanzamiento';
+        else if (!st.members) why = 'sin ejércitos: asígnale alguno';
+        else if (st.ready) why = 'sale al terminar el turno';
+        else if (!st.strong && !waits.length) why = `esperando a tener ${decimal(st.need)} a 1 contra lo conocido del primer tramo; puedes lanzarla ya`;
+        else why = waits.join('; ') + (!st.strong ? `; además, esperando a tener ${decimal(st.need)} a 1 contra lo conocido del primer tramo` : '');
+        const out = st.present.length ? `Saldría con ${plural(st.present.length, 'ejército', 'ejércitos')}${st.missing.length ? `, sin ${plural(st.missing.length, 'ejército que no ha llegado', 'ejércitos que no han llegado')}` : ''}${st.ratio === null ? '' : `, a ${decimal(st.ratio)} a 1 contra lo conocido`}.`
+            : st.members ? 'Saldría con todos, aunque ninguno ha llegado aún a la zona.' : '';
+        return `
+            <p class="small">Reunión: ${st.inZone} de ${plural(st.members, 'ejército', 'ejércitos')} en la zona${power}${why ? `; ${why}` : ''}.</p>
+            <p class="group-title">Lanzamiento</p>
+            ${seg('launch', op.launch, [['lista', 'Cuando esté lista', 'Sale cuando están todos en la zona y llega a la ventaja que pide la postura'], ['orden', 'Cuando yo lo diga', 'Espera al botón «Lanzar la ofensiva»']])}
+            <div class="row" style="margin-top:6px"><button class="btn primary" data-action="op-launch" data-id="${op.id}" ${st.members ? '' : 'disabled'}>Lanzar la ofensiva</button></div>
+            <p class="note">${out}</p>
+            <p class="small">${zoneTxt}</p>
+            <div class="row" style="margin-top:6px">${zoneBtn}</div>`;
     }
     // Pestaña Mando: operaciones del jugador y la abierta, con sus ejércitos y ajustes.
     renderCommand() {
@@ -10903,6 +10998,7 @@ class GameUI {
                     <button class="btn ghost" data-action="op-close" aria-label="Cerrar" title="Cerrar">✕</button></div>
                 <p class="small" style="margin-top:6px">${OP_KINDS[op.kind].name} desde el turno ${op.since}. ${where}.</p>
                 ${front}
+                ${op.kind === 'ofensiva' ? this.phaseSection(op, members) : ''}
                 <p class="group-title">Ejércitos (${members.length}) · ataque ${Math.round(atk)}, defensa ${Math.round(def)}</p>
                 <div class="op-members">${members.map(a => `<div class="op-member"><button class="link" data-action="goto" data-cell="${a.cell}">${esc(g.placeName(a.cell))}</button>
                     <span class="small muted">${units(a)}${a.order ? ' · con orden propia' : ''}</span>

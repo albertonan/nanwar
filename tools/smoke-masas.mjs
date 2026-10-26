@@ -1180,6 +1180,88 @@ const CHECKS = [
         T.eq([h.ops.get(op2.id).phase, h.ops.get(op2.id).wp], ['avance', 1], 'sin ejércitos, hacia el primer punto');
         h.endTurn();
         return true;
+    }],
+    ['A5 · la ficha enseña la fase y Lanzar sale', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 8);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O]);
+        const near = T.army(g, es, T.cellsAt(g, es, S, [0])[0], 0, 6, 0), far = T.army(g, es, T.farCell(g, es, S, 20, 40), 2);
+        g.assignArmy(near, op.id); g.assignArmy(far, op.id);
+        ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        const card = () => document.querySelector('.op-detail').textContent;
+        T.ok(/Reunión: 1 de 2 ejércitos/.test(card()), `fase y progreso: ${card().slice(0, 300)}`);
+        T.ok(card().includes('esperando a ') && card().includes(g.placeName(far.cell)), 'dice a quién espera');
+        T.ok(card().includes('Los refuerzos se reúnen en') && card().includes('la salida de la flecha'), 'zona de reunión explicada');
+        const btn = document.querySelector('[data-action="op-launch"]');
+        T.ok(btn && !btn.disabled && btn.textContent.includes('Lanzar la ofensiva'), 'botón Lanzar');
+        T.ok(card().includes('Saldría con 1 ejército'), 'previsión');
+        btn.click();
+        T.eq(op.phase, 'avance', 'sale');
+        T.ok(/Avance/.test(card()) && !document.querySelector('[data-action="op-launch"]'), 'en avance: sin botón Lanzar');
+        return true;
+    }],
+    ['A5 · la ficha explica que «lista» espera la ventaja', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 8);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O]);
+        g.assignArmy(T.army(g, es, T.cellsAt(g, es, S, [0])[0], 0, 1, 0), op.id);
+        const foe = T.army(g, fr, G.nb[S * 6 + [0, 1, 2, 3, 4, 5].find(d => G.nb[S * 6 + d] >= 0 && isLand(G.nb[S * 6 + d]) && !g.armyAt[G.nb[S * 6 + d]])], 40, 0, 0);
+        g.owner[foe.cell] = fr; g.sees = () => true;
+        const st = g.opReady(op);
+        T.ok(st.ratio !== null && !st.strong && !st.ready, 'no tiene la ventaja');
+        ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        const t = document.querySelector('.op-detail').textContent;
+        T.ok(t.includes('esperando a tener 1,3 a 1') && t.includes('puedes lanzarla ya'), `lo dice: ${t.slice(0, 400)}`);
+        return true;
+    }],
+    ['A5 · mover la zona de reunión con un clic', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 8);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O]);
+        const [Z] = T.cellsAt(g, es, S, [3]);
+        ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        document.querySelector('[data-action="op-zone"]').click();
+        T.eq(ui.ordering?.kind, 'op-zone', 'espera el clic');
+        const z0 = op.zone;
+        ui.clickCell(O);   // ajena
+        T.eq([op.zone, ui.ordering?.kind], [z0, 'op-zone'], 'una casilla ajena no vale y sigue esperando');
+        ui.clickCell(Z);
+        T.eq([op.zone, ui.ordering], [Z, null], 'la zona se mueve');
+        T.ok(document.querySelector('.op-detail').textContent.includes(g.placeName(Z)), 'la ficha lo enseña');
+        // El motor valida: ni mar ni ajena.
+        g.playerOpSet(op, 'zone', O); T.eq(op.zone, Z, 'motor: ajena no');
+        const sea = G.nb.find(c => c >= 0 && !isLand(c));
+        g.playerOpSet(op, 'zone', sea); T.eq(op.zone, Z, 'motor: mar no');
+        // En avance también se puede, y no relanza nada.
+        g.opLaunch(op, g.opReady(op));
+        const [Z2] = T.cellsAt(g, es, S, [2]);
+        g.playerOpSet(op, 'zone', Z2);
+        T.eq([op.zone, op.phase], [Z2, 'avance'], 'en avance: solo cambia la zona');
+        return true;
+    }],
+    ['A5 · cambiar el lanzamiento se guarda', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 8);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O]);
+        ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        T.eq(op.launch, 'lista', 'por defecto');
+        document.querySelector('[data-action="op-set"][data-key="launch"][data-value="orden"]').click();
+        T.eq(op.launch, 'orden', 'cuando yo lo diga');
+        T.ok(document.querySelector('.op-detail').textContent.includes('espera tu orden'), 'la ficha lo dice');
+        g.playerOpSet(op, 'launch', 'otra'); T.eq(op.launch, 'orden', 'valor raro ignorado');
+        const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+        T.eq(h.ops.get(op.id).launch, 'orden', 'se guarda');
+        document.querySelector('[data-action="op-set"][data-key="launch"][data-value="lista"]').click();
+        T.eq(op.launch, 'lista', 'y vuelve');
+        return true;
     }]
 ];
 
@@ -1321,6 +1403,50 @@ try {
         if (errs.length) { failed++; console.log(`FALLA ${MAP_SHOTS}\n      ${errs.join('\n      ')}`); }
         else console.log(`ok    ${MAP_SHOTS} (${join(out, names[0])}, ${names.slice(1).join(', ')})`);
         await mp.close();
+    }
+    // Capturas de la ficha de una ofensiva en reunión y en avance, con la zona de reunión y el pasillo dibujados, en
+    // escritorio y móvil.
+    const OP_SHOTS = 'A5 · captura de la ficha de ofensiva';
+    if (!filter || OP_SHOTS.includes(filter)) {
+        ran++;
+        const out = join(root, 'tools/cache/smoke');
+        mkdirSync(out, { recursive: true });
+        const opPage = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+        const errs = [];
+        opPage.on('pageerror', e => errs.push(e.message));
+        await opPage.goto(`http://localhost:${port}/?seed=7`);
+        await opPage.waitForFunction(() => typeof GameEngine === 'function' && typeof ui === 'object');
+        await opPage.evaluate(setup);
+        await opPage.evaluate(() => {
+            const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+            ui.view.setMode('sencilla');
+            g.declareWar(es, fr);
+            const [S, O] = T.straight(g, es, 9);
+            g.owner[O] = fr; g.legal[O] = fr; g.version++;
+            const op = g.createOp(es, 'ofensiva', [S, O]);
+            const zs = T.cellsAt(g, es, S, [0, 1, 1]);
+            for (const [i, c] of zs.entries()) g.assignArmy(T.army(g, es, c, [30, 20, 14][i], [8, 4, 0][i], [6, 2, 4][i]), op.id);
+            g.assignArmy(T.army(g, es, T.farCell(g, es, S, 14, 30), 18, 2, 2), op.id);
+            window.SHOT = { op, S, O };
+            ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+            ui.select(-1); ui.view.scale = 22 / G.S; ui.view.centerOn(G.cellAt((G.cx[S] * 2 + G.cx[O]) / 3, (G.cy[S] * 2 + G.cy[O]) / 3), 22); ui.view.ox -= 150; ui.render();
+        });
+        await opPage.waitForTimeout(300);
+        await opPage.screenshot({ path: join(out, 'ofensiva-reunion.png') });
+        await opPage.evaluate(() => { const g = ui.game; g.playerLaunchOp(SHOT.op); ui.render(); });
+        await opPage.waitForTimeout(300);
+        await opPage.screenshot({ path: join(out, 'ofensiva-avance.png') });
+        await opPage.evaluate(() => { SHOT.op.phase = 'reunion'; SHOT.op.body = null; ui.render(); });
+        await opPage.setViewportSize({ width: 390, height: 844 });
+        await opPage.evaluate(() => { ui.setSheet('grande'); ui.drawerOpen = true; ui.render(); });
+        await opPage.waitForTimeout(300);
+        await opPage.screenshot({ path: join(out, 'ofensiva-reunion-movil.png') });
+        await opPage.evaluate(() => { ui.game.playerLaunchOp(SHOT.op); ui.setSheet('media'); ui.render(); });
+        await opPage.waitForTimeout(300);
+        await opPage.screenshot({ path: join(out, 'ofensiva-avance-movil.png') });
+        if (errs.length) { failed++; console.log(`FALLA ${OP_SHOTS}\n      ${errs.join('\n      ')}`); }
+        else console.log(`ok    ${OP_SHOTS} (${join(out, 'ofensiva-reunion.png')}, ofensiva-avance.png, ofensiva-reunion-movil.png, ofensiva-avance-movil.png)`);
+        await opPage.close();
     }
 } finally {
     await browser.close();
