@@ -474,12 +474,30 @@ const CHECKS = [
     T.near(sim('missile'), 0.45, 0.03, 'misiles');
     T.near(sim('nuclear'), 0.79, 0.03, 'nucleares');
     T.eq(sim('drone'), 1, 'los drones ya pasan por el antiaéreo en su misión');
-    // Cada fuente atiende 3 armas por ronda: la cuarta pasa entera.
-    T.near(g.incomingDefense(fr, 'rocket', cell, 4, { simulate: true }).through, 3 * Math.exp(-1.6) + 1, 1e-9, 'tres por fuente');
+    // Disparan los cuatro a cada arma, pero cada una gasta la capacidad de uno solo.
+    T.near(g.incomingDefense(fr, 'rocket', cell, 4, { simulate: true }).through, 4 * Math.exp(-1.6), 1e-9, 'cuatro armas, fuerza entera');
     T.luck(g, 0);
     const d = g.incomingDefense(fr, 'rocket', cell, 4);
-    T.eq([d.through, d.stopped.aa, d.sources.length], [1, 3, 4], 'tirada: tres paradas');
+    T.eq([d.through, d.stopped.aa, d.sources.length, [...g.defUsed.values()]], [0, 4, 4, [1, 1, 1, 1]], 'tirada: cuatro paradas, una por fuente');
     T.ok(sites.every(c => g.aaSites.get(c).known.has(fr)), 'los sitios que disparan se delatan');
+    return true;
+}],
+['C3 · cuatro sitios atienden hasta 12 armas por ronda', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'antiaerea1', 'antiaerea2');
+    const cell = T.clear(g, es, 2);
+    const sites = [cell, ...[0, 1, 2, 3, 4, 5].map(d => G.nb[cell * 6 + d]).filter(j => j >= 0 && isLand(j))].slice(0, 4);
+    for (const c of sites) T.site(g, es, c);
+    // Previsión: 9 armas con los cuatro (64), y luego con 3, 2 y 1 fuentes que aún atienden; la 13.ª pasa entera.
+    const want = 9 * Math.exp(-1.6) + Math.exp(-1.2) + Math.exp(-0.8) + Math.exp(-0.4) + 1;
+    T.near(g.incomingDefense(fr, 'rocket', cell, 13, { simulate: true }).through, want, 1e-9, 'previsión');
+    T.eq(g.defUsed.size, 0, 'la previsión no gasta');
+    T.luck(g, 0);
+    const d = g.incomingDefense(fr, 'rocket', cell, 13);
+    T.eq([d.through, d.stopped.aa, [...g.defUsed.values()]], [1, 12, [3, 3, 3, 3]], 'doce paradas y la 13.ª no ve antiaéreo');
+    T.eq(g.incomingDefense(fr, 'rocket', cell, 2).through, 2, 'agotado hasta la ronda siguiente');
+    g.beginNationTurn(T.nation('de'));
+    T.eq(g.incomingDefense(fr, 'rocket', cell, 1).stopped.aa, 1, 'repuesto');
     return true;
 }],
 ['B3 · la previsión no cuenta baterías que no conoces y avisa de que puede haberlas', () => {

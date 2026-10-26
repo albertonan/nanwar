@@ -3012,9 +3012,10 @@ class GameEngine {
     // 2. las baterías enemigas terminadas, en su casilla, cuyo radio cubre `cell` y que paran esa clase (BATTERY_LEVELS
     //    del nivel de su dueño), primero la de más probabilidad y luego la más cercana;
     // 3. el antiaéreo que cubre `cell` (aaList: sitios e integrado con su radio y, en el mar, nada de eso; el móvil, solo
-    //    el de la casilla), salvo contra drones, que ya lo pasan en su misión (aaCover): la atienden a la vez todas las
-    //    fuentes con capacidad, AA_STOP_PER armas cada una, con p = 1 − e^(−S·k/40), S su fuerza con el tope AA_CAP
-    //    del defensor y k = AA_STOP_K.
+    //    el de la casilla), salvo contra drones, que ya lo pasan en su misión (aaCover): disparan a la vez todas las
+    //    fuentes con capacidad, con p = 1 − e^(−S·k/40), S su fuerza con el tope AA_CAP del defensor y k = AA_STOP_K,
+    //    pero el arma gasta la capacidad de una sola (la que más tiene; si empatan, la de casilla menor): cada fuente
+    //    atiende AA_STOP_PER armas por ronda y, entre todas, AA_STOP_PER por fuente.
     // La reentrada (parte C) multiplica en las tres capas lo que se para de las clases REENTRY_CLASSES por
     // rules(owner).interceptMult. Devuelve { through, stopped: { drones, batteries, aa }, sources, unknown }: las que
     // pasan, las que para cada capa, las casillas de quien atiende (la patrulla del enjambre, la batería, la fuente) y si
@@ -3051,7 +3052,7 @@ class GameEngine {
                 if (!this.atWar(owner, src.owner) || (src.kind === 'mobile' ? src.cell !== cell : sea || hexDist(src.cell, cell) > src.radius)) continue;
                 if (simulate && !this.aaKnown(viewer, src)) continue;
                 const key = `${src.kind}:${src.kind === 'mobile' ? src.army.id : src.cell}`;
-                aa.push({ cell: src.cell, power: src.power, left: AA_STOP_PER - used(key), spend: () => { this.defUsed.set(key, used(key) + 1); src.site?.known.add(owner); } });
+                aa.push({ cell: src.cell, power: src.power, left: AA_STOP_PER - used(key), spend: () => this.defUsed.set(key, used(key) + 1), reveal: () => src.site?.known.add(owner) });
             }
         }
         const fired = c => { if (!sources.includes(c)) sources.push(c); }, eps = 1e-9;
@@ -3075,11 +3076,15 @@ class GameEngine {
             const on = m > eps ? aa.filter(x => x.left > eps) : [];
             if (on.length) {
                 const S = Math.min(cap, on.reduce((s, x) => s + x.power, 0)), p = (1 - Math.exp(-S * AA_STOP_K[cls] / 40)) * mult;
+                // Disparan todas, pero el arma la apunta una sola: la que más capacidad tiene (si empatan, la de casilla menor).
+                let one = on[0];
                 for (const x of on) {
-                    x.left -= Math.min(x.left, m);
+                    if (x.left > one.left + eps || (Math.abs(x.left - one.left) <= eps && x.cell < one.cell)) one = x;
                     fired(x.cell);
-                    if (!simulate) x.spend();
+                    if (!simulate) x.reveal();
                 }
+                one.left -= Math.min(one.left, m);
+                if (!simulate) one.spend();
                 if (simulate) { stopped.aa += m * p; m -= m * p; } else if (this.rng() < p) { stopped.aa++; m = 0; }
             }
             through += m;
