@@ -344,6 +344,19 @@
         .tpl-row b { display: block; font-weight: 600; }
         .tpl-row small { color: var(--muted); font-size: 12px; }
         .tpl-edit { display: grid; gap: 6px; margin: 8px; padding: 10px; border-radius: 8px; background: var(--raised); }
+        /* Editor de refuerzos (A7): el de plantillas, en la ficha o en la fila de una agrupación */
+        .rf-edit { margin: 8px 0 0; }
+        .ob-group .rf-edit { background: var(--ink); }
+        .rf-gold button { padding: 7px 1px; font-size: 11.5px; }
+        /* Sus filas de tropas: nombre arriba y los botones debajo, a todo el ancho (la ficha y el cajón son estrechos) */
+        .rf-edit .unit-row { grid-template-columns: 26px minmax(0, 1fr); row-gap: 4px; }
+        .rf-edit .unit-row .stepper { grid-column: 1 / -1; display: flex; }
+        .rf-edit .stepper button { flex: 1 1 0; min-width: 0; }
+        .rf-edit .stepper input { flex: 1.5 1 0; min-width: 0; width: auto; }
+        .rf-btns { margin-top: 6px; }
+        .rf-btns:empty { display: none; }
+        .rf-status-row { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+        .rf-status-row p { flex: 1; }
         .op-meter { position: relative; margin-top: 10px; overflow: visible; }
         .op-meter i { border-radius: 4px; }
         .op-meter b { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--text); }
@@ -1212,6 +1225,7 @@ class GameEngine {
         this.ops = new Map();       // operaciones: id → { owner, kind, name, cells, ... }
         this.nextOpId = 1;
         this.nextGroupId = 1;       // agrupaciones de ejércitos (nation.groups): ids únicos entre todos los países
+        this.watched = new Set();   // ejércitos a los que otro sigue o busca (join, follow, refuerzos): al fundirse, se les avisa
         this.fields = new Map();    // caminos hacia los destinos de las órdenes (se rehacen si cambia el mapa)
         this.fieldStamp = '';
         this.roadReach = new Map(); // ¿llega a una carretera en un turno? por dueño, casilla y velocidad (ver roadInReach)
@@ -1312,7 +1326,7 @@ class GameEngine {
             spies: [...this.spies].map(([pid, s]) => [pid, s.since, s.revealedTurn]),
             sieges: [...this.sieges].map(([c, s]) => [c, s.by, s.prev, s.held]),
             nations: this.nations.map(n => ({ gold: n.gold, airFund: n.airFund, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord, templates: n.templates, command: n.command,
-                groups: n.groups.map(x => ({ id: x.id, num: x.num, name: x.name, color: x.color, custom: x.custom, order: x.order, reinforce: null })),
+                groups: n.groups.map(x => ({ id: x.id, num: x.num, name: x.name, color: x.color, custom: x.custom, order: x.order, reinforce: x.reinforce })),
                 tech: { done: [...n.tech.done], progress: [...n.tech.progress], current: [...n.tech.current] } })),
             relations,
             armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used, a.hunger || 0, a.disorgUntil || 0, a.units.antiair || 0]),
@@ -1325,6 +1339,8 @@ class GameEngine {
             nextOpId: this.nextOpId,
             armyOps: [...this.armies.values()].filter(a => a.op).map(a => [a.id, a.op]),
             armyGroups: [...this.armies.values()].filter(a => a.group).map(a => [a.id, a.group]),
+            armyRein: [...this.armies.values()].filter(a => a.reinforce).map(a => [a.id, a.reinforce]),
+            reinMarks: [...this.armies.values()].filter(a => a.rein).map(a => [a.id, a.rein]),
             nextGroupId: this.nextGroupId,
             armyFrom: [...this.armies.values()].filter(a => a.from).map(a => [a.id, a.from]),
             orders: [...this.armies.values()].filter(a => a.order).map(a => [a.id, a.order.kind, a.order.dest, a.order.target, a.order.ratio, a.order.flee ? 1 : 0, a.order.since, a.order.stuck]),
@@ -1438,6 +1454,15 @@ class GameEngine {
         // acotado (sin nombre, el automático) y orden de ataque solo contra una casilla de tierra. Sus miembros y las
         // casillas de partida de la orden se validan cuando ya se conocen los ejércitos.
         const gids = new Set();
+        // Refuerzos de ejércitos y agrupaciones (A7): modo y tropas conocidos, oro de OP_GOLD y esperas en una ciudad.
+        const reinOf = v => {
+            const mode = ['tpl', 'add'].find(k => k === v?.mode), u = units(v?.units, TPL_MAX);
+            if (!mode || !countUnits(u)) return null;
+            return { mode, tpl: mode === 'tpl' ? str(v.tpl, 12) || null : null, name: mode === 'tpl' ? str(v.name, 40) || 'Plantilla' : '', units: u,
+                gold: OP_GOLD.includes(Number(v.gold)) ? Number(v.gold) : 0, now: !!v.now, keep: mode === 'tpl' && !!v.keep,
+                pool: int(v.pool, 0, 1e8, 0), poolTurn: int(v.poolTurn, 0, 1e6, 0), recruited: units(v.recruited, 1e7),
+                pending: list(v.pending).slice(0, 400).map(x => [int(x?.[0], -1, G.N - 1, -1), units(x?.[1], TPL_MAX)]).filter(([c, p]) => c >= 0 && CITY_OF[c] >= 0 && countUnits(p)) };
+        };
         const groupsOf = v => {
             const out = [];
             for (const x of list(v).slice(0, 400)) {
@@ -1448,7 +1473,7 @@ class GameEngine {
                 out.push({ id, num, name, color: Number.isInteger(c) && c >= 0 && c < GROUP_COLORS.length ? c : 0, custom: !!x?.custom && !!name,
                     order: o?.kind === 'assault' && target >= 0 && isLand(target) ? { kind: 'assault', target, ratio: Number.isFinite(ratio) ? Math.min(5, Math.max(0, ratio)) : 1.3,
                         since: int(o.since, 0, 1e6, g.turn), slots: o.slots && typeof o.slots === 'object' ? o.slots : {}, waitSince: int(o.waitSince, 0, 1e6, 0) } : null,
-                    reinforce: null });
+                    reinforce: reinOf(x?.reinforce) });
             }
             return out;
         };
@@ -1574,6 +1599,17 @@ class GameEngine {
             if (!a || a.order || !kind) continue;
             if (g.setOrder(a, { kind, dest: int(x?.[2], -1, G.N - 1, -1), target: int(x?.[3], 0, 1e9, 0), ratio: [0, 1, 1.3, 1.8].includes(Number(x?.[4])) ? Number(x[4]) : 1.3, flee: !!x?.[5] }))
                 Object.assign(a.order, { since: int(x?.[6], 0, 1e6, g.turn), stuck: int(x?.[7], 0, 3, 0) });
+        }
+        // Refuerzos de ejércitos (los de las agrupaciones vienen con ellas) y sus reclutas: solo con un refuerzo vivo de
+        // su mismo dueño.
+        for (const x of list(data.armyRein)) {
+            const a = g.armies.get(int(x?.[0], 1, 1e9, 0));
+            if (a && !a.reinforce && (a.reinforce = reinOf(x?.[1]))) g.watched.add(a.id);
+        }
+        for (const x of list(data.reinMarks)) {
+            const a = g.armies.get(int(x?.[0], 1, 1e9, 0)), k = str(x?.[1], 12), m = /^([ag])([1-9]\d{0,9})$/.exec(k);
+            const ref = m && (m[1] === 'a' ? { army: +m[2] } : { group: +m[2] });
+            if (a && ref && !(ref.army === a.id) && g.rfOf(a.owner, ref)) a.rein = k;
         }
         // Aviación: lo que sembró el constructor se tira. Aeródromos y antiaéreos en tierra; escuadrones con id único, en
         // un aeródromo de su mismo dueño y con sitio, y en una operación solo si es suya; quién conoce un antiaéreo, solo
@@ -3098,17 +3134,40 @@ class GameEngine {
         o.disorgUntil = Math.max(o.disorgUntil || 0, a.disorgUntil || 0);   // desorganizado: el que más dure
         if (!o.op && a.op) o.op = a.op;   // quien se une a un ejército sin operación se la lleva
         if (!o.group && a.group) o.group = a.group;   // y lo mismo con la agrupación
+        if (!o.reinforce && a.reinforce) o.reinforce = a.reinforce;   // y con su refuerzo (A7)
         this.armies.delete(a.id);
+        if (this.watched.has(a.id)) this.redirectArmy(a.id, o);
         return o;
     }
-    split(a, send) {
+    // La parte que sale se lleva la operación y la agrupación; el refuerzo (A7), si es la mayor (al salir de una
+    // ciudad, el grueso se va y queda una guarnición). Con `keep`, el refuerzo se queda siempre.
+    split(a, send, keep = false) {
         if (sameUnits(a.units, send)) return a;
         for (const k of UNIT_KEYS) if (send[k]) a.units[k] -= send[k];
         const b = this.newArmy(a.owner, a.cell, send, a.used);
         b.disorgUntil = a.disorgUntil || 0;
         if (a.op) b.op = a.op;
         b.group = a.group || 0;
+        if (a.reinforce && !keep && countUnits(send) > countUnits(a.units)) {
+            b.reinforce = a.reinforce; a.reinforce = null;
+            this.redirectArmy(a.id, b, true);
+        }
         return b;
+    }
+    // El ejército `from` ya no está (se ha fundido en `to`) o su refuerzo ha pasado a `to`: los que lo seguían o iban
+    // a juntarse con él van ahora tras `to`, y sus reclutas pasan a ser los de `to`. Con `onlyRein`, solo los reclutas.
+    redirectArmy(from, to, onlyRein = false) {
+        if (!onlyRein) this.watched.delete(from);
+        this.watched.add(to.id);
+        const key = `a${from}`;
+        for (const x of this.armies.values()) {
+            const o = x.order;
+            const mine = x.rein === key;
+            if (mine) x.rein = x === to ? 0 : `a${to.id}`;
+            if (o && (o.kind === 'join' || o.kind === 'follow') && o.target === from && (!onlyRein || mine)) {
+                if (x === to) this.clearOrder(x); else { o.target = to.id; this.orderVersion++; }
+            }
+        }
     }
 
     // --- Agrupaciones: ejércitos que se juntan bajo un nombre para elegirlos y mandarlos a la vez ---
@@ -3502,7 +3561,7 @@ class GameEngine {
                 if (!(ow === a.owner || this.allied(a.owner, ow) || this.atWar(a.owner, ow))) return false;
             }
         }
-        if (o.kind === 'follow' || o.kind === 'join') { const t = this.armies.get(o.target); if (!t || t.owner !== a.owner || t === a) return false; }
+        if (o.kind === 'follow' || o.kind === 'join') { const t = this.armies.get(o.target); if (!t || t.owner !== a.owner || t === a) return false; this.watched.add(t.id); }
         a.order = o;
         this.refreshOrder(a);
         this.orderVersion++;
@@ -3658,6 +3717,7 @@ class GameEngine {
         this.directive(id);
         // Los refuerzos de las operaciones (reclutar y mandar a su zona) no dependen de la automatización.
         this.stepReinforcements(id);
+        this.stepUnitReinforcements(id);   // y los de los ejércitos y agrupaciones (A7)
         // Las operaciones que piden ayuda la reciben de las que tienen de sobra.
         this.shareForces(id);
         // Luego las operaciones: las automáticas siempre; las asistidas, cuando se piden (botón o confirmación).
@@ -4282,7 +4342,7 @@ class GameEngine {
     // Un ejército que pasa a otro país llega sin orden ni operación.
     changeOwner(a, owner) {
         a.owner = owner;
-        a.order = null; a.op = 0; a.form = 0; a.from = 0; a.group = 0;
+        a.order = null; a.op = 0; a.form = 0; a.from = 0; a.group = 0; a.reinforce = null; a.rein = 0;
         this.orderVersion++;
     }
     // Al salir de una ciudad suya, un ejército deja una infantería de guarnición fuera de la operación (como la IA).
@@ -4714,7 +4774,7 @@ class GameEngine {
             const take = emptyUnits();
             for (const k of UNIT_KEYS) take[k] = Math.min(units[k] || 0, g.units[k] || 0);
             if (!countUnits(take)) return false;
-            const mover = sameUnits(take, g.units) ? g : this.split(g, take);
+            const mover = sameUnits(take, g.units) ? g : this.split(g, take, true);
             if (mover !== g) mover.op = 0;
             mover.form = op.id;
             if (!this.setOrder(mover, { kind: 'march', dest: f.zone })) { if (mover !== g) this.settle(mover); return false; }
@@ -4772,6 +4832,211 @@ class GameEngine {
         let moving = 0;
         for (const a of this.armies.values()) if (a.form === op.id && a !== at) moving += countUnits(a.units);
         return { total, done, ready, moving, waiting: f.pending.reduce((s, [, u]) => s + countUnits(u), 0) };
+    }
+
+    // --- Refuerzos de ejércitos y agrupaciones ya creados (A7) ---
+    // army.reinforce o group.reinforce = { mode, tpl, name, units, gold, now, keep, pool, poolTurn, recruited, pending }.
+    //   mode 'tpl': recluta lo que falte para igualar `units` (la plantilla `tpl`, llamada `name`, copiada al elegirla),
+    //   contando lo que ya tiene y lo que va de camino. mode 'add': recluta `units` más (recruited lleva la cuenta).
+    //   gold: oro por turno (de OP_GOLD), que se guarda en pool hasta 6 turnos; now: todo el que haga falta, ya.
+    //   keep (solo con 'tpl'): completo, no se acaba: vuelve a reclutar lo que pierda. pending: [[ciudad, unidades]]
+    //   reclutadas este turno, que salen al siguiente.
+    // Se recluta en las ciudades con cupo más cercanas al ejército (o a un miembro de la agrupación). Al turno siguiente
+    // los reclutas salen con { kind: 'join', target } hacia él (o hacia el miembro más cercano) y llevan army.rein, la
+    // clave de su refuerzo ('a<id>' o 'g<id>'), hasta fundirse. `ref` = { army: id } o { group: gid }.
+    rfKey(ref) { return ref.army ? `a${ref.army}` : `g${ref.group}`; }
+    // El ejército o la agrupación de `owner` a la que se refiere `ref`, o null.
+    rfHolder(owner, ref) {
+        if (ref?.army) { const a = this.armies.get(ref.army); return a && a.owner === owner ? a : null; }
+        return ref?.group ? this.groupById(owner, ref.group) : null;
+    }
+    rfOf(owner, ref) { return this.rfHolder(owner, ref)?.reinforce ?? null; }
+    // Adónde llegan los reclutas: el ejército, o los miembros de la agrupación.
+    rfTargets(owner, ref) {
+        if (ref.army) { const a = this.rfHolder(owner, ref); return a ? [a] : []; }
+        return this.groupMembers(owner, ref.group);
+    }
+    rfIsTarget(owner, ref, x) { return !!x && x.owner === owner && (ref.army ? x.id === ref.army : x.group === ref.group); }
+    // Lo que ya tiene y lo que va de camino (en su ciudad o marchando).
+    rfHave(owner, ref) {
+        const u = emptyUnits();
+        for (const a of this.rfTargets(owner, ref)) for (const k of UNIT_KEYS) u[k] += a.units[k] || 0;
+        return u;
+    }
+    rfComing(owner, ref) {
+        const R = this.rfOf(owner, ref), key = this.rfKey(ref), u = emptyUnits(), add = x => { for (const k of UNIT_KEYS) u[k] += x[k] || 0; };
+        if (R) for (const [, p] of R.pending) add(p);
+        for (const a of this.armies.values()) if (a.rein === key && a.owner === owner) add(a.units);
+        return u;
+    }
+    // Lo que aún hay que reclutar, por tipo (solo los que se pueden reclutar).
+    rfNeedUnits(owner, ref) {
+        const R = this.rfOf(owner, ref), out = emptyUnits();
+        if (!R) return out;
+        const types = this.recruitTypes(owner);
+        if (R.mode === 'add') { for (const k of types) out[k] = Math.max(0, (R.units[k] || 0) - (R.recruited[k] || 0)); return out; }
+        const have = this.rfHave(owner, ref), coming = this.rfComing(owner, ref);
+        for (const k of types) out[k] = Math.max(0, (R.units[k] || 0) - have[k] - coming[k]);
+        return out;
+    }
+    reinforceNeed(owner, ref) { return countUnits(this.rfNeedUnits(owner, ref)); }
+    // Pone (o cambia) el refuerzo de `ref`. spec = { mode: 'tpl', tpl } o { mode: 'add', units }, más gold, now y keep.
+    // Al cambiarlo, la cuenta empieza de nuevo; lo guardado y lo que ya va de camino sigue. Devuelve el estado o null.
+    setReinforce(owner, ref, spec = {}) {
+        const holder = this.rfHolder(owner, ref);
+        if (!holder || !spec) return null;
+        let units, name = '';
+        if (spec.mode === 'tpl') {
+            const t = this.templateOf(owner, String(spec.tpl ?? ''));
+            if (!t) return null;
+            units = copyUnits(t.units); name = t.name;
+        } else if (spec.mode === 'add') {
+            units = emptyUnits();
+            for (const k of this.recruitTypes(owner)) units[k] = Math.max(0, Math.min(TPL_MAX, Math.trunc(Number(spec.units?.[k])) || 0));
+            if (!countUnits(units)) return null;
+        } else return null;
+        const old = holder.reinforce;
+        holder.reinforce = { mode: spec.mode, tpl: spec.mode === 'tpl' ? spec.tpl : null, name, units, gold: OP_GOLD.includes(spec.gold) ? spec.gold : 0,
+            now: !!spec.now, keep: spec.mode === 'tpl' && !!spec.keep, pool: old?.pool ?? 0, poolTurn: old?.poolTurn ?? 0, recruited: emptyUnits(), pending: old?.pending ?? [] };
+        if (ref.army) this.watched.add(holder.id);
+        this.orderVersion++;
+        return holder.reinforce;
+    }
+    // Se acaba: lo que espera en las ciudades se queda allí y los que marchan siguen hasta él, pero ya sueltos.
+    clearReinforce(owner, ref) {
+        const holder = this.rfHolder(owner, ref);
+        if (!holder?.reinforce) return false;
+        holder.reinforce = null;
+        const key = this.rfKey(ref);
+        for (const a of this.armies.values()) if (a.rein === key) a.rein = 0;
+        this.orderVersion++;
+        return true;
+    }
+    // El miembro de la agrupación (o el ejército) al que irá el recluta `x`: el más cercano por sus caminos.
+    rfJoinTarget(owner, ref, x) {
+        const ts = this.rfTargets(owner, ref).filter(t => t !== x);
+        let best = null, bd = Infinity;
+        for (const t of ts) { const d = this.orderField(owner, t.cell).to(x.cell); if (d < bd || !best) { bd = d; best = t; } }
+        return best;
+    }
+    // Los refuerzos de los ejércitos y agrupaciones de `id`: por rondas, una unidad cada uno, como los de las operaciones.
+    stepUnitReinforcements(id) {
+        const refs = [];
+        for (const a of this.armies.values()) if (a.owner === id && a.reinforce) refs.push({ army: a.id });
+        for (const gr of this.nations[id].groups) if (gr.reinforce) refs.push({ group: gr.id });
+        // Reclutas de un refuerzo que ya no existe: quedan sueltos, con la orden que lleven.
+        const live = new Set(refs.map(r => this.rfKey(r)));
+        for (const a of this.armies.values()) if (a.owner === id && a.rein && !live.has(a.rein)) a.rein = 0;
+        if (!refs.length) return;
+        const ctx = new Map();
+        for (const ref of refs) { const c = this.rfBegin(id, ref); if (c) ctx.set(ref, c); }
+        for (let busy = true, guard = 0; busy && guard < 5000; guard++) { busy = false; for (const [ref, c] of ctx) if (this.rfRecruitOne(id, ref, c)) busy = true; }
+        for (const ref of refs) this.rfEnd(id, ref);
+    }
+    // Fondo del turno, salida de lo reclutado el turno anterior y reclutas que han perdido a quién ir. Devuelve con qué
+    // reclutar, o null si no falta nada.
+    rfBegin(id, ref) {
+        const R = this.rfOf(id, ref), key = this.rfKey(ref), targets = this.rfTargets(id, ref);
+        if (!R || !targets.length) return null;
+        if (R.poolTurn !== this.turn) { R.poolTurn = this.turn; R.pool = Math.min(R.pool + R.gold, R.gold * 6); }
+        const go = x => {   // a juntarse con él, y este turno ya echa a andar
+            const t = this.rfJoinTarget(id, ref, x);
+            if (!t || !this.setOrder(x, { kind: 'join', target: t.id })) return false;
+            x.rein = key;
+            if (x.direct !== this.turn) this.stepOrder(x);
+            return true;
+        };
+        R.pending = R.pending.filter(([city, units]) => {
+            const g = this.armyOn(city);
+            if (!g || g.owner !== id || this.rfIsTarget(id, ref, g)) return false;   // perdida, o ya está con él
+            const take = emptyUnits();
+            for (const k of UNIT_KEYS) take[k] = Math.min(units[k] || 0, g.units[k] || 0);
+            if (!countUnits(take)) return false;
+            const mover = sameUnits(take, g.units) ? g : this.split(g, take, true);
+            if (mover !== g) { mover.op = 0; mover.group = 0; }
+            mover.form = 0;
+            if (!go(mover)) { mover.rein = 0; if (mover !== g) this.settle(mover); return false; }
+            if (mover !== g && this.armies.has(mover.id) && mover.cell === city && this.armyAt[city] !== mover.id) { mover.rein = 0; this.settle(mover); return true; }   // no ha podido salir
+            return false;
+        });
+        // Reclutas en marcha cuyo ejército ya no está (o ha dejado la agrupación): al más cercano. Si el jugador les ha
+        // dado otra orden, dejan de ser refuerzos.
+        for (const a of [...this.armies.values()]) {
+            if (a.rein !== key || a.owner !== id || this.armyOn(a.cell) !== a) continue;
+            if (a.order?.kind === 'join' && this.rfIsTarget(id, ref, this.armies.get(a.order.target))) continue;
+            if (a.order && a.order.kind !== 'join') { a.rein = 0; continue; }
+            if (!go(a)) { a.rein = 0; this.clearOrder(a); }
+        }
+        const need = this.rfNeedUnits(id, ref);
+        if (!countUnits(need)) return null;
+        // Las ciudades con cupo, de la más cercana a él (o a cualquier miembro) a la más lejana; desde cada una, el
+        // camino hasta el miembro más cercano.
+        const near = c => { let best = null, bd = Infinity; for (const t of targets) { const d = (G.cx[c] - G.cx[t.cell]) ** 2 + (G.cy[c] - G.cy[t.cell]) ** 2; if (d < bd) { bd = d; best = t; } } return [best, bd]; };
+        const cities = PROVINCES.filter(p => this.owner[p.city] === id && this.legal[p.city] === id).map(p => [p, ...near(p.city)]).sort((x, y) => x[2] - y[2] || x[0].id - y[0].id);
+        return { R, need, got: emptyUnits(), budget: R.now ? Infinity : R.pool, cities, reach: new Map(), done: false };
+    }
+    // Recluta una unidad del tipo más atrasado que se pueda pagar. true si ha reclutado.
+    rfRecruitOne(id, ref, c) {
+        if (!c || c.done) return false;
+        const R = c.R, n = this.nations[id];
+        const types = UNIT_KEYS.filter(k => c.got[k] < c.need[k]).sort((x, y) => c.got[x] / c.need[x] - c.got[y] / c.need[y]);
+        const ok = ([p, t]) => {
+            if (!this.canRecruitAt(id, p)) return false;
+            let r = c.reach.get(p.id);
+            if (r === undefined) c.reach.set(p.id, r = this.rfIsTarget(id, ref, this.armyOn(p.city)) || this.orderField(id, t.cell).to(p.city) < Infinity);
+            return r;
+        };
+        const p = types.length ? c.cities.find(ok)?.[0] : null;
+        const type = p && types.find(k => { const cost = this.unitCost(id, k, p.id); return c.budget >= cost && n.gold >= cost; });
+        if (!type) { c.done = true; return false; }
+        const cost = this.unitCost(id, type, p.id);
+        if (!this.recruit(id, p, type)) { c.done = true; return false; }
+        c.budget -= cost;
+        if (!R.now) R.pool -= cost;
+        c.got[type]++;
+        R.recruited[type] = (R.recruited[type] || 0) + 1;
+        if (!this.rfIsTarget(id, ref, this.armyOn(p.city))) {   // en su misma ciudad, ya ha llegado
+            const entry = R.pending.find(([x]) => x === p.city);
+            if (entry) entry[1][type] = (entry[1][type] || 0) + 1; else { const u = emptyUnits(); u[type] = 1; R.pending.push([p.city, u]); }
+        }
+        return true;
+    }
+    // Completo y sin nada en camino: se acaba, salvo si se mantiene.
+    rfEnd(id, ref) {
+        const R = this.rfOf(id, ref);
+        if (!R || R.keep || R.pending.length || this.reinforceNeed(id, ref)) return;
+        const key = this.rfKey(ref);
+        for (const a of this.armies.values()) if (a.rein === key && a.owner === id) return;
+        const name = this.rfName(id, ref);
+        this.rfHolder(id, ref).reinforce = null;
+        this.orderVersion++;
+        if (id === this.player) this.log(`${name}: refuerzos completos (${R.mode === 'tpl' ? `ya es una ${R.name.toLowerCase()}` : `${plural(countUnits(R.recruited), 'unidad', 'unidades')} más`}).`);
+    }
+    rfName(owner, ref) {
+        const h = this.rfHolder(owner, ref);
+        return !h ? '' : ref.army ? `Tu ejército de ${this.placeName(h.cell)}` : h.name;
+    }
+    // Cómo va: reclutadas (done) de las que hacen falta (total), cuántas esperan en su ciudad y cuántas marchan.
+    reinforceProgress(owner, ref) {
+        const R = this.rfOf(owner, ref);
+        if (!R) return null;
+        const need = this.reinforceNeed(owner, ref), done = countUnits(R.recruited), key = this.rfKey(ref);
+        let moving = 0;
+        for (const a of this.armies.values()) if (a.rein === key && a.owner === owner) moving += countUnits(a.units);
+        const waiting = R.pending.reduce((s, [, u]) => s + countUnits(u), 0);
+        return { need, done, total: done + need, waiting, moving, coming: waiting + moving, full: !need && !waiting && !moving };
+    }
+    // El jugador pone, cambia (spec) o quita (spec null) el refuerzo de un ejército o una agrupación.
+    playerReinforce(ref, spec) {
+        if (this.over || this.player === null) return null;
+        const id = this.player, name = this.rfName(id, ref);
+        if (!name) return null;
+        if (!spec) { if (this.clearReinforce(id, ref)) this.log(`${name}: se dejan de reclutar refuerzos.`); return null; }
+        const R = this.setReinforce(id, ref, spec);
+        if (!R) { this.log('No se puede reforzar así: elige una plantilla o alguna tropa que añadir.'); return null; }
+        this.log(`${name}: refuerzos ${R.mode === 'tpl' ? `hasta una ${R.name.toLowerCase()}` : `de ${plural(countUnits(R.units), 'unidad', 'unidades')} (${unitText(R.units)})`}, `
+            + `${R.now ? 'con todo el oro que haga falta' : `con ${R.gold} de oro por turno`}${R.keep ? '; se mantendrá completa' : ''}. Se reclutan al terminar el turno.`);
+        return R;
     }
 
     // --- Directiva nacional: postura, objetivos, presupuesto, teatros y retaguardia ---
@@ -9603,6 +9868,33 @@ class GameUI {
             case 'tpl-step': { const u = this.tplDraft.units; u[d.unit] = Math.max(0, Math.min(TPL_MAX, (u[d.unit] || 0) + +d.delta)); this.tplOpen = true; break; }
             case 'tpl-save': if (g.playerSaveTemplate(this.tplDraft.name, this.tplDraft.units)) this.tplDraft = null; this.tplOpen = true; break;
             case 'tpl-del': g.playerDeleteTemplate(+d.index); this.tplOpen = true; break;
+            // Refuerzos de un ejército o una agrupación (A7): un editor abierto a la vez (this.rf). Sin refuerzo, propone
+            // la plantilla de serie más pequeña que sea mayor que lo que ya tiene.
+            case 'rf-open': {
+                const ref = this.rfRef(d.rf), R = ref && g.rfOf(g.player, ref);
+                if (!ref || !g.rfHolder(g.player, ref)) return;
+                const size = countUnits(g.rfHave(g.player, ref)), n = k => countUnits(TEMPLATES[k].units);
+                const tpl = Object.keys(TEMPLATES).sort((x, y) => n(x) - n(y)).find(k => n(k) > size) ?? 'campana';
+                this.rf = R ? { key: d.rf, mode: R.mode, tpl: R.tpl ?? tpl, units: R.mode === 'add' ? copyUnits(R.units) : emptyUnits(), gold: R.gold, now: R.now, keep: R.keep }
+                    : { key: d.rf, mode: 'tpl', tpl, units: emptyUnits(), gold: 200, now: false, keep: false };
+                break;
+            }
+            case 'rf-set': {
+                const r = this.rf;
+                if (!r) return;
+                if (d.key === 'mode') { r.mode = d.value === 'add' ? 'add' : 'tpl'; if (r.mode === 'add') r.keep = false; }
+                else if (d.key === 'gold') { r.now = d.value === 'now'; if (!r.now) r.gold = +d.value; }
+                else if (d.key === 'keep' && r.mode === 'tpl') r.keep = !r.keep;
+                break;
+            }
+            case 'rf-step': { const u = this.rf?.units; if (u) u[d.unit] = Math.max(0, Math.min(TPL_MAX, (u[d.unit] || 0) + +d.delta)); break; }
+            case 'rf-save': {
+                const r = this.rf, ref = r && this.rfRef(r.key);
+                if (ref && g.playerReinforce(ref, { mode: r.mode, tpl: r.tpl, units: r.units, gold: r.gold, now: r.now, keep: r.keep })) this.rf = null;
+                break;
+            }
+            case 'rf-cancel': this.rf = null; break;
+            case 'rf-stop': { const ref = this.rfRef(d.rf); if (ref) g.playerReinforce(ref, null); if (this.rf?.key === d.rf) this.rf = null; break; }
             case 'op-goto': {
                 const op = g.ops.get(+d.id);
                 if (!op) return;
@@ -9956,6 +10248,12 @@ class GameUI {
             const save = document.querySelector('[data-action="tpl-save"]');
             if (save) save.disabled = !countUnits(u) || this.game.nations[this.game.player].templates.length >= TPL_OWN_MAX;
         }
+        if (e.target.dataset.rfUnit && this.rf) {   // como en el editor de plantillas: sin redibujar
+            const u = this.rf.units, ref = this.rfRef(this.rf.key);
+            u[e.target.dataset.rfUnit] = Math.max(0, Math.min(TPL_MAX, Math.trunc(Number(e.target.value)) || 0));
+            const facts = e.target.closest('.rf-edit')?.querySelector('[data-rf-facts]');
+            if (facts && ref) facts.textContent = this.rfFacts(ref);
+        }
         if (e.target.dataset.cmd) {   // deslizadores del presupuesto: se actualiza el texto sin redibujar (para poder arrastrar)
             this.game.playerCommand(e.target.dataset.cmd, e.target.value);
             const c = this.game.nations[this.game.player].command, total = Object.values(c.budget).reduce((x, y) => x + y, 0) || 1;
@@ -9991,6 +10289,7 @@ class GameUI {
         if (e.target.id === 'peace-keep') { this.peace.keep = e.target.checked; this.renderPeaceDialog(); }
         if (e.target.dataset.opAssign !== undefined) { this.game.assignArmy(this.selectedArmy(), +e.target.value); this.render(); }
         if (e.target.dataset.airTask !== undefined) this.airTaskChange(+e.target.dataset.airTask, e.target.value);
+        if (e.target.dataset.rfTpl !== undefined && this.rf) { this.rf.tpl = e.target.value; this.render(); }
         if (e.target.dataset.opTemplate !== undefined) { const op = this.game.ops.get(+e.target.dataset.opTemplate); if (op) this.game.playerOpSet(op, 'template', e.target.value); this.render(); }
         if (e.target.dataset.obArmy !== undefined) {   // casilla de un ejército del cajón: solo se refresca la barra, sin perder el sitio de la lista
             const id = +e.target.dataset.obArmy;
@@ -10218,6 +10517,7 @@ class GameUI {
                 ${this.selTools()}
             </section>`);
             sections.push(this.orderSection(a));
+            sections.push(`<section class="sec"><h3>Refuerzos</h3>${this.reinforceBox({ army: a.id })}</section>`);
         }
         if (sea) {
             el.innerHTML = `
@@ -10393,8 +10693,9 @@ class GameUI {
                     <button class="btn ${on('group-assault')}" data-action="sel-assault" title="Elige una casilla enemiga: cada uno va a una casilla de partida a su lado y atacan a la vez cuando estén todos">Ataque coordinado…</button>
                     <button class="btn" data-action="sel-hold" title="Se quedan donde están">Mantener</button>
                     <button class="btn" data-action="sel-fortify" title="Cada uno fortifica su casilla (los embarcados, no)">Fortificar</button>
-                    <button class="btn" data-action="sel-reinforce" disabled title="Pronto: reforzar la agrupación hasta una plantilla">Reforzar</button>
+                    <button class="btn" data-action="rf-open" data-rf="${gr ? `g${gr.id}` : ''}" ${gr ? '' : 'disabled'} title="${gr ? 'Tropas nuevas que llegan a la agrupación: hasta una plantilla o las que digas' : 'Solo una agrupación entera: crea una con estos ejércitos'}">Reforzar</button>
                 </div>
+                ${gr && (gr.reinforce || this.rf?.key === `g${gr.id}`) ? this.reinforceBox({ group: gr.id }, false) : ''}
                 ${ops.length ? `<div class="row" style="margin-top:8px"><span class="small">Operación</span><select data-sel-op style="flex:1"><option value="0">Ninguna</option>${ops.map(o => `<option value="${o.id}" ${xs.every(a => a.op === o.id) ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select>
                     <button class="btn" data-action="sel-op">Asignar</button></div>` : ''}
                 <p class="note">Las órdenes valen para cada ejército, como las de uno solo: se cumplen al terminar el turno o con «Ejecutar órdenes» (O).</p>
@@ -11109,7 +11410,10 @@ class GameUI {
                     <button class="btn" data-action="ob-center" data-id="${gr.id}" title="Centrar el mapa en la agrupación">Centrar</button>
                     <button class="btn ob-color" data-action="ob-color" data-id="${gr.id}" title="Cambiar el color" aria-label="Cambiar el color"><i style="background:${col}"></i></button>
                     <button class="btn ghost" data-action="ob-toggle" data-id="${gr.id}" title="${open ? 'Plegar' : 'Desplegar'} sus ejércitos" aria-label="${open ? 'Plegar' : 'Desplegar'} sus ejércitos">${open ? '▴' : '▾'}</button>
+                    <button class="btn" data-action="rf-open" data-rf="g${gr.id}" title="Tropas nuevas que llegan a la agrupación: hasta una plantilla o las que digas">Reforzar</button>
                     <button class="btn ghost" data-action="ob-disband" data-id="${gr.id}" title="Disolver la agrupación: sus ejércitos quedan sueltos">Disolver</button></div>
+                ${this.rf?.key === `g${gr.id}` ? this.reinforceEditor({ group: gr.id }) : gr.reinforce ? `<div class="rf-status-row"><p class="small rf-status">${this.rfStatus({ group: gr.id })}</p>
+                    <button class="btn ghost" data-action="rf-stop" data-rf="g${gr.id}">Parar</button></div>` : ''}
                 ${open ? `<div class="ob-list">${ms.filter(pass).map(a => row(a, true)).join('') || '<p class="note">Ninguno cumple el filtro.</p>'}</div>` : ''}</div>`;
         }).join('');
         // Los sueltos, por provincia (o por operación).
@@ -11181,6 +11485,63 @@ class GameUI {
         const g = this.game, r = g.rules(g.player), k = countUnits(u);
         return `${k} · ${echelonOf(k).mark} · ataque ${unitPower(u, 'atk', r)}, defensa ${unitPower(u, 'def', r)}, velocidad ${k ? speedOf(u, r) : 0} · ${g.templateCost(g.player, u)} de oro`;
     }
+    // Una fila por tropa reclutable con los botones −100…+100 y la cifra a mano (`attr`, para onInput): el editor de
+    // plantillas y el de refuerzos.
+    unitSteppers(u, action, attr) {
+        const g = this.game, color = g.nations[g.player].color;
+        return g.recruitTypes(g.player).map(k => `<div class="unit-row">${unitIcon(k, color)}<div>${CONFIG.TYPES[k].name}</div>
+            <div class="stepper">${[-100, -10, -1].map(v => `<button data-action="${action}" data-unit="${k}" data-delta="${v}" ${u[k] ? '' : 'disabled'} aria-label="${-v} menos">−${-v}</button>`).join('')}
+            <input type="number" min="0" max="${TPL_MAX}" step="1" value="${u[k] || 0}" ${attr}="${k}" aria-label="${CONFIG.TYPES[k].name}">
+            ${[1, 10, 100].map(v => `<button data-action="${action}" data-unit="${k}" data-delta="${v}" aria-label="${v} más">+${v}</button>`).join('')}</div></div>`).join('');
+    }
+    // Refuerzos de un ejército o una agrupación (A7): cómo van y los botones, o el editor si está abierto. Con
+    // `button` falso, sin el de abrir el editor (la ficha múltiple ya lo tiene entre sus órdenes).
+    reinforceBox(ref, button = true) {
+        const g = this.game, key = g.rfKey(ref), R = g.rfOf(g.player, ref);
+        if (this.rf?.key === key) return this.reinforceEditor(ref);
+        return `${R ? `<p class="small rf-status">${this.rfStatus(ref)}</p>` : ''}
+            <div class="row rf-btns">${button ? `<button class="btn" data-action="rf-open" data-rf="${key}" title="Tropas nuevas que llegan hasta ${ref.army ? 'él' : 'ella'}: hasta una plantilla o las que digas">${R ? 'Cambiar' : 'Reforzar'}</button>` : ''}
+                ${R ? `<button class="btn ghost" data-action="rf-stop" data-rf="${key}">Parar</button>` : ''}</div>`;
+    }
+    // «Hasta una brigada mecanizada, 400 de oro por turno: reclutadas 40 de 120, 25 en camino.»
+    rfStatus(ref) {
+        const g = this.game, R = g.rfOf(g.player, ref), pr = R && g.reinforceProgress(g.player, ref);
+        if (!R) return '';
+        const what = R.mode === 'tpl' ? `Hasta una ${esc(R.name.toLowerCase())}` : `${plural(countUnits(R.units), 'unidad', 'unidades')} más (${unitText(R.units)})`;
+        const gold = R.now ? 'todo el oro que haga falta' : R.gold ? `${R.gold} de oro por turno` : '<span class="warn-text">sin oro</span>';
+        const prog = pr.full ? (R.keep ? 'completa; repone lo que pierda' : 'completa') : `reclutadas ${pr.done} de ${pr.total}${pr.coming ? `, ${pr.coming} en camino` : ''}`;
+        return `${what}, ${gold}${R.keep ? ', mantener completa' : ''}: ${prog}.`;
+    }
+    // Lo que costaría el refuerzo del editor: lo que falta para la plantilla, o lo que se añade.
+    rfFacts(ref) {
+        const g = this.game, p0 = g.player, d = this.rf;
+        const turns = cost => (!d.now && d.gold ? ` · unos ${plural(Math.ceil(cost / d.gold), 'turno', 'turnos')} de oro` : '');
+        if (d.mode === 'add') {
+            const k = countUnits(d.units), cost = g.templateCost(p0, d.units);
+            return k ? `${plural(k, 'unidad', 'unidades')} · ${cost} de oro${turns(cost)}` : 'Elige qué tropas añadir.';
+        }
+        const t = g.templateOf(p0, d.tpl), have = g.rfHave(p0, ref), need = emptyUnits();
+        if (!t) return '';
+        for (const k of g.recruitTypes(p0)) need[k] = Math.max(0, (t.units[k] || 0) - have[k]);
+        const k = countUnits(need), cost = g.templateCost(p0, need);
+        return k ? `Le faltan ${plural(k, 'unidad', 'unidades')} (${unitText(need)}) · ${cost} de oro${turns(cost)}` : `Ya tiene todo lo de la plantilla (${unitText(t.units)}).`;
+    }
+    reinforceEditor(ref) {
+        const g = this.game, n = g.nations[g.player], d = this.rf, tpl = d.mode === 'tpl';
+        const opts = [...Object.entries(TEMPLATES).map(([k, t]) => [k, `${t.name} · ${countUnits(t.units)}`]), ...n.templates.map((t, i) => [`c${i}`, `${t.name} (propia) · ${countUnits(t.units)}`])];
+        return `<div class="tpl-edit rf-edit">
+            <div class="seg">${[['tpl', 'Hasta una plantilla'], ['add', 'Añadir']].map(([v, l]) => `<button data-action="rf-set" data-key="mode" data-value="${v}" class="${d.mode === v ? 'on' : ''}">${l}</button>`).join('')}</div>
+            ${tpl ? `<select data-rf-tpl aria-label="Plantilla">${opts.map(([v, l]) => `<option value="${v}" ${d.tpl === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`
+                : this.unitSteppers(d.units, 'rf-step', 'data-rf-unit')}
+            <p class="small muted" data-rf-facts>${this.rfFacts(ref)}</p>
+            <p class="small" style="margin-top:2px">Oro por turno</p>
+            <div class="seg rf-gold">${OP_GOLD.map(v => `<button data-action="rf-set" data-key="gold" data-value="${v}" class="${!d.now && d.gold === v ? 'on' : ''}">${v || 'Nada'}</button>`).join('')}<button data-action="rf-set" data-key="gold" data-value="now" class="${d.now ? 'on' : ''}" title="Todo el oro que haga falta, ya">Todo ya</button></div>
+            <label class="check small"><input type="checkbox" data-action="rf-set" data-key="keep" ${tpl ? '' : 'disabled'} ${tpl && d.keep ? 'checked' : ''}><span>Mantener completa: si pierde tropas, vuelve a reclutar lo perdido${tpl ? '' : ' (solo hasta una plantilla)'}</span></label>
+            <p class="note" style="margin-top:0">Se recluta en las ciudades con cupo más cercanas ${ref.army ? 'al ejército' : 'a sus ejércitos'}, con tu oro; al turno siguiente las tropas marchan ${ref.army ? 'hasta él' : 'al ejército de la agrupación más cercano'} y se juntan.</p>
+            <div class="row"><button class="btn primary" data-action="rf-save" data-rf="${g.rfKey(ref)}">Reforzar</button><button class="btn ghost" data-action="rf-cancel">Cancelar</button></div>
+        </div>`;
+    }
+    rfRef(key) { const m = /^([ag])(\d+)$/.exec(key ?? ''); return m ? (m[1] === 'a' ? { army: +m[2] } : { group: +m[2] }) : null; }
     templatesSection() {
         const g = this.game, n = g.nations[g.player];
         const d = this.tplDraft ??= { name: '', units: { infantry: 6, tank: 2, artillery: 1 } };
@@ -11192,10 +11553,7 @@ class GameUI {
             ${n.templates.map((t, i) => row(t.name, t.units, `<button class="btn ghost" data-action="tpl-del" data-index="${i}" aria-label="Borrar" title="Borrar">✕</button>`)).join('')}
             <div class="tpl-edit">
                 <input type="text" id="tpl-name" maxlength="40" placeholder="Nombre de tu plantilla" value="${esc(d.name)}" aria-label="Nombre de la plantilla">
-                ${g.recruitTypes(g.player).map(k => `<div class="unit-row">${unitIcon(k, g.nations[g.player].color)}<div>${CONFIG.TYPES[k].name}</div>
-                    <div class="stepper">${[-100, -10, -1].map(v => `<button data-action="tpl-step" data-unit="${k}" data-delta="${v}" ${d.units[k] ? '' : 'disabled'} aria-label="${-v} menos">${v < 0 ? '−' : '+'}${Math.abs(v)}</button>`).join('')}
-                    <input type="number" min="0" max="${TPL_MAX}" step="1" value="${d.units[k] || 0}" data-tpl-unit="${k}" aria-label="${CONFIG.TYPES[k].name}">
-                    ${[1, 10, 100].map(v => `<button data-action="tpl-step" data-unit="${k}" data-delta="${v}" aria-label="${v} más">+${v}</button>`).join('')}</div></div>`).join('')}
+                ${this.unitSteppers(d.units, 'tpl-step', 'data-tpl-unit')}
                 <p class="small muted" data-tpl-facts>${facts(d.units)}</p>
                 <button class="btn" data-action="tpl-save" ${countUnits(d.units) && n.templates.length < TPL_OWN_MAX ? '' : 'disabled'}>Guardar plantilla</button>
             </div>

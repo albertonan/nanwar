@@ -82,6 +82,12 @@ const setup = () => {
             }
             throw new Error('no hay frontera');
         },
+        // Casilla libre de `owner`, sin ciudad, lo más lejos posible de sus ciudades (para que los reclutas tarden).
+        remote(g, owner) {
+            const cities = PROVINCES.filter(p => g.owner[p.city] === owner).map(p => p.city), f = g.landSteps(owner, cities);
+            const ok = c => g.owner[c] === owner && T.free(g, c) && f[c] < 1e9;
+            return G.land.filter(ok).sort((x, y) => f[y] - f[x] || x - y)[0];
+        },
         // Ciudad de `b` más cerca (por tierra) de la casilla dada.
         nearestCity(g, owner, b, cell) {
             const steps = g.field(owner, [cell]);
@@ -640,7 +646,7 @@ const CHECKS = [
         T.ok(ui.sel.size === 2 && !ui.ordering, 'la selección sigue');
         document.querySelector('#card [data-action="sel-hold"]').click();
         T.ok([xs[2], xs[3]].every(x => x.order?.kind === 'hold'), 'mantener');
-        T.ok(document.querySelector('#card [data-action="sel-reinforce"]').disabled, 'Reforzar, aún no');
+        T.ok(document.querySelector('#card [data-action="rf-open"]').disabled, 'Reforzar, solo una agrupación entera');
         // Elegir la agrupación entera da su botón de disolver.
         ui.selectGroup(gr.id);
         T.eq(ui.sel.size, 4, 'toda la agrupación');
@@ -1262,6 +1268,200 @@ const CHECKS = [
         document.querySelector('[data-action="op-set"][data-key="launch"][data-value="lista"]').click();
         T.eq(op.launch, 'lista', 'y vuelve');
         return true;
+    }],
+    ['A7 · hasta plantilla recluta solo lo que falta y llega al ejército', () => {
+        const g = T.game(), es = T.nation('es');
+        g.nations[es].gold = 1e7;
+        const a = T.army(g, es, T.remote(g, es), 3, 5, 0);   // la mecanizada es 8I 4T: faltan 5 infanterías
+        const ref = { army: a.id };
+        T.eq(g.reinforceNeed(es, ref), 0, 'sin refuerzo, nada');
+        T.ok(!g.setReinforce(es, ref, { mode: 'tpl', tpl: 'nada' }), 'plantilla que no existe');
+        T.ok(!g.setReinforce(es, ref, { mode: 'add', units: {} }), 'añadir nada');
+        const R = g.setReinforce(es, ref, { mode: 'tpl', tpl: 'mecanizada', gold: 0, now: true });
+        T.ok(R && a.reinforce === R, 'el estado vive en el ejército');
+        T.eq(g.reinforceNeed(es, ref), 5, 'faltan 5');
+        T.turns(g, es, 1);
+        T.eq(R.recruited, { infantry: 5, tank: 0, artillery: 0, antiair: 0 }, 'recluta solo las infanterías que faltan');
+        T.eq(R.pending.reduce((s, [, u]) => s + countUnits(u), 0), 5, 'esperan en sus ciudades');
+        T.eq(g.reinforceNeed(es, ref), 0, 'lo que va de camino cuenta');
+        T.turns(g, es, 1);
+        const recruits = [...g.armies.values()].filter(x => x.rein === `a${a.id}`);
+        T.ok(recruits.length && recruits.every(x => x.order?.kind === 'join' && x.order.target === a.id), 'al turno siguiente marchan a juntarse con él');
+        T.eq(g.reinforceProgress(es, ref).done, 5, 'progreso: 5 reclutadas');
+        for (let i = 0; i < 40 && a.reinforce; i++) T.turns(g, es, 1);
+        T.eq(a.reinforce, null, 'completo: se acaba');
+        T.eq([a.units.infantry, a.units.tank], [8, 5], 'llegan todas al ejército');
+        T.ok(![...g.armies.values()].some(x => x.rein), 'no quedan reclutas sueltos');
+        return true;
+    }],
+    ['A7 · añadir 200 con 400 por turno tarda los turnos que da el oro', () => {
+        const g = T.game(), es = T.nation('es');
+        g.nations[es].gold = 1e7;
+        const a = T.army(g, es, T.remote(g, es), 2), ref = { army: a.id };
+        const R = g.setReinforce(es, ref, { mode: 'add', units: { infantry: 200 }, gold: 400 });
+        T.ok(R, 'refuerzo');
+        const costs = PROVINCES.filter(p => g.owner[p.city] === es).map(p => g.unitCost(es, 'infantry', p.id));
+        const cMin = Math.min(...costs), cMax = Math.max(...costs);
+        let t = 0, last = 0;
+        while (countUnits(R.recruited) < 200 && t < 60) {
+            T.turns(g, es, 1); t++;
+            const n = countUnits(R.recruited);
+            T.ok(n <= Math.floor(400 * t / cMin), `turno ${t}: ${n} reclutadas, más de lo que da el oro`);
+            T.ok(n - last <= Math.floor(400 * 6 / cMin), 'nunca más que el fondo de seis turnos');
+            last = n;
+        }
+        T.eq(countUnits(R.recruited), 200, 'las 200');
+        T.ok(t >= Math.ceil(200 * cMin / 400) && t <= Math.ceil(200 * cMax / 400) + 1, `tarda lo que da el oro: ${t} turnos (${cMin}–${cMax} cada una)`);
+        for (let i = 0; i < 40 && a.reinforce; i++) T.turns(g, es, 1);
+        T.eq(a.reinforce, null, 'termina');
+        T.eq(a.units.infantry, 202, 'todas en el ejército');
+        return true;
+    }],
+    ['A7 · mantener completa repone lo perdido tras un combate', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.nations[es].gold = 1e7;
+        g.declareWar(es, fr);
+        const [c, j] = T.border(g, es, fr);
+        const a = T.army(g, es, c, 8, 4, 0), ref = { army: a.id };
+        const old = g.armyOn(j); if (old) g.removeArmy(old);
+        const R = g.setReinforce(es, ref, { mode: 'tpl', tpl: 'mecanizada', now: true, keep: true });
+        T.turns(g, es, 1);
+        T.ok(a.reinforce === R && !countUnits(R.recruited), 'completa: no recluta y sigue atenta');
+        g.settle(g.newArmy(fr, j, { infantry: 10, tank: 0, artillery: 0 }, 0));
+        T.ok(g.setOrder(a, { kind: 'attack', dest: j, ratio: 0 }), 'orden de ataque');
+        g.executeOrders(es);
+        T.ok(g.armies.has(a.id), 'gana y sigue vivo');
+        const lost = 12 - countUnits(a.units);
+        T.ok(lost > 0, 'pierde tropas en el combate');
+        T.eq(countUnits(R.recruited), lost, 'al terminar sus órdenes ya recluta lo perdido');
+        T.eq(g.reinforceProgress(es, ref).coming, lost, 'y va de camino');
+        g.turn++; g.nations[es].recruited.clear(); for (const x of g.armies.values()) if (x.owner === es) x.used = 0;
+        for (let i = 0; i < 40 && countUnits(a.units) < 12; i++) T.turns(g, es, 1);
+        T.eq([a.units.infantry, a.units.tank], [8, 4], 'vuelve a la plantilla');
+        T.eq(countUnits(R.recruited), lost, 'recluta justo lo perdido');
+        T.turns(g, es, 1);
+        T.ok(a.reinforce === R, 'y sigue mantenida');
+        return true;
+    }],
+    ['A7 · reforzar una agrupación lleva los reclutas al miembro más cercano', () => {
+        const g = T.game(), es = T.nation('es');
+        g.nations[es].gold = 1e7;
+        const c1 = T.remote(g, es), f = g.orderField(es, c1);
+        const c2 = G.land.filter(c => g.owner[c] === es && T.free(g, c) && f.to(c) < Infinity).sort((x, y) => f.dist[y] - f.dist[x])[0];
+        const m1 = T.army(g, es, c1, 3), m2 = T.army(g, es, c2, 3);
+        const gr = g.createGroup(es, [m1.id, m2.id]), ref = { group: gr.id };
+        const R = g.setReinforce(es, ref, { mode: 'add', units: { infantry: 6 }, now: true });
+        T.ok(R && gr.reinforce === R, 'el estado vive en la agrupación');
+        T.turns(g, es, 2);
+        const recruits = [...g.armies.values()].filter(x => x.rein === `g${gr.id}`);
+        T.ok(recruits.length, 'hay reclutas en marcha');
+        const dist = (x, m) => g.orderField(es, m.cell).to(x.cell);
+        for (const x of recruits) {
+            const near = [m1, m2].sort((p, q) => dist(x, p) - dist(x, q))[0];
+            T.eq(x.order?.kind === 'join' && x.order.target, near.id, `el de ${g.placeName(x.cell)} va al más cercano`);
+            T.eq(x.group, 0, 'los reclutas no son miembros hasta llegar');
+        }
+        for (let i = 0; i < 50 && gr.reinforce; i++) T.turns(g, es, 1);
+        T.eq(gr.reinforce, null, 'termina');
+        T.eq(m1.units.infantry + m2.units.infantry, 12, 'las 6 llegan a la agrupación');
+        return true;
+    }],
+    ['A7 · al fundirse, el refuerzo pasa al que recibe y los reclutas le siguen', () => {
+        const g = T.game(), es = T.nation('es');
+        g.nations[es].gold = 1e7;
+        const c = T.remote(g, es), [d] = T.cellsAt(g, es, c, [1]);
+        const a = T.army(g, es, c, 2), b = T.army(g, es, d, 2);
+        const R = g.setReinforce(es, { army: a.id }, { mode: 'add', units: { infantry: 3 }, now: true });
+        T.turns(g, es, 2);
+        const recruits = [...g.armies.values()].filter(x => x.rein === `a${a.id}`);
+        T.ok(recruits.length, 'reclutas en marcha');
+        g.armyAt[a.cell] = 0; a.cell = b.cell;
+        T.eq(g.settle(a), b, 'a se funde en b');
+        T.ok(b.reinforce === R, 'b se queda el refuerzo');
+        T.ok(recruits.every(x => !g.armies.has(x.id) || (x.rein === `a${b.id}` && x.order?.target === b.id)), 'los reclutas van ahora a b');
+        for (let i = 0; i < 40 && b.reinforce; i++) T.turns(g, es, 1);
+        T.eq([b.reinforce, b.units.infantry], [null, 7], 'llegan a b');
+        // Si el que recibe se fue en su mayor parte, el refuerzo se va con ella.
+        const R2 = g.setReinforce(es, { army: b.id }, { mode: 'add', units: { infantry: 1 }, now: true });
+        const part = g.split(b, { infantry: 5, tank: 0, artillery: 0, antiair: 0 });
+        T.ok(part.reinforce === R2 && !b.reinforce, 'el refuerzo sigue a la parte mayor');
+        g.changeOwner(part, T.nation('fr'));
+        T.eq(part.reinforce, null, 'el que cambia de dueño lo pierde');
+        return true;
+    }],
+    ['A7 · se guarda y se carga', () => {
+        const g = T.game(), es = T.nation('es');
+        g.nations[es].gold = 1e7;
+        const c = T.remote(g, es), [d, e] = T.cellsAt(g, es, c, [2, 3]);
+        const a = T.army(g, es, c, 4), m1 = T.army(g, es, d, 2), m2 = T.army(g, es, e, 2);
+        const gr = g.createGroup(es, [m1.id, m2.id]);
+        g.setReinforce(es, { army: a.id }, { mode: 'tpl', tpl: 'infanteria', gold: 200, keep: true });
+        g.setReinforce(es, { group: gr.id }, { mode: 'add', units: { infantry: 4, tank: 2 }, gold: 0, now: true });
+        T.turns(g, es, 2);
+        const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+        T.eq(h.armies.get(a.id).reinforce, a.reinforce, 'el del ejército');
+        T.eq(h.groupById(es, gr.id).reinforce, gr.reinforce, 'el de la agrupación');
+        const marks = x => [...x.armies.values()].filter(y => y.rein).map(y => [y.id, y.rein, y.order?.kind, y.order?.target]).sort((p, q) => p[0] - q[0]);
+        T.ok(marks(g).length, 'hay reclutas en marcha');
+        T.eq(marks(h), marks(g), 'los reclutas y sus órdenes');
+        // Lo que llega roto se descarta.
+        const raw = JSON.parse(JSON.stringify(g.serialize()));
+        raw.armyRein = [[a.id, { mode: 'otro', units: { infantry: 3 } }]];
+        raw.nations[es].groups.find(x => x.id === gr.id).reinforce = { mode: 'add', units: { infantry: -4 }, gold: 7 };
+        raw.reinMarks = [[m1.id, 'a<b>'], [a.id, 'g999']];
+        const k = GameEngine.load(raw);
+        T.eq([k.armies.get(a.id).reinforce ?? null, k.groupById(es, gr.id).reinforce], [null, null], 'refuerzos rotos, fuera');
+        T.ok(![...k.armies.values()].some(y => y.rein), 'marcas rotas, fuera');
+        // Y la partida cargada termina el de la agrupación.
+        for (let i = 0; i < 40 && h.groupById(es, gr.id).reinforce; i++) T.turns(h, es, 1);
+        T.eq(h.groupById(es, gr.id).reinforce, null, 'la cargada sigue');
+        T.eq(countUnits(h.groupUnits(es, gr.id)), 10, 'con todo lo pedido');
+        return true;
+    }],
+    ['A7 · el editor de la ficha refuerza el ejército y la agrupación', () => {
+        const g = T.uiStart('es'), es = g.player;
+        ui.view.setMode('sencilla');
+        const c = T.remote(g, es), [d] = T.cellsAt(g, es, c, [1]);
+        const a = T.army(g, es, c, 3, 5, 0), b = T.army(g, es, d, 2);
+        ui.clickCell(a.cell); ui.render();
+        document.querySelector('#card [data-action="rf-open"]').click();
+        T.ok(document.querySelector('#card .rf-edit'), 'se abre el editor');
+        const sel = document.querySelector('#card select[data-rf-tpl]');
+        sel.value = 'mecanizada'; sel.dispatchEvent(new Event('change', { bubbles: true }));
+        T.ok(document.querySelector('#card [data-rf-facts]').textContent.includes('5'), 'dice lo que falta');
+        document.querySelector('#card [data-action="rf-set"][data-key="gold"][data-value="400"]').click();
+        document.querySelector('#card [data-action="rf-set"][data-key="keep"]').click();
+        document.querySelector('#card [data-action="rf-save"]').click();
+        T.eq([a.reinforce?.mode, a.reinforce?.tpl, a.reinforce?.gold, a.reinforce?.now, a.reinforce?.keep], ['tpl', 'mecanizada', 400, false, true], 'guardado');
+        T.ok(!document.querySelector('#card .rf-edit') && document.querySelector('#card').textContent.includes('reclutadas 0 de 5'), 'progreso en la ficha');
+        T.ok(g.logs.at(-1).msg.includes('hasta una brigada mecanizada, con 400 de oro por turno; se mantendrá completa'), 'línea en el registro');
+        // Añadir: los mismos botones que el editor de plantillas, y «Mantener completa» no vale.
+        document.querySelector('#card [data-action="rf-open"]').click();
+        document.querySelector('#card [data-action="rf-set"][data-key="mode"][data-value="add"]').click();
+        T.ok(document.querySelector('#card [data-action="rf-set"][data-key="keep"]').disabled, 'mantener, solo con plantilla');
+        document.querySelector('#card [data-action="rf-step"][data-unit="tank"][data-delta="10"]').click();
+        const inp = document.querySelector('#card input[data-rf-unit="infantry"]');
+        inp.value = '30'; inp.dispatchEvent(new Event('input', { bubbles: true }));
+        document.querySelector('#card [data-action="rf-set"][data-key="gold"][data-value="now"]').click();
+        document.querySelector('#card [data-action="rf-save"]').click();
+        T.eq([a.reinforce.mode, a.reinforce.units.infantry, a.reinforce.units.tank, a.reinforce.now, a.reinforce.keep], ['add', 30, 10, true, false], 'añadir');
+        document.querySelector('#card [data-action="rf-stop"]').click();
+        T.eq(a.reinforce, null, 'parar');
+        // Varios elegidos: solo una agrupación entera se refuerza.
+        ui.clickCell(b.cell, false, true); ui.render();
+        T.ok(document.querySelector('#card [data-action="rf-open"]').disabled, 'sin agrupación, desactivado');
+        const gr = g.createGroup(es, [a.id, b.id]); ui.render();
+        document.querySelector('#card [data-action="rf-open"]').click();
+        document.querySelector('#card [data-action="rf-save"]').click();
+        T.ok(gr.reinforce, 'la agrupación, desde la ficha múltiple');
+        // Y desde la fila del cajón.
+        g.clearReinforce(es, { group: gr.id });
+        ui.select(-1); ui.tab = 'batalla'; ui.drawerOpen = true; ui.render();
+        document.querySelector(`[data-ob-group="${gr.id}"] [data-action="rf-open"]`).click();
+        T.ok(document.querySelector(`[data-ob-group="${gr.id}"] .rf-edit`), 'editor en la fila');
+        document.querySelector(`[data-ob-group="${gr.id}"] [data-action="rf-save"]`).click();
+        T.ok(gr.reinforce && document.querySelector(`[data-ob-group="${gr.id}"]`).textContent.includes('reclutadas'), 'la fila enseña el progreso');
+        return true;
     }]
 ];
 
@@ -1447,6 +1647,59 @@ try {
         if (errs.length) { failed++; console.log(`FALLA ${OP_SHOTS}\n      ${errs.join('\n      ')}`); }
         else console.log(`ok    ${OP_SHOTS} (${join(out, 'ofensiva-reunion.png')}, ofensiva-avance.png, ofensiva-reunion-movil.png, ofensiva-avance-movil.png)`);
         await opPage.close();
+    }
+    // Capturas del editor de refuerzos (A7): en la ficha de un ejército (hasta una plantilla y añadir), en la fila de una
+    // agrupación del cajón con otra que ya se refuerza, en escritorio y móvil.
+    const RF_SHOTS = 'A7 · captura del editor de refuerzos';
+    if (!filter || RF_SHOTS.includes(filter)) {
+        ran++;
+        const out = join(root, 'tools/cache/smoke');
+        mkdirSync(out, { recursive: true });
+        const rp = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+        const errs = [], names = [];
+        rp.on('pageerror', e => errs.push(e.message));
+        await rp.goto(`http://localhost:${port}/?seed=7`);
+        await rp.waitForFunction(() => typeof GameEngine === 'function' && typeof ui === 'object');
+        await rp.evaluate(setup);
+        await rp.evaluate(() => {
+            const g = T.uiStart('es'), es = g.player;
+            ui.view.setMode('sencilla');
+            g.nations[es].gold = 50000;
+            const c = T.remote(g, es), [d, e, f] = T.cellsAt(g, es, c, [2, 3, 4]);
+            const a = T.army(g, es, c, 9, 2, 1), m = [d, e, f].map((x, i) => T.army(g, es, x, [12, 6, 8][i], [4, 0, 2][i], [2, 1, 0][i]));
+            const g1 = g.createGroup(es, [m[0].id, m[1].id]), g2 = g.createGroup(es, [m[2].id], { name: 'Reserva del norte' });
+            g.playerReinforce({ group: g1.id }, { mode: 'tpl', tpl: 'division', gold: 400, keep: true });
+            T.turns(g, es, 1);
+            window.SHOT = { a, g2 };
+            ui.clickCell(a.cell); ui.view.centerOn(a.cell, 22); ui.view.ox += 120; ui.render();
+            document.querySelector('#card [data-action="rf-open"]').click();
+            document.querySelector('#card .rf-edit').scrollIntoView({ block: 'start' }); document.querySelector('#card').scrollTop -= 40;
+        });
+        const shot = async name => { await rp.waitForTimeout(300); await rp.screenshot({ path: join(out, name) }); names.push(name); };
+        await shot('refuerzo-plantilla.png');
+        await rp.evaluate(() => {
+            document.querySelector('#card [data-action="rf-set"][data-key="mode"][data-value="add"]').click();
+            for (const [k, v] of [['infantry', 100], ['infantry', 10], ['tank', 10], ['artillery', 1]]) document.querySelector(`#card [data-action="rf-step"][data-unit="${k}"][data-delta="${v}"]`).click();
+            document.querySelector('#card .rf-edit').scrollIntoView({ block: 'start' }); document.querySelector('#card').scrollTop -= 40;
+        });
+        await shot('refuerzo-anadir.png');
+        await rp.evaluate(() => {
+            ui.rf = null; ui.select(-1); ui.tab = 'batalla'; ui.drawerOpen = true; ui.render();
+            document.querySelector(`[data-ob-group="${SHOT.g2.id}"] [data-action="rf-open"]`).click();
+        });
+        await shot('refuerzo-cajon.png');
+        await rp.setViewportSize({ width: 390, height: 844 });
+        await rp.evaluate(() => { ui.setSheet('grande'); ui.drawerOpen = true; ui.render(); document.querySelector(`[data-ob-group="${SHOT.g2.id}"] .rf-edit`).scrollIntoView(); });
+        await shot('refuerzo-cajon-movil.png');
+        await rp.evaluate(() => {
+            ui.rf = null; ui.drawerOpen = false; ui.clickCell(SHOT.a.cell); ui.render();
+            document.querySelector('#card [data-action="rf-open"]').click();
+            document.querySelector('#card .rf-edit').scrollIntoView();
+        });
+        await shot('refuerzo-movil.png');
+        if (errs.length) { failed++; console.log(`FALLA ${RF_SHOTS}\n      ${errs.join('\n      ')}`); }
+        else console.log(`ok    ${RF_SHOTS} (${join(out, names[0])}, ${names.slice(1).join(', ')})`);
+        await rp.close();
     }
 } finally {
     await browser.close();
