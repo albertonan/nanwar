@@ -780,15 +780,19 @@ const AI_ANTIAIR = 0.95;
 const AI_AIR_TURNS = 3;
 // Cohetes y misiles de la IA (C6, aiStrikes). Una salva le cuesta como mucho AI_ARMS_TURNS turnos de renta, y no compra
 // el arma que le cuesta más de AI_ARMS_POOR veces sus turnos (la paga al mínimo: al pobre le hacen más falta las
-// tropas). Mientras tenga un blanco que no puede pagar, aparta AI_ARMS_SHARE de su renta (armsFund) y lo guarda hasta
-// AI_ARMS_KEEP turnos sin blanco; para la bomba, AI_NUKE_SHARE (nukeFund). Salvas por turno, armas por salva y las que
-// se espera que hagan su efecto; ejército enemigo grande (unidades que sabe que tiene) y a cuántas casillas de sus
-// ciudades, y cuánto tiene que valer lo que se espera matarle frente al precio. Turnos que recuerda que un enemigo
-// lanzó (su arsenal, conocido: aiBatteries).
-const AI_ARMS_TURNS = 8, AI_ARMS_POOR = 1.5, AI_ARMS_SHARE = 0.4, AI_NUKE_SHARE = 0.4, AI_STRIKES = 2, AI_SALVO = 3, AI_STRIKE_HITS = 0.75;
-const AI_STRIKE_ARMY = 10, AI_STRIKE_NEAR = 3, AI_STRIKE_VALUE = 0.15, AI_ARMS_MEMORY = 10, AI_ARMS_KEEP = 10;
+// tropas). Para la salva que no puede pagar, y para la bomba, aparta AI_ARMS_SHARE de su renta (armsFund, nukeFund),
+// pero solo si así la reúne en AI_ARMS_SAVE turnos o menos: si no, no le compensa. Lo apartado vuelve a las tropas tras
+// AI_ARMS_KEEP turnos sin un blanco así. Salvas por turno, armas por salva y las que se espera que hagan su efecto;
+// ejército enemigo grande (una división: unidades que sabe que tiene) a cuántas casillas de sus ciudades, y cuánto
+// tiene que valer lo que se espera matarle frente al precio. Turnos que recuerda que un enemigo lanzó (su arsenal,
+// conocido: aiBatteries).
+const AI_ARMS_TURNS = 8, AI_ARMS_POOR = 1.5, AI_ARMS_SHARE = 0.25, AI_ARMS_SAVE = 6, AI_ARMS_KEEP = 3;
+const AI_STRIKES = 2, AI_SALVO = 3, AI_STRIKE_HITS = 0.5, AI_STRIKE_ARMY = 25, AI_STRIKE_NEAR = 3, AI_STRIKE_VALUE = 0.05, AI_ARMS_MEMORY = 10;
 // Las armas que usa la IA, de la más barata a la más cara (la bomba va aparte: aiNukes).
 const AI_WEAPONS = ['rocket', 'heavyRocket', 'missile', 'guided', 'heavy'];
+// Peso de Cohetería en la investigación de la IA rica (renta en el tercio alto), en guerra y en paz; la demás, 0,5 en
+// guerra y 0,05 en paz.
+const AI_ROCKETRY_RICH = [3, 2.2];
 // Las operaciones de la IA no bombardean un ejército de menos unidades que estas: acabar con una guarnición suelta es
 // cosa de la tierra (la aviación prepara y apoya, no conquista).
 const AI_MIN_ARMY = 2;
@@ -3980,10 +3984,10 @@ class GameEngine {
         return alive.filter(x => inc(x) > mine).length < Math.ceil(alive.length / 3);
     }
     // La bomba de la IA (C4), nunca con las nucleares prohibidas. Si tiene una, la lanza solo si pierde de verdad
-    // (nukeLosing), contra nukeTarget. Si no la tiene, compra una si puede, es rica (nukeRich) y está en guerra con alguien
-    // más fuerte que ella; si no le llega el oro, en esos turnos aiRecruit le aparta para ella (nukeFund, C6). Lo
-    // apartado se guarda entre guerras mientras siga rica y con la investigación; si deja de estarlo, o ya tiene la
-    // bomba, vuelve a las tropas.
+    // (nukeLosing), contra nukeTarget. Si no la tiene, compra una si puede, es rica (nukeRich) y pierde de verdad o está en
+    // guerra con alguien más fuerte que ella. Si no le llega el oro pero lo reuniría en AI_ARMS_SAVE turnos, en esos
+    // turnos aiRecruit le aparta para ella (nukeFund, C6); en cuanto deja de cumplirse algo de eso, lo apartado vuelve a
+    // las tropas.
     aiNukes(id, powers = this.powers()) {
         const n = this.nations[id];
         (this.nukeSave ??= new Map()).delete(id);
@@ -3995,12 +3999,12 @@ class GameEngine {
             if (cell >= 0) this.launchStrike(id, 'nuclear', 1, 'army', cell);
             return;
         }
-        const war = this.enemiesOf(id).some(e => powers[e] > powers[id]);
-        if (!war && !n.nukeFund) return;
-        if (!this.nukeRich(id)) { n.nukeFund = 0; return; }
-        if (!war) return;
-        if (n.gold >= this.weaponPrice(id, 'nuclear')) { this.buyWeapon(id, 'nuclear', 1); n.nukeFund = 0; }
-        else this.nukeSave.set(id, this.turn);
+        const foes = this.enemiesOf(id);
+        if (!foes.length || !(foes.some(e => powers[e] > powers[id]) || this.nukeLosing(id)) || !this.nukeRich(id)) { n.nukeFund = 0; return; }
+        const price = this.weaponPrice(id, 'nuclear');
+        if (n.gold >= price) { this.buyWeapon(id, 'nuclear', 1); n.nukeFund = 0; }
+        else if (price - n.nukeFund <= AI_ARMS_SAVE * AI_ARMS_SHARE * Math.max(0, this.income(id))) this.nukeSave.set(id, this.turn);
+        else n.nukeFund = 0;
     }
     // El jugador lanza; si no puede, el parte dice por qué y no sale nada del arsenal.
     playerStrike(key, n, kind, cell) {
@@ -9841,7 +9845,8 @@ class GameEngine {
                 drones: war ? (foeDrones ? 1.2 : 0.7) : 0.1,
                 defensa: war ? (foeDrones ? 1.5 : 0.6) : nearDrones ? 0.5 : 0.1,
                 // Cohetería y Armas estratégicas: caras, solo en guerra (la bomba, si las nucleares están permitidas).
-                cohete: war ? 0.5 : 0.05, estrategicas: war ? 0.4 : 0.05
+                // Cohetería pesa más al rico, que es quien puede pagar los misiles (en paz es cuando se investiga).
+                cohete: this.nukeRich(id) ? AI_ROCKETRY_RICH[war ? 0 : 1] : war ? 0.5 : 0.05, estrategicas: war ? 0.4 : 0.05
             };
             weight[main] += war ? 2 : 0.5;
             if (fierce) for (const b of ['infanteria', 'blindados', 'artilleria', 'doctrina']) weight[b] *= 1.5;
@@ -9876,9 +9881,9 @@ class GameEngine {
         n.airFund = enemies.length && this.airSave?.get(id) === this.turn
             ? Math.min(CONFIG.AIR.SQUADRON_COST, n.airFund + Math.round(AI_AIR_SHARE * Math.max(0, this.income(id)))) : 0;
         // Igual para el arsenal (C6): para la salva que no puede pagar (aiStrikes), que se guarda mientras haya tenido un
-        // blanco así hace AI_ARMS_KEEP turnos o menos (sus blancos y sus guerras van y vienen), y para la bomba (aiNukes).
+        // blanco así hace AI_ARMS_KEEP turnos o menos (sus blancos van y vienen), y para la bomba (aiNukes).
         const inc = Math.max(0, this.income(id)), nuke = this.nukeSave?.get(id) === this.turn;   // la bomba, antes: mientras aparta para ella, no para otra cosa
-        if (nuke) n.nukeFund = Math.min(this.weaponPrice(id, 'nuclear'), n.nukeFund + Math.round(AI_NUKE_SHARE * inc));
+        if (nuke) n.nukeFund = Math.min(this.weaponPrice(id, 'nuclear'), n.nukeFund + Math.round(AI_ARMS_SHARE * inc));
         const saves = (this.armsSave ??= new Map()), arms = saves.get(id) ?? { turn: this.turn, cap: n.armsFund };   // recién cargada, lo que tenía
         if (this.turn - arms.turn > AI_ARMS_KEEP) { n.armsFund = 0; saves.delete(id); }
         else if (arms.turn === this.turn && !nuke) n.armsFund = Math.min(arms.cap, n.armsFund + Math.round(AI_ARMS_SHARE * inc));
@@ -10217,8 +10222,8 @@ class GameEngine {
     // 1. el antiaéreo fijo o integrado que conoce en el camino de sus operaciones aéreas (de la base de cada escuadrón de
     //    la operación a su punto clave), de más a menos fuerza, y luego las baterías que conoce en ese camino;
     // 2. la fortificación del objetivo de sus ofensivas en marcha;
-    // 3. los ejércitos enemigos grandes (AI_STRIKE_ARMY unidades que sepa que tienen) a AI_STRIKE_NEAR casillas o menos
-    //    de sus ciudades, los mayores primero.
+    // 3. los ejércitos enemigos grandes (una división: AI_STRIKE_ARMY unidades que sepa que tienen) a AI_STRIKE_NEAR
+    //    casillas o menos de sus ciudades, o en el objetivo de sus ofensivas en marcha o a su lado, los mayores primero.
     aiStrikeTargets(id, usable) {
         const out = [], can = kind => usable.some(k => STRIKE_FX[k].kinds.includes(kind)), ops = this.opsOf(id);
         if (can('aa') && this.squadrons.size) {
@@ -10251,8 +10256,10 @@ class GameEngine {
             const obj = op.cells[op.cells.length - 1];
             if (isLand(obj) && this.fort[obj] && this.atWar(id, this.owner[obj]) && !out.some(x => x.kind === 'fort' && x.cell === obj)) out.push({ kind: 'fort', cell: obj });
         }
-        const big = new Map();
-        for (const p of this.citiesOf(id)) for (const c of hexDisc(p.city, AI_STRIKE_NEAR)) {
+        const big = new Map(), around = [];
+        for (const p of this.citiesOf(id)) around.push(...hexDisc(p.city, AI_STRIKE_NEAR));
+        for (const op of ops) if (op.kind === 'ofensiva' && op.phase === 'avance' && !op.paused) around.push(...hexDisc(op.cells[op.cells.length - 1], 1));
+        for (const c of around) {
             const a = big.has(c) ? null : this.armyOn(c);
             if (!a || !this.atWar(id, a.owner)) continue;
             const k = this.leastUnits(id, a);
@@ -10290,12 +10297,13 @@ class GameEngine {
     // Cohetes y misiles de la IA, solo en guerra (C6): contra sus blancos (aiStrikeTargets), por orden, hasta AI_STRIKES
     // salvas por turno (aiStrikePlan). Usa lo que tenga en el arsenal y compra lo que falte, con lo apartado (armsFund) o
     // si le sobran el precio y su renta. Un arma que le cuesta más de AI_ARMS_POOR veces sus turnos de renta (paga el
-    // mínimo: es pobre) no la compra. Si hay un blanco que aún no puede pagar, aiRecruit le aparta oro este turno para el
-    // primero (lo apartado no se gasta en otro que vaya detrás).
+    // mínimo: es pobre) no la compra. Si hay un blanco que aún no puede pagar pero lo pagaría apartando AI_ARMS_SAVE
+    // turnos o menos, aiRecruit le aparta oro este turno para el primero así (lo apartado no se gasta en otro que vaya
+    // detrás).
     aiStrikes(id) {
         const n = this.nations[id];
         if (!this.enemiesOf(id).length) return;
-        const r = this.rules(id), inc = Math.max(0, this.income(id));
+        const r = this.rules(id), inc = Math.max(0, this.income(id)), reach = AI_ARMS_SAVE * AI_ARMS_SHARE * inc;   // lo que apartaría en AI_ARMS_SAVE turnos
         const usable = AI_WEAPONS.filter(k => (!WEAPONS[k].needs || r[WEAPONS[k].needs]) && (n.arsenal[k] > 0 || this.weaponPrice(id, k) <= AI_ARMS_POOR * WEAPONS[k].turns * inc));
         if (!usable.length) return;
         let salvos = 0, want = 0;
@@ -10305,7 +10313,7 @@ class GameEngine {
             if (!plan) continue;
             if (plan.cost) {
                 const spare = n.gold - this.aiReserve(id) - n.airFund - this.armsHeld(id) >= plan.cost + inc, fund = !want && n.armsFund >= plan.cost;
-                if (!spare && !fund) { want ||= plan.cost; continue; }
+                if (!spare && !fund) { if (!want && plan.cost - n.armsFund <= reach) want = plan.cost; continue; }   // si no lo reúne pronto, no aparta
                 if (!this.buyWeapon(id, plan.key, plan.buy)) continue;
                 if (!spare) n.armsFund -= plan.cost;
             }

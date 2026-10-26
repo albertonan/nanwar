@@ -821,7 +821,7 @@ const CHECKS = [
         T.ok(g.motion.slice(moves).some(e => e.kind === 'strike' && e.owner === poor && e.cell === c1), 'rico, lanza');
         return true;
     }],
-    ['C6 · aparta para la salva que no puede pagar y la compra con lo apartado', () => {
+    ['C6 · aparta para la salva solo si la reúne pronto, y la compra con lo apartado', () => {
         const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
         g.start(pt); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'cohete2');
         const [b, t] = T.pair(g, es, fr, (x, y) => flightPath(x, y).some(c => isLand(c) && g.owner[c] === fr && CITY_OF[c] < 0 && !g.armyAt[c]));
@@ -832,26 +832,33 @@ const CHECKS = [
         T.site(g, fr, cell).known.add(es);
         const n = g.nations[es], price = g.weaponPrice(es, 'missile'), inc = g.income(es), step = Math.round(AI_ARMS_SHARE * inc);
         T.luck(g, 0.99);
+        // Un misil son 4 turnos de renta: al 25 % no lo reúne en 6 turnos, así que no aparta.
+        T.ok(price > AI_ARMS_SAVE * AI_ARMS_SHARE * inc, 'el misil no se reúne en 6 turnos');
+        n.gold = price;
+        g.aiStrikes(es); g.aiRecruit(es);
+        T.eq([n.armsFund, g.aaSites.has(cell)], [0, true], 'no aparta ni compra');
+        // Con parte ya apartada, lo que falta sí se reúne pronto: aparta cada turno hasta tenerlo, y lo compra.
+        const start = price - 2 * step - 1;
+        n.armsFund = start;
         let turns = 0;
-        // Cada turno tiene lo justo para el misil, pero no le sobra: lo aparta de su renta hasta tenerlo.
-        while (g.aaSites.has(cell) && turns < 60) {
+        while (g.aaSites.has(cell) && turns < 10) {
             n.gold = price;
             g.aiStrikes(es);
             if (!g.aaSites.has(cell)) break;
             g.aiRecruit(es);
             turns++;
-            T.eq(n.armsFund, Math.min(price, turns * step), `apartado tras ${turns} turnos`);
+            T.eq(n.armsFund, Math.min(price, start + turns * step), `apartado tras ${turns} turnos`);
             T.ok(n.gold >= n.armsFund, 'no recluta con lo apartado');
         }
-        T.eq(turns, Math.ceil(price / step), 'turnos que tarda');
+        T.eq(turns, 3, 'turnos que tarda');
         T.eq([g.aaSites.has(cell), n.armsFund, n.arsenal.missile], [false, 0, 0], 'lo compra con lo apartado y lo lanza');
-        // Sin blanco que no pueda pagar, no aparta; lo apartado se guarda AI_ARMS_KEEP turnos sin blanco y luego vuelve a las tropas.
+        // Lo apartado se guarda AI_ARMS_KEEP turnos sin un blanco así y luego vuelve a las tropas.
         g.turn++; g.aiStrikes(es); g.aiRecruit(es);
         T.eq(n.armsFund, 0, 'sin blanco, nada');
         n.armsFund = 500; g.armsSave.set(es, { turn: g.turn, cap: price });
         g.turn += AI_ARMS_KEEP; n.gold = 1e4;
         g.aiStrikes(es); g.aiRecruit(es);
-        T.eq(n.armsFund, 500, 'guardado');
+        T.eq(n.armsFund, 500, `guardado ${AI_ARMS_KEEP} turnos`);
         g.turn++; g.aiStrikes(es); g.aiRecruit(es);
         T.eq(n.armsFund, 0, 'vuelve a las tropas');
         return true;
@@ -880,7 +887,37 @@ const CHECKS = [
         T.ok(g.fort[t] < 2 && countUnits(g.armyOn(near[0]).units) < units, 'baja la fortificación y causa bajas');
         return true;
     }],
-    ['C6 · aparta para la bomba si es rica y su enemigo más fuerte; nunca prohibidas', () => {
+    ['C6 · cohetes contra una división junto a sus ciudades o en el objetivo de su ofensiva', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
+        g.start(pt); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr);
+        T.noArmies(g, es); T.noArmies(g, fr);
+        const n = g.nations[es];
+        n.gold = 1e5;
+        // Junto a una ciudad española, una división francesa (30) y una brigada (20); un ejército español a tiro de cohete.
+        const esCities = PROVINCES.filter(p => g.owner[p.city] === es).map(p => p.city);
+        const near = G.land.filter(c => g.owner[c] === fr && T.free(g, c) && CELL_TERRAIN[c] !== 'lake' && esCities.some(x => hexDist(x, c) <= 2));
+        T.army(g, fr, near[0], 30); T.army(g, fr, near[1], 20);
+        const own = G.land.find(c => g.owner[c] === es && T.free(g, c) && hexDist(c, near[0]) <= kmCells(80) && hexDist(c, near[0]) >= 1);
+        T.army(g, es, own, 3);
+        // Y otra división en el objetivo de una ofensiva española, lejos de sus ciudades.
+        const obj = PROVINCES.filter(p => g.owner[p.city] === fr && esCities.every(x => hexDist(x, p.city) > AI_STRIKE_NEAR + 1) && !g.armyAt[p.city]).map(p => p.city)[0];
+        T.army(g, fr, obj, 40);
+        const op = g.createOp(es, 'ofensiva', [esCities[0], obj], { auto: 'auto', noCap: true });
+        const armies = () => g.aiStrikeTargets(es, ['rocket']).filter(x => x.kind === 'army').map(x => x.cell);
+        T.eq(armies().filter(c => [near[0], near[1], obj].includes(c)), [near[0]], 'la división junto a la ciudad; la brigada no; la ofensiva aún se reúne');
+        op.phase = 'avance';
+        T.eq(armies().filter(c => [near[0], near[1], obj].includes(c)), [obj, near[0]], 'en marcha, también la del objetivo (la mayor, antes)');
+        // Sin investigar nada, con cohetes: el ejército del objetivo no tiene lanzador a tiro; la división junto a la ciudad, sí.
+        T.luck(g, 0.99);
+        const moves = g.motion.length, units = countUnits(g.armyOn(near[0]).units);
+        g.aiStrikes(es);
+        const shots = g.motion.slice(moves).filter(e => e.kind === 'strike');
+        T.eq(shots.map(e => [e.weapon, e.cell, e.from]), [['rocket', near[0], own]], 'una salva de cohetes desde su ejército');
+        T.ok(countUnits(g.armyOn(near[0]).units) < units, 'causa bajas');
+        T.eq(g.armyOn(own).rocketTurn, g.turn, 'el ejército gasta su salva');
+        return true;
+    }],
+    ['C6 · aparta para la bomba solo si la reúne pronto y mientras lo necesite; nunca prohibidas', () => {
         const setup = (nukes = true) => {
             const g = T.game(7, false, nukes), es = T.nation('es'), fr = T.nation('fr'), pt = T.nation('pt');
             g.start(pt); T.bare(g); g.declareWar(es, fr);
@@ -889,23 +926,31 @@ const CHECKS = [
         };
         const { g, es, fr, n } = setup();
         T.ok(g.rules(fr).nuclear && g.nukeRich(fr), 'Francia: la bomba y rica');
-        const price = g.weaponPrice(fr, 'nuclear'), inc = g.income(fr);
+        const price = g.weaponPrice(fr, 'nuclear'), inc = g.income(fr), step = Math.round(AI_ARMS_SHARE * inc);
+        // 25 turnos de renta: desde cero no la reúne en 6 al 25 %, así que no aparta.
         n.gold = 0;
         g.aiNukes(fr); g.aiRecruit(fr);
-        T.eq(n.nukeFund, Math.round(AI_NUKE_SHARE * inc), 'aparta para la bomba');
-        T.eq(n.armsFund, 0, 'no para otra cosa');
-        // En paz se guarda lo apartado (sin crecer) y no lo gasta en tropas.
+        T.eq(n.nukeFund, 0, 'desde cero, no');
+        // Con casi todo apartado, sí: aparta lo suyo y nada para otras armas.
+        n.nukeFund = price - 3 * step;
+        g.aiNukes(fr); g.aiRecruit(fr);
+        T.eq([n.nukeFund, n.armsFund], [price - 2 * step, 0], 'aparta para la bomba');
+        // En paz deja de necesitarla: lo apartado vuelve a las tropas.
         g.settlePeace(es, fr);
-        n.gold = n.nukeFund + 10;
-        const kept = n.nukeFund;
-        g.aiNukes(fr); g.aiRecruit(fr); g.aiResearch(fr);
-        T.eq(n.nukeFund, kept, 'en paz, guardado');
-        T.ok(n.gold >= kept, `no gasta lo apartado: ${n.gold}`);
-        // De nuevo en guerra, con el oro: la compra y lo apartado vuelve a 0.
-        g.rel(es, fr).truceUntil = 0; g.declareWar(es, fr);
-        n.gold = g.weaponPrice(fr, 'nuclear');
         g.aiNukes(fr);
-        T.eq([n.arsenal.nuclear, n.nukeFund], [1, 0], 'la compra');
+        T.eq(n.nukeFund, 0, 'en paz, suelta lo apartado');
+        // En guerra con uno más débil que la tiene al lado de la capital (pierde de verdad), también aparta.
+        const h = T.game(), m = h.nations[fr], it = T.nation('it');
+        h.start(T.nation('pt')); T.bare(h); h.declareWar(it, fr);
+        const cap = m.capitalCell;
+        T.army(h, it, hexDisc(cap, 1).find(c => c !== cap && isLand(c) && !h.armyAt[c]), 3);
+        T.ok(h.nukeLosing(fr) && h.nukeRich(fr), 'pierde de verdad y es rica');
+        m.gold = 0; m.nukeFund = h.weaponPrice(fr, 'nuclear') - step;
+        h.aiNukes(fr); h.aiRecruit(fr);
+        T.ok(m.nukeFund > h.weaponPrice(fr, 'nuclear') - step, 'perdiendo, aparta');
+        m.gold = h.weaponPrice(fr, 'nuclear');
+        h.aiNukes(fr);
+        T.eq([m.arsenal.nuclear, m.nukeFund], [1, 0], 'la compra y lo apartado vuelve a 0');
         // Prohibidas: ni aparta.
         const p = setup(false);
         p.n.gold = 0; p.n.nukeFund = 500;
