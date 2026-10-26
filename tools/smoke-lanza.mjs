@@ -483,7 +483,7 @@ const CHECKS = [
         T.eq(g.leaveGarrison(op, a), null, 'una sola unidad no puede dejar guarnición');
         T.turns(g, es, 1);
         T.eq([a.cell, g.armyOn(X)?.id, g.sieges.get(X)?.by], [X, a.id, es], 'la punta se queda en la ciudad');
-        T.ok(g.logs.some(l => l.msg.includes('no puede dejar guarnición')), 'y el parte lo dice');
+        T.ok(g.logs.some(l => l.msg.includes('no puede dejar guarnición') && l.msg.includes('se queda hasta que caiga')), 'y el parte lo dice');
         return true;
     }],
     ['D2 · el asalto sigue igual que en la parte A', () => {
@@ -562,6 +562,8 @@ const CHECKS = [
         T.ok(!g.sieges.has(X) && g.owner[X] === es && g.ops.has(op.id), 'el asedio termina: la ciudad es suya');
         T.turns(g, es, 1);
         T.eq(op.garrisons, [], 'y sale de la lista');
+        T.ok(g.logs.some(l => l.msg.includes(`${g.placeName(X)} ya es tuya: su guarnición sigue con el seguimiento`)), 'el parte la da por tomada');
+        T.ok(!g.logs.some(l => l.msg.includes(`Se pierde el asedio de ${g.placeName(X)}`)), 'y no dice que se pierde');
         T.ok([...g.armies.values()].some(x => x.op === op.id && x.units.infantry > 0 && g.opEchelon(op, x) === 'seguimiento'), 'la guarnición vuelve al seguimiento');
         // Una ciudad que se pierde también sale.
         const lost = PROVINCES.find(p => g.owner[p.city] === T.nation('fr')).city;
@@ -642,7 +644,7 @@ const CHECKS = [
         T.eq(bs[0].joint.slice().sort(), xs.map(a => a.id).sort(), 'con los tres');
         T.ok(!g.armies.has(foe.id) || foe.cell !== target, 'la bolsa cae');
         T.eq(op.pockets, [], 'y sale de la lista');
-        // No llega: cinco del seguimiento a 2 casillas ocupan las vecinas libres y la cercan, sin atacar.
+        // No llega, pero llegaría cercada: cinco del seguimiento a 2 casillas ocupan las vecinas libres y la cercan, sin atacar.
         g = T.game(); es = T.nation('es'); fr = T.nation('fr');
         g.start(es); g.declareWar(es, fr);
         target = G.land.find(c => CELL_TERRAIN[c] === 'plain' && [...g.nearCells(c, 2).keys()].every(x => T.free(g, x) && g.owner[x] === es && CAPITAL_OF[x] < 0));
@@ -655,6 +657,9 @@ const CHECKS = [
         g.opLaunch(op);
         for (const x of xs) g.playerOpSet(op, `echelon:${x.id}`, 'seguimiento');
         op.pockets = [target];
+        // Lo más grande que tomarían con ella cercada (el cerco divide su defensa por el factor de cercado).
+        while (foe.units.infantry > 1 && g.opRingOdds(op, target, foe, xs) < op.ratio) foe.units.infantry--;
+        T.ok(foe.units.infantry > 2 && g.opRingOdds(op, target, foe, xs) >= op.ratio, `cercada caería (${foe.units.infantry})`);
         const seen2 = new Set(g.motion);
         const said = { notes: [], attacked: 0 };
         g.opPockets(op, undefined, said);
@@ -834,6 +839,140 @@ const CHECKS = [
         for (let t = 0; t < 4 && !relieved; t++) { T.turns(h, es, 1); relieved = h.armyOn(X)?.op === op.id; }
         T.ok(relieved, 'tras cargar, el seguimiento releva la guarnición');
         T.ok(!h.armies.has(b.id) && [...h.armies.values()].filter(x => x.op === op.id).reduce((s, x) => s + x.units.infantry, 0) >= 8, 'con su tropa y la del destacamento');
+        return true;
+    }],
+    ['D3 · una bolsa que ni cercada caería: la vigila uno, los demás siguen y el parte lo recuerda', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const target = G.land.find(c => CELL_TERRAIN[c] === 'plain' && [...g.nearCells(c, 2).keys()].every(x => T.free(g, x) && g.owner[x] === es && CAPITAL_OF[x] < 0));
+        g.owner[target] = fr; g.legal[target] = fr; g.version++;
+        const foe = g.settle(g.newArmy(fr, target, { infantry: 400, tank: 0, artillery: 0 }, 0));
+        const op = g.createOp(es, 'ofensiva', [T.cellsAt(g, es, target, [6])[0], target], { doctrine: 'lanza' });
+        const xs = T.cellsAt(g, es, target, [2, 2, 2, 2, 2, 2]).map(c => T.army(g, es, c, 2, 0, 0));
+        for (const x of xs) g.assignArmy(x, op.id);
+        g.opLaunch(op);
+        for (const x of xs) g.playerOpSet(op, `echelon:${x.id}`, 'seguimiento');
+        op.pockets = [target];
+        T.ok(g.opRingOdds(op, target, foe, xs) < op.ratio, 'ni cercada');
+        const seen = new Set(g.motion), said = { notes: [], attacked: 0 };
+        const hold = g.opPockets(op, undefined, said);
+        T.eq(g.motion.filter(e => e.kind === 'battle' && !seen.has(e)).length, 0, 'no la ataca');
+        const side = xs.filter(x => g.armies.has(x.id) && hexDist(x.cell, target) === 1);
+        T.eq(side.length, 1, 'uno solo se pone a su lado');
+        T.eq(xs.filter(x => g.armies.has(x.id) && hexDist(x.cell, target) === 2).length, 5, 'los demás no van a cercarla');
+        T.ok([...hold].every(id => id === side[0].id), 'solo él queda retenido');
+        T.eq(op.pockets, [target], 'sigue en la lista');
+        T.ok(said.notes.some(s => s.includes(`El seguimiento contiene una bolsa en ${g.placeName(target)}`)), `el parte lo dice: ${said.notes}`);
+        // El turno siguiente la sigue vigilando el mismo, sin moverse.
+        for (const x of g.armies.values()) if (x.owner === es) x.used = 0;
+        T.eq([...g.opPockets(op)], [side[0].id], 'el mismo la vigila');
+        // El parte lo recuerda cada 3 turnos, y no dos veces el mismo turno.
+        const count = () => { const t = { notes: [], attacked: 0 }; g.opPockets(op, undefined, t); return t.notes.filter(s => s.includes('contiene una bolsa')).length; };
+        T.eq(count(), 0, 'no lo repite el mismo turno');
+        const seq = [];
+        for (let k = 0; k < 6; k++) { g.turn++; seq.push(count()); }
+        T.eq(seq, [0, 0, 1, 0, 0, 1], 'cada 3 turnos');
+        // En la ficha.
+        ui.setGame(g); ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        T.ok(document.querySelector('#drawer-body').textContent.includes('el seguimiento lo contiene'), 'la ficha lo dice');
+        return true;
+    }],
+    ['D3 · una bolsa que ni cercada caería no detiene la ofensiva', () => {
+        // La prueba P1 de la revisión: una masa de 400 en el eje que la punta rodea; el seguimiento no puede con ella.
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 18, { m: 1 });
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O], { doctrine: 'lanza' });
+        const M = T.samples(S, O).sort((x, y) => Math.abs(g.opAlong(op, x) - 3) - Math.abs(g.opAlong(op, y) - 3))[0];
+        g.owner[M] = fr; g.legal[M] = fr; g.version++;
+        const foe = g.settle(g.newArmy(fr, M, { infantry: 400, tank: 0, artillery: 0 }, 0));
+        const tk = T.army(g, es, S, 0, 8, 0), fs = T.cellsAt(g, es, S, [1, 1]).map(c => T.army(g, es, c, 6, 0, 0));
+        for (const a of [tk, ...fs]) g.assignArmy(a, op.id);
+        g.opLaunch(op);
+        T.eq([tk, ...fs].map(a => g.opEchelon(op, a)), ['punta', 'seguimiento', 'seguimiento'], 'escalones');
+        let tip = 0, back = 0, t = 0, guard = [];
+        for (; t < 24 && g.ops.has(op.id); t++) {
+            T.turns(g, es, 1);
+            if (!g.ops.has(op.id)) break;
+            const ms = g.opMembers(op), follow = ms.filter(a => g.opEchelon(op, a) === 'seguimiento');
+            guard = follow.filter(a => hexDist(a.cell, M) === 1);
+            for (const a of ms) {
+                const x = g.opAlong(op, a.cell);
+                if (g.opEchelon(op, a) === 'punta') tip = Math.max(tip, x); else back = Math.max(back, x);
+            }
+        }
+        T.ok(g.armies.has(foe.id) && foe.cell === M && foe.units.infantry === 400, 'la bolsa sigue ahí, entera');
+        T.eq(guard.length, 1, 'uno la vigila');
+        T.ok(g.owner[O] === es || tip >= 15, `la punta sigue hasta el objetivo (${tip.toFixed(1)}, ${t} turnos)`);
+        T.ok(back >= 8, `el seguimiento deja atrás la bolsa (${back.toFixed(1)})`);
+        T.ok(g.logs.some(l => l.msg.includes(`El seguimiento contiene una bolsa en ${g.placeName(M)}`)), 'el parte lo dice');
+        return true;
+    }],
+    ['D3 · si nadie releva la guarnición, al caer la ciudad vuelve al seguimiento', () => {
+        const { g, es, X, b, op } = T.siege();
+        g.setOrder(b, { kind: 'hold' });   // el seguimiento no llega
+        T.turns(g, es, 1);
+        const gar = g.armyOn(X);
+        T.ok(gar && !gar.op && op.garrisons.includes(X), 'la punta deja guarnición');
+        for (let t = 0; t < 5 && g.sieges.has(X); t++) g.beginNationTurn(es);
+        T.ok(!g.sieges.has(X) && g.owner[X] === es && g.ops.has(op.id), 'la ciudad cae');
+        T.eq(gar.op, 0, 'aún fuera de la operación');
+        T.turns(g, es, 1);
+        T.ok(g.armies.has(gar.id) && gar.op === op.id && g.opEchelon(op, gar) === 'seguimiento', 'vuelve a la operación, en el seguimiento');
+        T.eq(op.garrisons, [], 'y sale de la lista');
+        T.ok(g.logs.some(l => l.msg.includes(`${g.placeName(X)} ya es tuya: su guarnición vuelve a la operación con el seguimiento`)), 'el parte lo dice');
+        T.ok(!g.logs.some(l => l.msg.includes('Se pierde el asedio')), 'y no dice que se pierde');
+        return true;
+    }],
+    ['D3 · quien mantiene un asedio no es un ejército libre', () => {
+        const { g, es, X, b, op } = T.siege();
+        g.setOrder(b, { kind: 'hold' });
+        T.turns(g, es, 1);
+        const gar = g.armyOn(X);
+        T.ok(gar && !gar.op && g.sieges.get(X)?.by === es && countUnits(gar.units) === 2, 'una guarnición de 2 mantiene el asedio');
+        const off = g.createOp(es, 'ofensiva', [T.cellsAt(g, es, X, [1])[0], op.cells[1]], { noCap: true });
+        const line = g.createOp(es, 'defensa', [X], { noCap: true });
+        T.ok(!g.offensiveFree(off).includes(gar), 'no se la lleva una ofensiva nueva');
+        T.ok(!g.nearbyFree(line, 3).includes(gar), 'ni «Añadir los libres»');
+        g.shareForces(es, { free: true });
+        T.eq(gar.op, 0, 'ni el reparto de fuerzas');
+        // Sin el asedio sí sería libre.
+        const sg = g.sieges.get(X);
+        g.sieges.delete(X);
+        T.ok(g.offensiveFree(off).includes(gar) && g.nearbyFree(line, 3).includes(gar), 'sin el asedio, sí');
+        g.sieges.set(X, sg);
+        return true;
+    }],
+    ['D3 · cambiar la doctrina o redibujar limpia bolsas y guarniciones', () => {
+        const { g, es, X, a, b, op } = T.siege(), fr = T.nation('fr');
+        g.setOrder(b, { kind: 'hold' });
+        T.turns(g, es, 1);
+        g.setOrder(a, { kind: 'hold' });   // la punta no toma el objetivo mientras tanto
+        T.ok(op.garrisons.includes(X), 'guarnición anotada');
+        const P = [...g.opCorridor(op)].find(c => isLand(c) && !g.armyAt[c] && CITY_OF[c] < 0 && g.opAlong(op, c) > 1);
+        g.settle(g.newArmy(fr, P, { infantry: 1, tank: 0, artillery: 0 }, 0));
+        op.pockets.push(P);
+        g.playerOpSet(op, 'doctrine', 'asalto');
+        T.eq(op.pockets, [], 'el asalto, sin seguimiento, olvida las bolsas');
+        T.eq(op.garrisons, [X], 'la guarnición sigue mientras dure el asedio');
+        for (let t = 0; t < 5 && g.sieges.has(X); t++) g.beginNationTurn(es);
+        T.ok(!g.sieges.has(X) && g.owner[X] === es, 'la ciudad cae');
+        T.turns(g, es, 1);
+        T.eq(op.garrisons, [], 'también en el asalto sale de la lista');
+        T.ok(g.logs.some(l => l.msg.includes(`${g.placeName(X)} ya es tuya`)), 'y el parte lo dice');
+        // Redibujar: fuera las bolsas que quedan fuera del nuevo pasillo.
+        const [S, O] = T.straight(g, es, 10, { m: 1 });
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op2 = g.createOp(es, 'ofensiva', [S, O], { doctrine: 'lanza', noCap: true });
+        const pts = T.samples(S, O).sort((x, y) => g.opAlong(op2, x) - g.opAlong(op2, y));
+        const near = pts.find(c => g.opAlong(op2, c) >= 1 && !g.armyAt[c]), far = [...pts].reverse().find(c => c !== O && !g.armyAt[c]);
+        for (const c of [near, far]) g.settle(g.newArmy(fr, c, { infantry: 1, tank: 0, artillery: 0 }, 0));
+        op2.pockets = [near, far];
+        const mid = pts.find(c => Math.abs(g.opAlong(op2, c) - 3) < 0.6 && !g.armyAt[c]);
+        g.owner[mid] = fr; g.legal[mid] = fr; g.version++;
+        T.ok(g.playerRedrawOp(op2, [S, mid]), 'redibuja');
+        T.eq(op2.pockets, [near], 'la del nuevo pasillo se queda; la otra, fuera');
         return true;
     }],
     ['D3 · logística no rehace un tramo roto: lo repara, y la autovía sigue siendo autovía', () => {
@@ -1390,6 +1529,98 @@ const CHECKS = [
         T.eq([g.armies.size, host.units.tank, m.units.tank], [n, 7, 0], 'los tanques se suman a la punta de al lado');
         T.eq([g.opEchelon(op, host), g.opEchelon(op, m)], ['punta', 'seguimiento'], 'escalones');
         T.ok(!g.armyAt[X], 'y nada al otro lado del agua');
+        return true;
+    }],
+    ['D4 · lo que el jugador elige en la ficha se respeta; lo que no cabe vuelve al seguimiento con aviso', () => {
+        const { g, op, xs } = T.wide(9);
+        const front = () => xs.filter(a => g.armies.has(a.id) && a.op === op.id && g.opEchelon(op, a) === 'punta');
+        g.opLanes(op);
+        T.eq(front().length, 6, 'dos tercios en el frente');
+        // Pasa uno del frente al seguimiento; luego sale otro de la operación: el reparto no lo devuelve al frente.
+        const F = front().sort((x, y) => x.id - y.id)[0];
+        T.eq(g.playerOpSet(op, `echelon:${F.id}`, 'seguimiento'), '', 'sin aviso');
+        g.opLanes(op);
+        const gone = xs.find(a => a !== F && g.opEchelon(op, a) === 'seguimiento');
+        g.assignArmy(gone, 0);
+        g.opLanes(op);
+        T.eq(g.opEchelon(op, F), 'seguimiento', 'sigue donde lo puso el jugador');
+        T.eq(front().length, 6, 'el frente se completa con otro');
+        // Guardar y cargar lo conserva.
+        const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+        T.ok(h.ops.get(op.id).manual.includes(F.id), 'se guarda');
+        // Todos al frente: los que no caben vuelven al seguimiento, y el jugador lo sabe.
+        const fit = g.opLaneGeo(op, 99).lanes.length;
+        const notes = xs.filter(a => a.op === op.id).map(a => g.playerOpSet(op, `echelon:${a.id}`, 'punta')).filter(Boolean);
+        T.eq(front().length, fit, `caben ${fit}`);
+        T.ok(notes.length >= 1 && notes.every(s => s.includes('no cabe')), `con aviso: ${notes}`);
+        // En la interfaz, el aviso sale al pulsar el botón.
+        ui.setGame(g); ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        const back = xs.find(a => a.op === op.id && g.opEchelon(op, a) === 'seguimiento');
+        document.querySelector(`#drawer-body [data-action="op-set"][data-key="echelon:${back.id}"][data-value="punta"]`).click();
+        T.ok(g.logs[g.logs.length - 1].msg.includes('no cabe'), `aviso: ${g.logs[g.logs.length - 1].msg}`);
+        return true;
+    }],
+    ['D4 · antes del objetivo también termina tras 6 turnos sin avanzar, y la ficha avisa de por qué espera', () => {
+        const { g, es, fr, op } = T.wide(2);
+        const O = op.cells[1];
+        const foe = T.army(g, fr, O, 400, 0, 0);   // primero, demasiado para nadie: el frente se detiene delante
+        let t = 0;
+        for (; t < 20 && g.ops.has(op.id) && !(op.wideIdle >= 1); t++) T.turns(g, es, 1);
+        T.ok(g.ops.has(op.id) && op.wideIdle >= 1 && g.owner[O] === fr, `espera ante el objetivo (${t} turnos)`);
+        // Una defensa que un asalto ya atacaría, pero no el frente amplio (que pide op.ratio + 0,5).
+        const odds = () => g.opWideObjOdds(op);
+        while (foe.units.infantry > 1 && odds().ratio < op.ratio + 0.25) foe.units.infantry--;
+        T.ok(odds().ratio >= op.ratio && odds().ratio < op.ratio + 0.5, `entre ${op.ratio} y ${op.ratio + 0.5} (${odds().ratio.toFixed(2)})`);
+        ui.setGame(g);
+        T.ok(ui.rearSection(op).includes(`El frente espera ante ${g.placeName(O)}`), 'la ficha dice por qué espera');
+        for (t = 0; t < 10 && g.ops.has(op.id); t++) T.turns(g, es, 1);
+        T.ok(!g.ops.has(op.id) && g.owner[O] === fr, 'termina sin tomarlo');
+        T.ok(g.logs.some(l => l.msg.includes('turnos sin avanzar ni tomar terreno antes de')), 'y el parte dice por qué');
+        // La cuenta se guarda.
+        const op2 = g.createOp(es, 'ofensiva', op.cells, { doctrine: 'amplio', width: 'estrecha', noCap: true });
+        Object.assign(op2, { phase: 'avance', wideIdle: 3, wideLast: 40, wideRear: 7 });
+        const k = GameEngine.load(JSON.parse(JSON.stringify(g.serialize()))).ops.get(op2.id);
+        T.eq([k.wideIdle, k.wideLast, k.wideRear], [3, 40, 7], 'se guarda');
+        return true;
+    }],
+    ['D6 · la ficha explica el avance de cada doctrina y la anchura de verdad', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        for (const a of [...g.armies.values()]) if (a.owner === es || a.owner === fr) g.removeArmy(a);
+        const [S, O] = T.straight(g, es, 10);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        T.army(g, es, S, 0, 8, 0);
+        const op = g.playerCreateOp('ofensiva', [S, O], { doctrine: 'lanza' });
+        g.playerLaunchOp(op);
+        ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        const text = () => document.querySelector('#drawer-body').textContent;
+        T.ok(text().includes('La punta va por delante') && !text().includes('Van juntos'), 'la punta de lanza');
+        g.playerOpSet(op, 'doctrine', 'amplio'); ui.render();
+        T.ok(text().includes(`solo ataca con ${decimal(op.ratio + 0.5)} a 1`) && !text().includes('Van juntos'), 'el frente amplio, con su ventaja');
+        g.playerOpSet(op, 'doctrine', 'asalto'); ui.render();
+        T.ok(text().includes('Van juntos'), 'el asalto, como antes');
+        // La anchura de verdad: en el mundo, 3 casillas son bastante más de 60 km.
+        const was = MAP.cellKm;
+        try {
+            MAP.cellKm = MAPS.mundo.cellKm;
+            T.ok(ui.doctrineSection(op, g.opMembers(op)).includes(`unos ${Math.round(3 * MAPS.mundo.cellKm)} km: nunca menos de 3 casillas`), 'en el mundo');
+        } finally { MAP.cellKm = was; }
+        T.ok(ui.doctrineSection(op, g.opMembers(op)).includes(`unos ${Math.round(3 * MAP.cellKm)} km)`), 'en Europa');
+        return true;
+    }],
+    ['D6 · con niebla, la ficha no cuenta lo que no se ve', () => {
+        const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 10);
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.playerCreateOp('ofensiva', [S, O], { doctrine: 'lanza' });
+        const hidden = G.land.find(c => g.owner[c] === fr && !g.armyAt[c] && !g.sees(es, c));
+        T.ok(hidden !== undefined, 'casilla fuera de la vista');
+        T.army(g, fr, hidden, 30, 0, 0);
+        op.pockets = [hidden];
+        ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        const text = document.querySelector('#drawer-body').textContent;
+        T.ok(text.includes('fuera de la vista') && !text.includes('sorteado'), 'no dice quién hay');
         return true;
     }],
 ];
