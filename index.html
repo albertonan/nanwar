@@ -454,8 +454,8 @@
         .rs-node.done .st { color: var(--go); }
         .rs-node.current { background: rgba(240, 196, 25, 0.12); border-color: rgba(240, 196, 25, 0.75); }
         .rs-node.paused { border-style: dashed; border-color: rgba(166, 168, 146, 0.6); }
-        .rs-node.locked { opacity: 0.5; }
-        .rs-node.locked .gal path { stroke: var(--muted); }
+        .rs-node.locked, .rs-node.banned { opacity: 0.5; }
+        .rs-node.locked .gal path, .rs-node.banned .gal path { stroke: var(--muted); }
         .rs-node.sel { outline: 2px solid var(--text); outline-offset: 2px; }
         .rs-bar { height: 5px; border-radius: 3px; background: rgba(235, 231, 216, 0.14); overflow: hidden; margin-top: 3px; }
         .rs-bar i { display: block; height: 100%; background: var(--signal); border-radius: 3px; }
@@ -905,10 +905,14 @@ const baseRules = () => ({
     droneHit: [0.04, 0.03],              // parte de un ejército que quita un enjambre: base y azar
     droneEscort: false,                  // los enjambres pueden escoltar ejércitos
     droneSwarm: false,                   // saturan el antiaéreo y su reconocimiento ve galones y fortificaciones
-    defense: 0                           // nivel de las baterías automáticas (0 a 3)
+    defense: 0,                          // nivel de las baterías automáticas (0 a 3)
+    rocketHeavy: false, missile: false, missileHeavy: false, guided: false, nuclear: false,   // armas del arsenal que puede comprar (parte C)
+    interceptMult: 1                     // multiplicador de lo que paran las defensas de los misiles (reentrada maniobrable: 0,7)
 });
 
 const BASE_RULES = baseRules();
+// Armas nucleares: la investigación que las da y las potencias que ya las tienen al empezar (las que estén en el mapa).
+const NUKE_TECH = 'estrategicas3', NUKE_POWERS = ['us', 'ru', 'cn', 'fr', 'gb', 'in', 'pk', 'il', 'kp'];
 const RESEARCH_AREAS = ['Militar', 'Estado', 'Terreno', 'Inteligencia'];
 const RESEARCH_BRANCHES = [
     { id: 'infanteria', area: 'Militar', name: 'Infantería', sub: 'Atributos de la infantería', icon: 'inf' },
@@ -917,6 +921,8 @@ const RESEARCH_BRANCHES = [
     { id: 'doctrina', area: 'Militar', name: 'Doctrina', sub: 'Mando, asedio y bajas', icon: 'doc' },
     { id: 'aviacion', area: 'Militar', name: 'Aviación', sub: 'Alcance, precisión y supervivencia', icon: 'plane' },
     { id: 'antiaerea', area: 'Militar', name: 'Defensa aérea', sub: 'Antiaéreo más eficaz y móvil', icon: 'aa' },
+    { id: 'cohete', area: 'Militar', name: 'Cohetería', sub: 'Cohetes y misiles balísticos', icon: 'rocket' },
+    { id: 'estrategicas', area: 'Militar', name: 'Armas estratégicas', sub: 'Misiles de crucero y la bomba', icon: 'strat' },
     { id: 'movilizacion', area: 'Estado', name: 'Movilización', sub: 'Capacidad de reclutar', icon: 'mob' },
     { id: 'ciencia', area: 'Estado', name: 'Ciencia', sub: 'Tiempo y coste de investigar', icon: 'sci' },
     { id: 'industria', area: 'Estado', name: 'Industria', sub: 'Recursos más eficientes', icon: 'ind' },
@@ -961,6 +967,16 @@ const TECH_TREE = {
         ['Radar de alerta temprana', { aaPower: 13 }, [['Fuerza de cada antiaéreo', '10', '13']], 'Una línea con antiaéreo preparado aguanta mejor el primer golpe.'],
         ['Misiles tierra-aire de largo alcance', { aaPower: 16, aaRangeKm: 150 }, [['Fuerza de cada antiaéreo', '13', '16'], ['Radio del antiaéreo fijo', '60 km', '150 km']], 'Cubre un frente entero desde la retaguardia.'],
         ['Antiaéreo autopropulsado', { mobileAA: true }, [['Tropa «Antiaérea»', 'no', 'sí']], 'Cara y menos eficaz que un sitio fijo, pero va con el ejército, también por mar.']
+    ],
+    cohete: [
+        ['Cohetes de largo alcance', { rocketHeavy: true }, [['Cohete pesado', 'no', 'sí'], ['Alcance', '80 km', '300 km']], 'Sale de un ejército o de una ciudad propia: pega mucho más lejos que el lanzacohetes de siempre.'],
+        ['Misiles balísticos tácticos', { missile: true }, [['Misil', 'no', 'sí'], ['Alcance', '—', '500 km']], 'Solo desde una ciudad propia. Caro de comprar y de mantener cada turno.'],
+        ['Misiles de alcance medio', { missileHeavy: true }, [['Misil pesado', 'no', 'sí'], ['Alcance', '—', '2500 km']], 'Llega al otro extremo del mapa; solo un escudo antimisiles lo para con alguna garantía.']
+    ],
+    estrategicas: [
+        ['Misiles de crucero', { guided: true }, [['Misil guiado', 'no', 'sí'], ['Alcance', '—', '1500 km']], 'Vuela bajo y sigue el terreno: difícil de parar para un antiaéreo.'],
+        ['Vehículos de reentrada maniobrables', { interceptMult: 0.7 }, [['Lo que paran las defensas de misiles, guiados, pesados y nucleares', '×1', '×0,7']], 'Cambian de rumbo al caer: la batería, el enjambre y el antiaéreo fallan más.'],
+        ['Bomba nuclear', { nuclear: true }, [['Arma nuclear', 'no', 'sí'], ['Alcance', '—', '8000 km']], 'Carísima. No existe si la partida las prohíbe. Quien la lanza queda como paria.']
     ],
     movilizacion: [
         ['Servicio militar', { recruitAll: 1 }, [['Reclutas por turno en cada provincia', 'base', 'base +1']], 'Aparece como «investigación +1» en el desglose de reclutas.'],
@@ -1387,7 +1403,16 @@ class GameEngine {
 
     // Ajustes elegidos antes de empezar: agresividad de la IA, alianzas iniciales, victoria.
     configure(settings) {
-        this.settings = { ...settings, fog: !!settings.fog };
+        this.settings = { ...settings, fog: !!settings.fog, nukes: settings.nukes !== false };
+        // Las potencias nucleares reales empiezan con Armas estratégicas 1 a 3 hechas, si las nucleares están permitidas.
+        for (const nat of this.nations) {
+            if (!NUKE_POWERS.includes(nat.key)) continue;
+            for (const t of ['estrategicas1', 'estrategicas2', NUKE_TECH]) {
+                if (nat.tech.done.has(t) === this.settings.nukes) continue;
+                this.settings.nukes ? nat.tech.done.add(t) : nat.tech.done.delete(t);
+                this.techVersion++;
+            }
+        }
         this.ai = AGGRESSION[settings.aggression];
         this.blocs = [];
         this.nextBlocId = 1;
@@ -1508,6 +1533,7 @@ class GameEngine {
             aggression: Object.prototype.hasOwnProperty.call(AGGRESSION, s.aggression) ? s.aggression : 'normal',
             alliances: ['reales', 'ninguna'].includes(s.alliances) ? s.alliances : 'reales',
             victory: [0.5, 0.75, 1].includes(Number(s.victory)) ? Number(s.victory) : 0.5,
+            nukes: s.nukes !== false,   // partidas viejas: permitidas
             fog: true   // la niebla de guerra es obligatoria (también en partidas guardadas sin ella)
         };
         g.ai = AGGRESSION[g.settings.aggression];
@@ -8010,6 +8036,7 @@ class GameEngine {
     techState(id, techId) {
         const s = this.nations[id].tech, t = TECH_BY_ID.get(techId);
         if (s.done.has(techId)) return 'done';
+        if (techId === NUKE_TECH && !this.settings.nukes) return 'banned';   // con las nucleares prohibidas no existe para nadie
         if (s.current.includes(techId)) return 'current';
         if (s.progress.has(techId)) return 'paused';
         if (t.tier > 1 && !s.done.has(`${t.branch}${t.tier - 1}`)) return 'locked';
@@ -8904,7 +8931,9 @@ class GameEngine {
                 espacio: war && air >= 6 ? 0.4 : 0,
                 // Drones y Defensa automática: en guerra y más si algún enemigo ya tiene drones; la defensa, también si lo tiene un vecino.
                 drones: war ? (foeDrones ? 1.2 : 0.7) : 0.1,
-                defensa: war ? (foeDrones ? 1.5 : 0.6) : nearDrones ? 0.5 : 0.1
+                defensa: war ? (foeDrones ? 1.5 : 0.6) : nearDrones ? 0.5 : 0.1,
+                // Cohetería y Armas estratégicas: caras, solo en guerra (la bomba, si las nucleares están permitidas).
+                cohete: war ? 0.5 : 0.05, estrategicas: war ? 0.4 : 0.05
             };
             weight[main] += war ? 2 : 0.5;
             if (fierce) for (const b of ['infanteria', 'blindados', 'artilleria', 'doctrina']) weight[b] *= 1.5;
@@ -9519,6 +9548,10 @@ const RS_ICON = {
     eye: '<rect x="5" y="7" width="8" height="11" rx="2.5" fill="currentColor"/><rect x="19" y="7" width="8" height="11" rx="2.5" fill="currentColor"/><rect x="12" y="10" width="8" height="5" fill="currentColor"/><circle cx="9" cy="21" r="6.5" fill="currentColor"/><circle cx="23" cy="21" r="6.5" fill="currentColor"/><circle cx="9" cy="21" r="3.4" fill="#000" fill-opacity=".3"/><circle cx="23" cy="21" r="3.4" fill="#000" fill-opacity=".3"/>',
     plane: RS_FRAME + `<path d="${propellerPath(16, 16, 9.4)}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>`,
     aa: RS_FRAME + '<path d="M8.5 24a7.5 7.5 0 0 1 15 0" fill="none" stroke="currentColor" stroke-width="2.2"/>',
+    // Cohetería: marco con el símbolo OTAN de lanzacohetes múltiple (rampa con tres cohetes) y, en Armas estratégicas, el de
+    // misil de superficie a superficie (cuerpo con ojiva y aletas).
+    rocket: RS_FRAME + '<path d="M7 21l5-8M13 21l5-8M19 21l5-8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><path d="M6 21.5h19" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>',
+    strat: RS_FRAME + '<path d="M16 10.2l2.6 3.2V20h-5.2v-6.6zM13.4 17.6l-2.4 3.2M18.6 17.6l2.4 3.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>',
     sat: '<g transform="rotate(-35 16 16)" fill="currentColor"><rect x="11.5" y="11" width="9" height="10" rx="1.5"/><rect x="2" y="12" width="8" height="8" rx=".8"/><rect x="22" y="12" width="8" height="8" rx=".8"/><path d="M16 11V6.5M13 6.5h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></g>',
     uav: RS_FRAME + '<path d="M6.5 19.5Q11.2 11.6 16 16.2Q20.8 11.6 25.5 19.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M16 16.2V21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>',
     cram: RS_FRAME + '<path d="M8.5 24a7.5 7.5 0 0 1 15 0" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M16 22V13.5M13.4 16.2L16 13.2l2.6 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
@@ -12473,7 +12506,7 @@ class GameUI {
         if (this.replaying && !['skip-replay', 'watch', 'speed'].includes(d.action)) return;
         const p = this.selected >= 0 ? PROVINCES[G.prov[this.selected]] : null;
         switch (d.action) {
-            case 'setting': g.configure({ ...g.settings, [d.key]: d.key === 'victory' ? +d.value : d.value }); break;
+            case 'setting': g.configure({ ...g.settings, [d.key]: d.key === 'victory' ? +d.value : d.key === 'nukes' ? d.value === 'true' : d.value }); break;
             case 'spy-send': g.playerSendSpy(+d.pid); break;
             case 'call-war': {
                 const sel = document.querySelector(`select[data-call-war="${d.target}"]`);
@@ -13226,6 +13259,8 @@ class GameUI {
                 ${seg('aggression', Object.fromEntries(Object.entries(AGGRESSION).map(([k, v]) => [k, v.name])), s.aggression)}
                 <p class="note">${g.ai.desc}</p></div>
             <div class="field"><span>Alianzas al empezar</span>${seg('alliances', { reales: 'OTAN y OTSC', ninguna: 'Ninguna' }, s.alliances)}</div>
+            <div class="field"><span>Armas nucleares</span>${seg('nukes', [['true', 'Permitidas'], ['false', 'Prohibidas']], s.nukes)}
+                <p class="note">${s.nukes ? 'Las potencias nucleares reales empiezan con la bomba; los demás pueden investigarla.' : 'Armas estratégicas 3 no existe para nadie.'}</p></div>
             <p class="note">Niebla de guerra: solo ves las tropas en tu territorio y el de tus aliados, en una franja de ${this.myRules().visionTerritory} casillas alrededor y a ${this.myRules().visionArmy} de tus ejércitos. Puedes enviar espías.</p>
             <div class="field"><span>Para ganar</span>${seg('victory', [['0.5', `50 % ${MAP.of}`], ['0.75', '75 %'], ['1', MAP.all]], s.victory)}</div>
             <div class="field"><span>Tu país</span>
@@ -13724,6 +13759,7 @@ class GameUI {
                 else if (st === 'current') line = `En curso · faltan ${turns - p}`;
                 else if (st === 'paused') line = `${uiIcon('pause', 13)} En pausa · ${p}/${turns}`;
                 else if (st === 'locked') line = `${uiIcon('lock', 13)} Tras el nivel ${i - 1}`;
+                else if (st === 'banned') line = `${uiIcon('lock', 13)} Prohibida`;
                 else { const c = g.researchCost(p0, id); line = `${turns} turnos · <span class="${c > gold ? 'short' : ''}">${c} oro</span>`; }
                 const after = i > 1 && s.done.has(`${b.id}${i - 1}`) ? ' after-done' : '';
                 return `<button class="rs-node ${st}${after}${this.researchSel === id ? ' sel' : ''}" type="button" data-action="rs-select" data-tech="${id}" aria-pressed="${this.researchSel === id}">
@@ -13739,6 +13775,7 @@ class GameUI {
         if (st === 'done') action = `<p class="status" style="color:var(--go)">${uiIcon('check')} Investigada. El efecto ya se aplica.</p>`;
         else if (st === 'current') action = `<p class="status">En curso: ${p} de ${turns} turnos. Termina en el turno ${g.turn + turns - p}.</p><button class="btn" data-action="rs-pause" data-tech="${t.id}">${uiIcon('pause')} Pausar</button>`;
         else if (st === 'paused') action = `<p class="status">En pausa: ${p} de ${turns} turnos, ya pagada.</p><button class="btn primary" data-action="rs-start" data-tech="${t.id}">Reanudar · ${plural(turns - p, 'turno', 'turnos')}</button>${swapNote}`;
+        else if (st === 'banned') action = `<p class="status muted">${uiIcon('lock')} Las armas nucleares están prohibidas en esta partida.</p>`;
         else if (st === 'locked') action = `<p class="status muted">${uiIcon('lock')} Antes, ${TECH_BY_ID.get(`${t.branch}${t.tier - 1}`).name} (nivel ${t.tier - 1}).</p>`;
         else {
             const c = g.researchCost(p0, t.id);

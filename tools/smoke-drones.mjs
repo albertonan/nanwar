@@ -20,7 +20,7 @@ const port = server.address().port;
 // Cada prueba corre dentro de la página: devuelve true si pasa, o un texto que explica el fallo.
 const setup = () => {
     window.T = {
-        game(seed = 7, fog = false) { const g = new GameEngine(seed); g.configure({ aggression: 'normal', alliances: 'ninguna', victory: 1, fog }); return g; },
+        game(seed = 7, fog = false) { const g = new GameEngine(seed); g.configure({ aggression: 'normal', alliances: 'ninguna', victory: 1, fog, nukes: false }); return g; },   // sin potencias nucleares: la reentrada (parte C) no toca la defensa de la parte B
         nation: key => E.countries.findIndex(c => c.key === key),
         eq(a, b, msg) { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${msg}: ${JSON.stringify(a)} ≠ ${JSON.stringify(b)}`); },
         learn(g, id, ...ids) { for (const t of ids) g.nations[id].tech.done.add(t); g.techVersion++; },
@@ -165,7 +165,7 @@ const CHECKS = [
     }
     T.eq(['drones1', 'drones2', 'drones3', 'defensa1', 'defensa2', 'defensa3'].map(i => TECH_BY_ID.get(i).name),
         ['Drones tácticos', 'Municiones merodeadoras', 'Enjambres autónomos', 'Defensa de punto', 'Interceptores de medio alcance', 'Escudo antimisiles con láser'], 'nombres');
-    T.eq([RESEARCH_BRANCHES.length, TECHS.length], [18, 54], 'árbol');
+    T.eq([RESEARCH_BRANCHES.length, TECHS.length], [20, 60], 'árbol');
     // Cada rama pinta su icono en el diálogo de investigación, sin emojis.
     T.ok(!/[\u{1F300}-\u{1FAFF}]/u.test(RS_ICON.uav + RS_ICON.cram), 'sin emojis');
     return true;
