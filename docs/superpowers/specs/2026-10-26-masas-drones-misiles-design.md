@@ -19,7 +19,8 @@ Cómo se ve el éxito: con cientos de ejércitos, el jugador agrupa los suyos en
 
 1. **Parte A · Mando de masas**: plantillas sin tope, escalones mayores, ataque conjunto, agrupaciones, ofensivas que siguen la flecha y atacan a la vez, más oro y refuerzo de lo ya creado. Es lo que más duele hoy: se publica sola, en cuanto esté.
 2. **Parte B · Drones, escolta y defensa automática**.
-3. **Parte C · Cohetes, misiles y armas nucleares**.
+3. **Parte D · Punta de lanza y frente amplio** (añadida después: va antes que la C, porque mejora la guerra de tierra que ya se juega con la parte A).
+4. **Parte C · Cohetes, misiles y armas nucleares**.
 
 Marcas:
 - **(Usuario)**: lo pidió el jugador.
@@ -308,6 +309,89 @@ Dos ramas nuevas en el área Militar:
 - **Símbolos (APP-6):** misil de superficie a superficie para los misiles; lanzacohetes múltiple para los cohetes. Para la nuclear, el marcado CBRN de la OTAN.
 - **En el mapa:** cada lanzamiento se dibuja como un arco del lanzador al blanco, con su resultado, también en la repetición de los turnos de la IA. Las interceptaciones, como un destello.
 - **Vista realista:** arcos y destellos con el mismo estilo que los trazos de las misiones aéreas.
+
+---
+
+## Parte D · Punta de lanza y frente amplio
+
+### Por qué
+- **(Usuario)** «Un ataque tipo punta de flecha, es decir, ataques rápidos y de conquista rápida; luego otros más lentos que vayan creando logística por detrás, y poder abarcar mucha más amplitud para conquistar territorio, más que para destruir».
+- Hoy (tras la parte A) toda ofensiva es un **asalto**: se reúne, avanza en bloque por un pasillo de 3 casillas al paso del más lento y ataca en masa. Va bien contra una masa enemiga, pero es lenta para ganar terreno, y nadie se ocupa de lo que queda detrás: ciudades asediadas que hay que mantener, carreteras rotas al conquistar y bolsas de enemigos sorteadas.
+
+### D1 · Doctrina de la ofensiva
+- **(Usuario)** La doctrina de sus ofensivas **la elige el jugador**. El juego solo propone una por defecto: la que crea más conveniente, preseleccionada y marcada como «recomendada» con su motivo (por ejemplo, «tienes muchos tanques y el enemigo no tiene masas»). Se calcula con la misma regla con la que elige la IA (D5). Nunca se cambia sola: una vez elegida, o si el jugador cambia la propuesta, se queda así. La anchura y la logística siguen el mismo criterio: valor por defecto según la doctrina, y el jugador lo cambia cuando quiera.
+- **(Decisión mía)** Cada ofensiva tiene una **doctrina**, que se elige al dibujarla y se puede cambiar en su ficha:
+  - **Asalto**: lo de la parte A, sin cambios.
+  - **Punta de lanza**: conquista rápida en profundidad (D2), con un escalón de seguimiento que asegura y da logística (D3).
+  - **Frente amplio**: ocupar territorio a lo ancho; evita las batallas grandes (D4).
+- **Anchura del frente (Decisión mía):** se elige en la ficha entre estrecha, media y amplia. Por defecto, estrecha en asalto y en punta de lanza, y amplia en frente amplio.
+  - En el mapa de Europa son 3, 6 y 10 casillas a cada lado de la flecha.
+  - En el del mundo, 1, 2 y 3, porque cada casilla mide unos 85 km. Se calcula en km como los demás radios: 60, 120 y 200 km.
+- **(Decisión mía)** Las fases de la parte A (reunión con lanzamiento «cuando esté lista» o «cuando yo lo diga») valen para las tres doctrinas.
+
+### D2 · Punta de lanza
+- **(Usuario)** Ataques rápidos y de conquista rápida.
+- **(Decisión mía)** Al lanzarse, la ofensiva reparte a sus miembros en dos escalones:
+  - **Punta**: los ejércitos de velocidad 6 o más (con tanques; la infantería mecanizada y la artillería autopropulsada cuentan si llegan a 6 con la investigación).
+  - **Seguimiento**: el resto.
+  - Si no hay ninguno rápido, la punta es el miembro más rápido. La ficha deja pasar un ejército de un escalón al otro a mano.
+- **La punta (Decisión mía):**
+  - Avanza a toda velocidad por los puntos de la flecha. Solo guarda la cohesión de 2 casillas con los otros miembros de la punta, no con el seguimiento.
+  - **Rodea lo fuerte**: no ataca una casilla cuya relación conjunta no llegue a `op.ratio`; busca paso alrededor dentro del pasillo. Los ejércitos que sortea quedan anotados como **bolsas** para el seguimiento.
+  - Prefiere ocupar ciudades sin guarnición o con guarnición débil y los cruces de carreteras. Al entrar en una ciudad enemiga empieza el asedio, como hoy.
+  - **Deja guarnición**: al seguir adelante desde una ciudad asediada, deja en ella un destacamento que mantiene el asedio. Son 2 infanterías, o la unidad más barata si no lleva infantería. Así el asedio no se pierde.
+  - Una punta que se queda sin suministro o pasa hambre lo dice el parte. Igualmente sigue mientras tenga el umbral.
+  - Se detiene si se aleja más de 6 casillas por delante del seguimiento (10 en el mundo, en km: 120 y 850 km), para no quedar cercada. Espera a que el seguimiento se acerque.
+- **(Decisión mía)** Con la parte A, «aislado» y «sin carretera» ya castigan a la punta que se interna sola. Es el precio de la velocidad, y el seguimiento lo compensa (D3).
+
+### D3 · Escalón de seguimiento y logística
+- **(Usuario)** Otros más lentos que vayan creando logística por detrás.
+- **(Decisión mía)** El seguimiento va por el camino de la punta, con su propia cohesión (la de la parte A, a su paso), y hace por orden:
+  1. **Releva las guarniciones** de las ciudades asediadas que dejó la punta: entra en ellas, se funde con el destacamento y, si el asedio necesita más tropas, las deja.
+  2. **Limpia las bolsas** anotadas por la punta con ataque conjunto, solo si llega a `op.ratio`. Si no llega, las cerca: ocupa casillas vecinas para que queden rodeadas (rodeado ×0,75 / cercado ×0,5 y, en territorio ocupado, hambre).
+  3. **Logística** con el oro de la operación:
+     - Un ajuste nuevo, **«Logística»**, decide qué parte del oro por turno de la operación (`op.gold`) va a obras: 0, 25, 50 o 75 %. Por defecto es 50 % en punta de lanza y en frente amplio, y 0 en asalto.
+     - Con ese oro, cada turno, en este orden:
+       - **repara** los tramos rotos dentro del pasillo, en territorio ya propio (`startRepair`);
+       - **construye** la carretera más corta desde la red propia hasta la casilla propia más cercana a la punta (`planRoad`), para que la punta tenga suministro y el pasillo cuente para la renta.
+     - Las obras siguen las reglas de siempre: turnos de obra y no se trabaja con enemigo al lado.
+     - La ficha y el parte dicen qué se ha reparado y construido.
+- **(Decisión mía)** Lo que se recluta por la plantilla de la operación entra en el seguimiento.
+
+### D4 · Frente amplio
+- **(Usuario)** Abarcar mucha más amplitud para conquistar territorio, más que para destruir.
+- **(Decisión mía)** Con frente amplio:
+  - Los miembros se reparten a lo ancho del pasillo (amplio por defecto), cada uno con su **franja**: el pasillo dividido en tantas franjas como miembros, ordenadas de un lado a otro de la flecha.
+  - Cada uno avanza por su franja hacia la línea del siguiente punto. La cohesión mide cuánto ha avanzado cada franja a lo largo de la flecha (nadie más de 2 casillas por delante de la franja más atrasada), y no exige estar pegado al vecino.
+  - **Objetivo: terreno.**
+    - Ocupa casillas enemigas vacías.
+    - Ataca solo guarniciones débiles: relación propia de al menos `op.ratio` + 0,5, solo o en conjunto con el vecino de franja.
+    - Prefiere las ciudades, porque tomar una ciudad da la provincia entera, y deja guarnición al seguir, como la punta (D2).
+    - Evita las masas enemigas: si un ejército enemigo fuerte entra en su franja, el miembro se aparta a la franja vecina o se detiene. La ficha avisa: «Masa enemiga en la franja 3: el frente se detiene ahí».
+  - La logística es la de D3, con el seguimiento formado por los miembros más lentos. Con pocos miembros (menos de 3), todos van en el frente y la logística la hace la propia operación.
+- **(Decisión mía)** Con frente amplio, una ofensiva no termina al tomar el objetivo si quedan provincias enemigas con ciudad dentro del pasillo: termina cuando no quede ninguna.
+
+### D5 · IA
+- **(Decisión mía)** La IA elige la doctrina de sus ofensivas nuevas:
+  - **Punta de lanza**: si al menos un tercio de su fuerza de ataque es rápida (velocidad ≥ 6) y el enemigo del frente no tiene masas mayores que las suyas.
+  - **Frente amplio**: contra un vecino mucho más débil (su fuerza ≤ 0,5 de la propia en ese frente).
+  - **Asalto**: en los demás casos, y contra objetivos fortificados o capitales.
+- Usa la logística igual que el jugador.
+
+### D6 · Interfaz y mapa
+- **Al dibujar** una ofensiva (herramienta Operación), un selector de doctrina con una línea que explica cada una. En la ficha, doctrina, anchura y logística.
+- **En la ficha:**
+  - qué miembros van en la punta y cuáles en el seguimiento, con el botón para pasar uno de escalón;
+  - las bolsas sorteadas;
+  - las guarniciones dejadas;
+  - las obras en curso;
+  - en frente amplio, las franjas, con qué miembro lleva cada una y si alguna está detenida.
+- **En el mapa:**
+  - **punta de lanza**: la flecha, con la punta más marcada; los miembros de la punta con una marca de escalón distinta de los del seguimiento;
+  - **frente amplio**: el pasillo ancho, con sus franjas en un tono muy suave;
+  - las bolsas, con un contorno a trazos;
+  - las obras de logística, como las demás obras de carretera.
+- **Símbolos:** la flecha de penetración de la OTAN para la punta de lanza y la flecha de avance de frente ancho para el frente amplio, en el estilo de las flechas que ya se dibujan.
 
 ---
 
