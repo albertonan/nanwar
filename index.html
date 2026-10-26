@@ -6763,6 +6763,19 @@ function smoothLine(pts, n = 8) {
     out.push(pts[pts.length - 1]);
     return out;
 }
+// Envolvente convexa de unos puntos (cadena monótona), en el orden en que se recorre.
+function convexHull(pts) {
+    const p = [...pts].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    if (p.length < 3) return p;
+    const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    const half = list => {
+        const h = [];
+        for (const q of list) { while (h.length >= 2 && cross(h[h.length - 2], h[h.length - 1], q) <= 0) h.pop(); h.push(q); }
+        h.pop();
+        return h;
+    };
+    return [...half(p), ...half(p.reverse())];
+}
 // Contorno de una flecha de eje de avance a lo largo de una línea: cuerpo que se ensancha de w0 a w1 y punta.
 function arrowOutline(c, w0, w1, headL, headW) {
     const L = [0];
@@ -6841,7 +6854,7 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const PREFS_KEY = 'nanwar.prefs';
 const SPEEDS = { lenta: 1200, normal: 500, rapida: 150 };
 function readPrefs() {
-    const def = { watch: 'directo', speed: 'normal', view: 'realista', supply: false, ops: true, sheet: 'media' };
+    const def = { watch: 'directo', speed: 'normal', view: 'realista', supply: false, ops: true, groups: false, sheet: 'media' };
     try { return { ...def, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; } catch { return def; }
 }
 function writePrefs(p) { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch { /* sin almacenamiento */ } }
@@ -6869,6 +6882,9 @@ class MapView {
         this.builtForts = -1;
         this.showSupply = false;
         this.showOps = true;
+        this.showGroups = false;         // capa «Agrupaciones» (tecla G): fichas teñidas por su agrupación
+        this.groupFocus = 0;             // agrupación bajo el ratón en el cajón Orden de batalla
+        this.selGroup = 0;               // agrupación elegida entera
         this.highlight = null;   // { moves:Set, attacks:Set }
         this.preview = null;     // obra en curso de trazar
         this.selectedCell = -1;
@@ -7302,6 +7318,22 @@ class MapView {
             const p = new Path2D(); this.hexPath(p, this.hoverCell);
             ctx.strokeStyle = real ? 'rgba(255,252,240,0.7)' : 'rgba(255,255,255,0.75)'; ctx.lineWidth = (real ? 1.1 : 1.4) / s; ctx.stroke(p);
         }
+        // Agrupación enfocada en el cajón o elegida entera: envolvente translúcida de su color que une a sus miembros y,
+        // si no es la selección (que ya los rodea), el mismo contorno suave que la selección en cada uno.
+        const fg = g.player !== null && !g.over ? this.focusGroup() : 0;
+        if (fg) {
+            const m = this.groupBy.get(fg), p = new Path2D();
+            this.groupHull(fg).forEach(([x, y], i) => (i ? p.lineTo(x, y) : p.moveTo(x, y))); p.closePath();
+            ctx.fillStyle = m.color; ctx.globalAlpha = 0.16; ctx.fill(p);
+            ctx.globalAlpha = 0.9; ctx.setLineDash([7 / s, 5 / s]); ctx.strokeStyle = m.color; ctx.lineWidth = 1.6 / s; ctx.stroke(p);
+            ctx.setLineDash([]); ctx.globalAlpha = 1;
+            if (fg !== this.selGroup) {
+                const q = new Path2D();
+                for (const c of m.cells) if (c !== this.selectedCell) this.hexPath(q, c);
+                ctx.strokeStyle = 'rgba(21,26,18,0.75)'; ctx.lineWidth = 4 / s; ctx.stroke(q);
+                ctx.strokeStyle = m.color; ctx.lineWidth = 2 / s; ctx.stroke(q);
+            }
+        }
         if (this.multi?.size) {
             const p = new Path2D();
             for (const c of this.multi) this.hexPath(p, c);
@@ -7395,6 +7427,9 @@ class MapView {
         const seen = (wx, wy, cell) => { const c = G.cellAt(wx, wy); return g.sees(g.player, c >= 0 ? c : cell); };
         // Embarcado según la casilla donde se dibuja: a medio camino, la ficha cambia al entrar o salir del mar.
         const onSea = (wx, wy, cell) => { const c = G.cellAt(wx, wy); return afloat(c >= 0 ? c : cell); };
+        // Agrupaciones propias: número y color en la ficha; de lejos, un símbolo por agrupación en vez de las fichas de
+        // sus miembros; con la capa G, los agrupados del color de su agrupación y los demás atenuados.
+        const groups = g.player !== null ? (this.groupMarks(), this.groupBy) : null, dimG = this.showGroups ? 0.35 : 1;
         // Antes de elegir país no se enseñan las fuerzas de nadie.
         if (g.player !== null) for (const a of g.armies.values()) {
             if (g.armyOn(a.cell) !== a) continue;
@@ -7404,13 +7439,16 @@ class MapView {
             if (!visible(sx, sy)) continue;
             if (far && !pose?.moving && a.owner !== g.player && !g.atWar(g.player, a.owner)) continue;
             if (far && this.showOps && a.owner === g.player && a.op && g.ops.has(a.op) && !pose?.moving) continue;   // de lejos, una ficha por operación
+            const grp = a.group && a.owner === g.player ? groups.get(a.group) ?? null : null;
+            if (far && grp && !pose?.moving) continue;   // de lejos, un símbolo por agrupación (abajo)
             if (!seen(wx, wy, a.cell)) continue;
             const mine = a.owner === g.player, sea = afloat(a.cell);   // embarcado: ni suministro ni rodeo
             const view = g.armyView(g.player, a);
             tokens.push({ id: a.id, owner: a.owner, type: view.type, n: view.n, echelon: view.echelon, level: view.level, wx, wy, mine,
                 spent: mine && g.mp(a) === 0, noSupply: mine && !sea && !g.inSupply(a.owner, a.cell),
                 flanked: !sea && g.hostileSides(a.owner, a.cell) >= CONFIG.FLANKED_SIDES, starving: g.starving(a.owner, a.cell), selected: (a.cell === this.selectedCell || !!this.sel?.has(a.id)) && !pose?.moving,
-                moving: !!pose?.moving, facing: this.motion.facingOf(a.id, pose), afloat: onSea(wx, wy, a.cell), alpha: 1 });
+                moving: !!pose?.moving, facing: this.motion.facingOf(a.id, pose), afloat: onSea(wx, wy, a.cell),
+                group: grp, tint: this.showGroups && grp ? grp.color : null, alpha: grp ? 1 : dimG });
         }
         if (g.player !== null) for (const gh of this.motion.ghosts(now)) {
             if (!seen(gh.p.x, gh.p.y, gh.tr.cells[gh.tr.cells.length - 1])) continue;
@@ -7434,8 +7472,28 @@ class MapView {
             if (!visible(x, y)) continue;
             const sh = this.motion.shake(t.id, now);
             if (sh) { x += sh[0]; y += sh[1]; }
-            if (real) this.realistic.drawArmy(ctx, { ...t, x, y, hexPx, color: g.nations[t.owner].color, now });
+            if (real) this.realistic.drawArmy(ctx, { ...t, x, y, hexPx, color: t.tint ?? g.nations[t.owner].color, now });
             else this.drawCounter(t, x, y, hexPx, font);
+        }
+        // De lejos, cada agrupación propia es una ficha en el centro de sus miembros: tipo que más pesa, escalón y total
+        // encima («XXX · 340»), su número abajo a la izquierda, un marco de su color y su nombre debajo (si no pisa otro).
+        if (far && groups) {
+            const placed = [];
+            for (const m of groups.values()) {
+                const [x, y] = this.toScreen(m.x, m.y);
+                if (!visible(x, y)) continue;
+                ctx.beginPath(); ctx.roundRect(x - 15.5, y - 11.3, 31, 19.8, 3.5);
+                ctx.strokeStyle = 'rgba(21,26,18,0.8)'; ctx.lineWidth = fg === m.gid ? 5.5 : 4.5; ctx.stroke();
+                ctx.strokeStyle = m.color; ctx.lineWidth = fg === m.gid ? 3.2 : 2.2; ctx.stroke();
+                this.drawCounter({ owner: g.player, type: m.type, n: null, echelon: `${m.mark} · ${m.n}`, level: 0, mine: true, alpha: 1, groupMark: m.gid, group: m,
+                    tint: this.showGroups ? m.color : null }, x, y, 12, font);
+                ctx.font = font(12, 700); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+                const hw = ctx.measureText(m.name).width / 2 + 2, ly = y + 21;
+                if (placed.some(r => Math.abs(r.x - x) < r.w + hw && Math.abs(r.y - ly) < 14)) continue;
+                placed.push({ x, y: ly, w: hw });
+                ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(21,26,18,0.9)'; ctx.fillStyle = m.color;
+                ctx.strokeText(m.name, x, ly); ctx.fillText(m.name, x, ly);
+            }
         }
         if (!far) this.drawAir(air, hexPx, font, real, visible, true);   // las patrullas vuelan por encima
         this.drawSats(hexPx, font, visible);   // encima de todo y también de lejos: el círculo que vigila es grande
@@ -7657,6 +7715,52 @@ class MapView {
         }
     }
 
+    // --- Agrupaciones en el mapa ---
+    // Una marca por agrupación propia con ejércitos asentados: { gid, num, name, color, x, y, n, mark, type, cells }, con
+    // x, y el centro de sus miembros en coordenadas de mundo, n sus unidades, mark su escalón, type el tipo que más pesa
+    // y color el de GROUP_COLORS. Se rehace solo si cambian los ejércitos, las órdenes (crear, nombrar, teñir o
+    // disolver una agrupación las cuentan) o el turno; `groupBy` las da por id.
+    groupMarks() {
+        const g = this.game, key = `${g.player}:${g.turn}:${g.version}:${g.armyVersion}:${g.orderVersion}`;
+        if (this.groupFor === g && this.groupKey === key) return this.groupList;
+        const by = new Map();
+        if (g.player !== null) {
+            for (const gr of g.nations[g.player].groups) by.set(gr.id, { gr, units: emptyUnits(), x: 0, y: 0, cells: [] });
+            for (const a of g.armies.values()) {
+                const e = a.group && a.owner === g.player ? by.get(a.group) : null;
+                if (!e || g.armyOn(a.cell) !== a) continue;
+                for (const k of UNIT_KEYS) e.units[k] += a.units[k] || 0;
+                e.x += G.cx[a.cell]; e.y += G.cy[a.cell]; e.cells.push(a.cell);
+            }
+        }
+        const out = [];
+        for (const { gr, units, x, y, cells } of by.values()) {
+            if (!cells.length) continue;
+            const n = countUnits(units);
+            out.push({ gid: gr.id, num: gr.num, name: gr.name, color: GROUP_COLORS[gr.color], x: x / cells.length, y: y / cells.length, n, mark: echelonOf(n).mark, type: dominantType(units), cells });
+        }
+        this.groupFor = g; this.groupKey = key; this.groupList = out;
+        this.groupBy = new Map(out.map(m => [m.gid, m]));
+        return out;
+    }
+    // La agrupación que se resalta: la de la fila del cajón bajo el ratón o, si no, la elegida entera; 0 si ninguna.
+    focusGroup() {
+        const gid = this.groupFocus || this.selGroup || 0;
+        return gid && (this.groupMarks(), this.groupBy.has(gid)) ? gid : 0;
+    }
+    // Envolvente de la agrupación en coordenadas de mundo: la convexa de sus casillas con un margen redondeado de algo
+    // más de media casilla, así también rodea a uno o dos ejércitos. Se guarda en su marca.
+    groupHull(gid) {
+        const m = (this.groupMarks(), this.groupBy.get(gid));
+        if (!m) return [];
+        if (!m.hull) {
+            const pts = [], r = G.S * 1.15;
+            for (const c of m.cells) for (let k = 0; k < 12; k++) pts.push([G.cx[c] + r * Math.cos(k * Math.PI / 6), G.cy[c] + r * Math.sin(k * Math.PI / 6)]);
+            m.hull = convexHull(pts);
+        }
+        return m.hull;
+    }
+
     // --- Aviación en el mapa ---
     // Lo que cambia las marcas de la aviación: escuadrones, aeródromos y antiaéreos, el turno, el país del jugador, los
     // espías, la investigación, los dueños, los ejércitos (lo que se ve) y las fortificaciones.
@@ -7870,12 +7974,14 @@ class MapView {
 
     // Ficha OTAN de la vista sencilla: color del país, símbolo del tipo dominante y número de unidades. Embarcado
     // (t.afloat), el marco es el círculo de superficie marítima de APP-6, tan alto como la ficha, con el mismo símbolo. Un
-    // escuadrón (t.type 'air') lleva la hélice de ala fija.
+    // escuadrón (t.type 'air') lleva la hélice de ala fija. De una agrupación propia (t.group: { num, color }), una franja
+    // de su color bajo la ficha y su número en la casilla de designación de APP-6, abajo a la izquierda del marco; con la
+    // capa Agrupaciones, t.tint rellena la ficha con ese color en vez del del país.
     drawCounter(t, x, y, hexPx, font) {
         const ctx = this.ctx, g = this.game;
         ctx.globalAlpha = t.alpha;
         if (hexPx < 6) {
-            ctx.fillStyle = g.nations[t.owner].color;
+            ctx.fillStyle = t.tint ?? g.nations[t.owner].color;
             ctx.fillRect(x - 3, y - 3, 6, 6);
             ctx.lineWidth = 1; ctx.strokeStyle = INK; ctx.strokeRect(x - 3, y - 3, 6, 6);
             ctx.globalAlpha = 1;
@@ -7887,7 +7993,7 @@ class MapView {
         const sx = t.afloat ? rad * Math.SQRT1_2 : w / 2, sy = t.afloat ? rad * Math.SQRT1_2 : hh / 2;
         const frame = () => { ctx.beginPath(); if (t.afloat) ctx.arc(x, cy, rad, 0, Math.PI * 2); else ctx.rect(x0, y0, w, hh); };
         ctx.globalAlpha = t.alpha * (t.spent ? 0.55 : 1);
-        ctx.fillStyle = g.nations[t.owner].color;
+        ctx.fillStyle = t.tint ?? g.nations[t.owner].color;
         frame(); ctx.fill();
         ctx.strokeStyle = INK; ctx.lineWidth = 1.4;
         ctx.beginPath();
@@ -7904,17 +8010,35 @@ class MapView {
         ctx.lineWidth = t.selected ? 3 : t.starving || t.flanked || t.noSupply ? 2.6 : 1.6;
         ctx.strokeStyle = t.selected ? '#fff' : t.starving ? HUNGER : t.flanked ? '#e05a47' : t.noSupply ? '#ff9f1c' : INK;
         frame(); ctx.stroke();
+        const bottom = t.afloat ? cy + rad : y0 + hh, gl = t.afloat ? x - rad : x0;   // pie y lado izquierdo del marco
+        let under = 0;   // lo que ocupa la franja de la agrupación bajo la ficha
+        if (t.group && !t.groupMark) {   // el símbolo de la agrupación entera lleva ya un marco de su color
+            const sw = t.afloat ? rad * 1.4 : w;
+            ctx.fillStyle = INK; ctx.fillRect(x - sw / 2, bottom + 1.5, sw, 4.6);
+            ctx.fillStyle = t.group.color; ctx.fillRect(x - sw / 2 + 0.8, bottom + 2.3, sw - 1.6, 3);
+            under = 6;
+        }
         if (t.level > 0 && hexPx >= 8) {   // galones bajo la ficha: nivel de su rama de tropa
             const cw = Math.max(5, w * 0.2), ch = Math.max(2.5, hh * 0.14), gap = ch + 1.8;
             ctx.lineCap = 'round'; ctx.lineJoin = 'round';
             for (let i = 0; i < t.level; i++) {
-                const cy = y0 + hh + 3 + ch + i * gap;
+                const cy = y0 + hh + under + 3 + ch + i * gap;
                 for (const [color, width] of [[INK, 3.6], [SIGNAL, 1.8]]) {
                     ctx.strokeStyle = color; ctx.lineWidth = width;
                     ctx.beginPath(); ctx.moveTo(x - cw, cy); ctx.lineTo(x, cy - ch); ctx.lineTo(x + cw, cy); ctx.stroke();
                 }
             }
             ctx.lineCap = 'butt'; ctx.lineJoin = 'miter';
+        }
+        if (t.group && hexPx >= 8) {   // número de la agrupación, en la esquina de abajo a la izquierda
+            const num = String(t.group.num), r = Math.max(5.5, hh * 0.32);
+            ctx.font = font(Math.round(r * (num.length > 1 ? 1.05 : 1.25)), 700);
+            const bw = Math.max(r * 2, ctx.measureText(num).width + 6), bx = gl, by = bottom - (t.afloat ? rad * 0.3 : 0);
+            ctx.beginPath(); ctx.roundRect(bx - bw / 2, by - r, bw, r * 2, r);
+            ctx.fillStyle = t.group.color; ctx.fill();
+            ctx.lineWidth = 1.3; ctx.strokeStyle = INK; ctx.stroke();
+            ctx.fillStyle = INK; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText(num, bx, by + 0.5);
         }
         if (t.n === null) {   // tamaño desconocido: el escalón de la OTAN encima de la ficha
             ctx.font = font(Math.round(Math.max(10, hh * 0.55)), 700);
@@ -7967,6 +8091,7 @@ class GameUI {
         this.view.setMode(this.prefs.view);
         this.view.showSupply = !!this.prefs.supply;
         this.view.showOps = this.prefs.ops !== false;
+        this.view.showGroups = !!this.prefs.groups;
         this.mapMenu = false;        // panel «Mapa»: vista y capas
         this.multi = new Set();      // provincias seleccionadas con la herramienta Ciudades
         this.ordering = null;        // { kind, ids }: orden a la espera de que se elija el destino en el mapa
@@ -8982,6 +9107,8 @@ class GameUI {
         const gid = this.sel.size ? g.armies.get([...this.sel][0])?.group : 0;
         const gr = gid && [...this.sel].every(id => g.armies.get(id)?.group === gid) ? g.groupById(g.player, gid) : null;
         this.view.selColor = gr ? GROUP_COLORS[gr.color] : null;
+        // Elegida entera, la agrupación se rodea con su envolvente (MapView.focusGroup).
+        this.view.selGroup = gr && g.groupMembers(g.player, gr.id).length === this.sel.size ? gr.id : 0;
         this.view.multi =this.tool === 'cities' ? new Set([...this.multi].map(pid => PROVINCES[pid].city)) : null;
         if (this.tool === 'air') this.airTidy();
         this.view.airPick = this.tool === 'air' ? this.airPick() : null;
@@ -9205,6 +9332,7 @@ class GameUI {
             case 'tool': this.setTool(d.tool === this.tool && d.tool !== 'command' ? 'command' : d.tool); return;
             case 'supply': this.setLayer('supply', !this.view.showSupply); return;
             case 'layer-ops': this.setLayer('ops', !this.view.showOps); return;
+            case 'layer-groups': this.setLayer('groups', !this.view.showGroups); return;
             case 'view-mode': this.toggleViewMode(); return;
             case 'view-set': if (d.value !== this.prefs.view) this.toggleViewMode(); return;
             case 'map-menu': this.mapMenu = !this.mapMenu; break;
@@ -9382,11 +9510,11 @@ class GameUI {
         this.renderMapMenu();
         this.renderHint();
     }
-    // Capas del mapa (se recuerdan en este dispositivo): logística y operaciones con sus órdenes.
+    // Capas del mapa (se recuerdan en este dispositivo): logística, operaciones con sus órdenes y agrupaciones.
     setLayer(key, on) {
         this.prefs[key] = on;
         writePrefs(this.prefs);
-        if (key === 'supply') this.view.showSupply = on; else this.view.showOps = on;
+        if (key === 'supply') this.view.showSupply = on; else if (key === 'groups') this.view.showGroups = on; else this.view.showOps = on;
         this.render();
     }
     // Panel «Mapa»: la vista (sencilla o realista) y las capas, todo en un sitio.
@@ -9402,7 +9530,8 @@ class GameUI {
             <p class="note" style="margin:0">${this.prefs.view === 'realista' ? 'Relieve, bosques, ríos y ciudades reales pintados, y ejércitos en miniatura.' : 'Colores planos por país, casillas y fichas OTAN.'}</p>
             <span class="small muted">Capas</span>
             ${layer('supply', this.view.showSupply, 'Logística', 'Tu territorio sin suministro, en naranja: allí los ejércitos solo avanzan una casilla por turno.', 'L')}
-            ${layer('layer-ops', this.view.showOps, 'Operaciones y órdenes', 'Flechas de ofensiva, líneas de defensa, zonas de reserva y los caminos de las órdenes de tus ejércitos.', '')}`;
+            ${layer('layer-ops', this.view.showOps, 'Operaciones y órdenes', 'Flechas de ofensiva, líneas de defensa, zonas de reserva y los caminos de las órdenes de tus ejércitos.', '')}
+            ${layer('layer-groups', this.view.showGroups, 'Agrupaciones', 'Tus ejércitos, del color de su agrupación; los que no tienen, atenuados.', 'G')}`;
     }
     renderReplay(id, n, total) {
         const g = this.game, el = $('#replay');
@@ -9529,6 +9658,7 @@ class GameUI {
         if (e.key === 'i' || e.key === 'I') { this.openResearch(); return; }
         if (e.key === 'a' || e.key === 'A') { this.toggleHighway(); return; }
         if (e.key === 'l' || e.key === 'L') this.setLayer('supply', !this.view.showSupply);
+        else if (e.key === 'g' || e.key === 'G') this.setLayer('groups', !this.view.showGroups);
         else if (e.key === 'm' || e.key === 'M') { this.mapMenu = !this.mapMenu; this.render(); }
         else if (e.key === 'b' || e.key === 'B') {
             const same = this.tab === 'batalla' && this.drawerOpen;

@@ -713,6 +713,105 @@ const CHECKS = [
         T.ok($('#drawer .tabs button.on').dataset.tab === 'batalla', 'pestaña marcada');
         return true;
     }],
+    ['A4 · groupMarks: un símbolo por agrupación con su total', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        const spot = () => T.plainPair(g, es)[1];
+        const xs = [[5, 2, 0], [6, 0, 1], [7, 3, 0], [4, 0, 0], [2, 0, 2]].map(([i, t, r]) => T.army(g, es, spot(), i, t, r));
+        const a = g.createGroup(es, xs.slice(0, 3).map(x => x.id)), b = g.createGroup(es, xs.slice(3).map(x => x.id));
+        const foe = g.createGroup(fr, [T.army(g, fr, T.plainPair(g, fr)[1], 9).id]);
+        T.ok(foe, 'agrupación ajena');
+        const m = ui.view.groupMarks();
+        T.eq(m.map(x => x.gid).sort((p, q) => p - q), [a.id, b.id].sort((p, q) => p - q), 'solo las propias, una por agrupación');
+        const ma = m.find(x => x.gid === a.id), mem = xs.slice(0, 3), u = g.groupUnits(es, a.id), n = countUnits(u);
+        T.eq([ma.num, ma.color, ma.n, ma.mark, ma.type], [a.num, GROUP_COLORS[a.color], n, echelonOf(n).mark, dominantType(u)], 'número, color, total, escalón y tipo');
+        const cx = mem.reduce((s, x) => s + G.cx[x.cell], 0) / 3, cy = mem.reduce((s, x) => s + G.cy[x.cell], 0) / 3;
+        T.ok(Math.abs(ma.x - cx) < 1e-6 && Math.abs(ma.y - cy) < 1e-6, 'en el centro de sus miembros (mundo)');
+        T.ok(ui.view.groupMarks() === m, 'cacheado mientras nada cambia');
+        g.recolorGroup(es, a.id, 5);
+        T.eq(ui.view.groupMarks().find(x => x.gid === a.id).color, GROUP_COLORS[5], 'cambiar el color lo rehace');
+        g.addToGroup(es, b.id, [T.army(g, es, spot(), 10).id]);
+        T.eq(ui.view.groupMarks().find(x => x.gid === b.id).n, 4 + 2 + 2 + 10, 'un ejército más suma');
+        return true;
+    }],
+    ['A4 · capa G se enciende con la tecla y se recuerda', () => {
+        T.uiStart('es');
+        const key = k => document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+        T.ok(!ui.view.showGroups, 'apagada al empezar');
+        key('g');
+        T.ok(ui.view.showGroups && ui.prefs.groups === true && readPrefs().groups === true, 'G la enciende y se guarda');
+        ui.mapMenu = true; ui.render();
+        const box = $('#map-menu').querySelector('[data-action="layer-groups"]');
+        T.ok(box?.checked && $('#map-menu').textContent.includes('Agrupaciones'), 'en el menú Mapa, marcada');
+        box.click();
+        T.ok(!ui.view.showGroups && readPrefs().groups === false, 'la casilla la apaga');
+        key('G');
+        T.ok(ui.view.showGroups, 'G mayúscula también');
+        key('g');
+        ui.mapMenu = false; ui.render();
+        T.ok(!ui.view.showGroups && ui.tool === 'command', 'sin tocar las herramientas');
+        return true;
+    }],
+    ['A4 · de lejos, la agrupación se dibuja una vez', () => {
+        const g = T.uiStart('es'), es = g.player;
+        ui.view.setMode('sencilla');
+        const home = T.plainPair(g, es)[1];
+        const cells = T.cellsAt(g, es, home, [0, 1, 1, 2, 2, 3]);
+        const xs = cells.map((c, i) => T.army(g, es, c, 4 + i));
+        const gr = g.createGroup(es, xs.slice(0, 5).map(x => x.id)), loose = xs[5], ids = new Set(xs.slice(0, 5).map(x => x.id));
+        const calls = [], draw = ui.view.drawCounter;
+        ui.view.drawCounter = function (t, ...rest) { calls.push(t); return draw.call(this, t, ...rest); };
+        try {
+            ui.view.scale = 3 / G.S; ui.view.centerOn(home, 3); ui.view.draw();
+            T.ok(G.S * ui.view.scale < FAR_HEX, 'de lejos');
+            T.eq(calls.filter(t => ids.has(t.id)).length, 0, 'sin las fichas de sus miembros');
+            T.eq(calls.filter(t => t.groupMark === gr.id).length, 1, 'un símbolo de la agrupación');
+            T.eq(calls.filter(t => t.id === loose.id).length, 1, 'el suelto se ve como hoy');
+            calls.length = 0;
+            ui.view.scale = 20 / G.S; ui.view.centerOn(home, 20); ui.view.draw();
+            const mine = calls.filter(t => ids.has(t.id));
+            T.eq(mine.length, 5, 'de cerca, cada ficha');
+            T.ok(mine.every(t => t.group?.num === gr.num && t.group?.color === GROUP_COLORS[gr.color]), 'con el número y el color de su agrupación');
+            T.ok(!calls.find(t => t.id === loose.id).group && !calls.some(t => t.groupMark), 'el suelto sin marca; ningún símbolo de grupo');
+            // Capa G: los agrupados, teñidos; los demás, atenuados.
+            calls.length = 0; ui.view.showGroups = true; ui.view.draw();
+            T.ok(calls.filter(t => ids.has(t.id)).every(t => t.tint === GROUP_COLORS[gr.color] && t.alpha === 1), 'teñidas');
+            T.ok(calls.find(t => t.id === loose.id).alpha < 1, 'el suelto, atenuado');
+        } finally { ui.view.drawCounter = draw; ui.view.showGroups = false; }
+        return true;
+    }],
+    ['A4 · enfocar o elegir la agrupación la rodea', () => {
+        const g = T.uiStart('es'), es = g.player;
+        ui.view.setMode('sencilla');
+        const home = T.plainPair(g, es)[1];
+        const xs = T.cellsAt(g, es, home, [0, 1, 2]).map((c, i) => T.army(g, es, c, 4 + i));
+        const gr = g.createGroup(es, xs.slice(0, 2).map(x => x.id));
+        T.eq(ui.view.focusGroup(), 0, 'nada enfocado');
+        ui.view.groupFocus = gr.id;
+        T.eq(ui.view.focusGroup(), gr.id, 'la del cajón');
+        ui.view.groupFocus = 0;
+        ui.selectGroup(gr.id);
+        T.eq(ui.view.focusGroup(), gr.id, 'la elegida entera');
+        ui.clickCell(xs[2].cell, false, true);
+        T.eq(ui.view.focusGroup(), 0, 'con uno de fuera, ninguna');
+        const hull = ui.view.groupHull(gr.id);
+        T.ok(hull.length >= 3, 'envolvente con grosor aunque sean dos');
+        ui.view.centerOn(home, 20); ui.view.groupFocus = gr.id; ui.view.draw(); ui.view.groupFocus = 0;
+        return true;
+    }],
+    ['A4 · 400 ejércitos en 80 agrupaciones: el mapa se dibuja deprisa', () => {
+        const g = T.uiStart('es'), es = g.player, ids = [];
+        ui.view.setMode('sencilla');
+        for (const c of G.land) { if (ids.length >= 400) break; if (T.free(g, c) && g.owner[c] === es) ids.push(T.army(g, es, c, 1 + ids.length % 7).id); }
+        for (const c of G.land) { if (ids.length >= 400) break; if (T.free(g, c)) ids.push(T.army(g, es, c, 1 + ids.length % 7).id); }
+        for (let i = 0; i < 80; i++) g.createGroup(es, ids.slice(i * 5, i * 5 + 5));
+        ui.view.showGroups = true;
+        const time = hex => { ui.view.scale = hex / G.S; ui.view.centerOn(g.nations[es].capitalCell, hex); ui.view.draw(); const t0 = performance.now(); for (let i = 0; i < 5; i++) ui.view.draw(); return (performance.now() - t0) / 5; };
+        try {
+            const far = time(3), near = time(14);
+            T.ok(far < 40 && near < 40, `de lejos ${far.toFixed(1)} ms, de cerca ${near.toFixed(1)} ms`);
+        } finally { ui.view.showGroups = false; }
+        return true;
+    }],
     ['A4 · 400 ejércitos: renderBattleOrder tarda menos de 50 ms', () => {
         const g = T.uiStart('es'), es = g.player, ids = [];
         for (const c of G.land) { if (ids.length >= 400) break; if (T.free(g, c)) ids.push(T.army(g, es, c, 1 + ids.length % 7).id); }
@@ -814,6 +913,58 @@ try {
         if (errs.length) { failed++; console.log(`FALLA ${OB_SHOTS}\n      ${errs.join('\n      ')}`); }
         else console.log(`ok    ${OB_SHOTS} (${join(out, 'orden-batalla.png')}, orden-batalla-movil.png)`);
         await obPage.close();
+    }
+    // Capturas de las agrupaciones en el mapa, en las dos vistas: de cerca con una agrupación de 5 ejércitos enfocada
+    // desde el cajón, de lejos con tres agrupaciones y, a media distancia, con la capa Agrupaciones.
+    const MAP_SHOTS = 'A4 · captura de las agrupaciones en el mapa';
+    if (!filter || MAP_SHOTS.includes(filter)) {
+        ran++;
+        const out = join(root, 'tools/cache/smoke');
+        mkdirSync(out, { recursive: true });
+        const mp = await browser.newPage({ viewport: { width: 1200, height: 800 } });
+        const errs = [], names = [];
+        mp.on('pageerror', e => errs.push(e.message));
+        await mp.goto(`http://localhost:${port}/?seed=7`);
+        await mp.waitForFunction(() => typeof GameEngine === 'function' && typeof ui === 'object');
+        await mp.evaluate(setup);
+        await mp.evaluate(() => {
+            const g = T.uiStart('es'), es = g.player;
+            ui.drawerOpen = false;
+            // Tres centros separados por unas diez casillas, cada uno con su agrupación, y unos sueltos.
+            const home = T.plainPair(g, es)[1], near = g.nearCells(home, 14);
+            const pick = (d, avoid) => [...near].find(([c, k]) => k === d && T.free(g, c) && g.owner[c] === es && avoid.every(o => g.nearCells(o, 8).get(c) === undefined))?.[0];
+            const b = pick(10, [home]) ?? pick(9, [home]), c = pick(10, [home, b]) ?? pick(12, [home, b]);
+            const mk = (center, sizes, tank) => T.cellsAt(g, es, center, [0, 1, 1, 2, 2].slice(0, sizes.length)).map((x, i) => T.army(g, es, x, sizes[i], i % 2 ? tank : 0, i === 2 ? 3 : 0));
+            const A = mk(home, [30, 12, 20, 8, 15], 4), B = mk(b, [40, 30, 25], 12), C = mk(c, [10, 6, 14, 9], 0);
+            const ga = g.createGroup(es, A.map(x => x.id)), gb = g.createGroup(es, B.map(x => x.id)), gc = g.createGroup(es, C.map(x => x.id), { name: 'Reserva del norte' });
+            g.recolorGroup(es, gb.id, 3);
+            for (const x of T.cellsAt(g, es, home, [3, 4])) T.army(g, es, x, 7);
+            g.nations[es].tech.done.add('infanteria1'); g.techVersion++;   // galones bajo la franja
+            window.SHOT = { home, ga: ga.id, cells: [...A, ...B, ...C].map(x => x.cell) };
+        });
+        const views = [['sencilla', 'sencilla'], ['realista', 'realista']];
+        for (const [mode, tag] of views) {
+            await mp.evaluate(m => { ui.prefs.view = m; ui.view.setMode(m); }, mode);
+            if (mode === 'realista') await mp.waitForFunction(() => ui.view.realistic.state === 'ready' || ui.view.realistic.state === 'failed', null, { timeout: 60000 });
+            const shot = async (name, fn) => {
+                await mp.evaluate(fn);
+                await mp.waitForTimeout(mode === 'realista' ? 1500 : 300);
+                await mp.evaluate(() => ui.view.draw());
+                await mp.screenshot({ path: join(out, name) });
+                names.push(name);
+            };
+            // Como al pasar el ratón por su fila del cajón (renderDrawer apaga el foco con el cajón cerrado).
+            await shot(`agrupaciones-cerca-${tag}.png`, () => {
+                ui.select(-1); ui.view.showGroups = false; ui.tab = 'batalla'; ui.drawerOpen = true;
+                ui.view.scale = 26 / G.S; ui.view.centerOn(SHOT.home, 26); ui.view.ox -= 160; ui.render(); ui.view.groupFocus = SHOT.ga;
+            });
+            await shot(`agrupaciones-lejos-${tag}.png`, () => { ui.drawerOpen = false; ui.view.scale = 3.5 / G.S; ui.view.centerOn(SHOT.home, 3.5); ui.render(); });
+            await shot(`agrupaciones-capa-g-${tag}.png`, () => { ui.view.showGroups = true; ui.view.scale = 11 / G.S; ui.view.centerOn(SHOT.home, 11); ui.render(); });
+            await mp.evaluate(() => { ui.view.showGroups = false; });
+        }
+        if (errs.length) { failed++; console.log(`FALLA ${MAP_SHOTS}\n      ${errs.join('\n      ')}`); }
+        else console.log(`ok    ${MAP_SHOTS} (${join(out, names[0])}, ${names.slice(1).join(', ')})`);
+        await mp.close();
     }
 } finally {
     await browser.close();
