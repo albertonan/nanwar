@@ -834,6 +834,7 @@ const OP_DOCTRINES = {
     amplio: { name: 'Frente amplio', desc: 'Ocupa territorio a lo ancho y evita las batallas grandes.', width: 'amplia', logistics: 50 }
 };
 const OP_WIDTHS = { estrecha: 60, media: 120, amplia: 200 };   // pasillo de la ofensiva: km a cada lado del trazado de la flecha (kmCells)
+const OP_WIDTH_MIN = { estrecha: 3, media: 4, amplia: 6 };     // y nunca menos de estas casillas (en el mapa del mundo, 60 km son una casilla)
 const OP_LOGISTICS = [0, 25, 50, 75];   // parte del oro de la operación (%) para reparar y abrir carreteras detrás de ella
 const OP_SPEAR_SPEED = 6;    // un ejército de esta velocidad o más va en la punta de lanza
 const OP_SPEAR_KM = 120;     // la punta se detiene a esta distancia por delante del seguimiento, a lo largo de la flecha
@@ -1430,7 +1431,7 @@ class GameEngine {
                 form: o.form ? { name: o.form.name, units: o.form.units, zone: o.form.zone, recruited: o.form.recruited, pending: o.form.pending } : null,
                 ...(o.kind === 'ofensiva' ? { phase: o.phase, launch: o.launch, go: o.go, wp: o.wp, zone: o.zone, gatherSince: o.gatherSince, body: o.body,
                     doctrine: o.doctrine, width: o.width, logistics: o.logistics, echelon: Object.entries(o.echelon ?? {}).filter(([x]) => this.armies.get(+x)?.op === o.id).map(([x, e]) => [+x, e]),
-                    pockets: o.pockets, garrisons: o.garrisons } : {}) })),
+                    pockets: o.pockets, garrisons: o.garrisons, workPool: o.workPool ?? 0 } : {}) })),
             armyForms: [...this.armies.values()].filter(a => a.form).map(a => [a.id, a.form]),
             nextOpId: this.nextOpId,
             armyOps: [...this.armies.values()].filter(a => a.op).map(a => [a.id, a.op]),
@@ -1663,7 +1664,7 @@ class GameEngine {
                 // Parte D; las de antes, asaltos estrechos sin logística.
                 const cellList = v => [...new Set(list(v).slice(0, 2000).filter(c => Number.isInteger(c) && c >= 0 && c < G.N))];
                 Object.assign(op, { doctrine: Object.hasOwn(OP_DOCTRINES, o.doctrine) ? o.doctrine : 'asalto', width: Object.hasOwn(OP_WIDTHS, o.width) ? o.width : 'estrecha',
-                    logistics: OP_LOGISTICS.includes(o.logistics) ? o.logistics : 0, pockets: cellList(o.pockets), garrisons: cellList(o.garrisons),
+                    logistics: OP_LOGISTICS.includes(o.logistics) ? o.logistics : 0, pockets: cellList(o.pockets), garrisons: cellList(o.garrisons), workPool: int(o.workPool, 0, 1e7, 0),
                     echelon: Object.fromEntries(list(o.echelon).slice(0, 5000).map(x => [int(x?.[0], 1, 1e9, 0), x?.[1]]).filter(([x, e]) => x && (e === 'punta' || e === 'seguimiento'))) });
                 op.bySea = g.opAxisSea(op);
                 if (old) firstWp.push(op);
@@ -4995,7 +4996,7 @@ class GameEngine {
             // Doctrina (D1): asalto si no se pide otra; la anchura y la logística, las de serie de la doctrina si no se piden.
             const doctrine = Object.hasOwn(OP_DOCTRINES, opts.doctrine) ? opts.doctrine : 'asalto', D = OP_DOCTRINES[doctrine];
             Object.assign(op, { doctrine, width: Object.hasOwn(OP_WIDTHS, opts.width) ? opts.width : D.width,
-                logistics: OP_LOGISTICS.includes(opts.logistics) ? opts.logistics : D.logistics, echelon: {}, pockets: [], garrisons: [] });
+                logistics: OP_LOGISTICS.includes(opts.logistics) ? opts.logistics : D.logistics, echelon: {}, pockets: [], garrisons: [], workPool: 0 });
             op.bySea = this.opAxisSea(op);
         }
         this.ops.set(op.id, op);
@@ -5076,9 +5077,11 @@ class GameEngine {
     // logistics: % de op.gold para logística (OP_LOGISTICS); echelon: { id de ejército: 'punta' | 'seguimiento' } (se
     // reparte al lanzar una punta de lanza; quien no está, va en el seguimiento: opEchelon); pockets: casillas con
     // ejércitos enemigos que la punta ha dejado atrás en el pasillo; garrisons: ciudades asediadas en las que la punta ha
-    // dejado guarnición (leaveGarrison).
-    // Anchura del pasillo, en casillas a cada lado del trazado: los km de su anchura (estrecha, si no tiene).
-    opLaneWidth(op) { return kmCells(OP_WIDTHS[op.width] ?? OP_WIDTHS.estrecha); }
+    // dejado guarnición (leaveGarrison); workPool: fondo de obras, la parte de logística del oro de la operación que se
+    // va guardando (reinforceBegin) y que gasta opLogistics.
+    // Anchura del pasillo, en casillas a cada lado del trazado: los km de su anchura (estrecha, si no tiene), y nunca
+    // menos de OP_WIDTH_MIN (en Europa quedan 3, 6 y 10; en el mundo, 3, 4 y 6).
+    opLaneWidth(op) { const w = Object.hasOwn(OP_WIDTHS, op.width) ? op.width : 'estrecha'; return Math.max(kmCells(OP_WIDTHS[w]), OP_WIDTH_MIN[w]); }
     // Trazado de una ofensiva, guardado por trazado y anchura: tramos (origen, vector, longitud y casillas recorridas
     // antes), casillas que pisa cada tramo (cada media casilla, como suggestTemplate pero más fino), pasillo (a
     // opLaneWidth o menos), pasillo del primer tramo y si cruza el mar.
@@ -5391,8 +5394,9 @@ class GameEngine {
         }
         return best;
     }
-    // Punta de lanza (D2). Primero el seguimiento, que avanza como un asalto con su propio grueso (opMarch); luego la
-    // punta, a toda velocidad por los puntos de la flecha:
+    // Punta de lanza (D2). Primero el seguimiento (D3): releva las guarniciones (opRelieve), limpia o cerca las bolsas
+    // (opPockets) y los demás avanzan como un asalto con su propio grueso (opMarch); luego la punta, a toda velocidad por
+    // los puntos de la flecha (la logística, al final del paso de la operación: opLogistics):
     // 1) puntos alcanzados por el grueso de la punta (como en opMarch), antes de mover al seguimiento, que va al mismo;
     // 2) quien de la punta está en una ciudad que asedia separa su guarnición (leaveGarrison) antes de atacar o marchar,
     //    y al final la deja si se ha ido o la vuelve a juntar si no; quien no puede dejarla no se mueve;
@@ -5411,8 +5415,7 @@ class GameEngine {
         const here = a => this.armies.has(a.id) && a.owner === id && a.op === op.id && this.armyOn(a.cell) === a;
         const alongOf = a => this.opAlong(op, a.cell);
         op.echelon ??= {}; op.pockets ??= []; op.garrisons ??= [];
-        const said = op._said ??= new Map();   // lo último que dijo el parte de cada cosa (no se guarda)
-        const say = (k, text) => { if (!text) said.delete(k); else if (said.get(k) !== text) { said.set(k, text); tally.notes.push(text); } };
+        const say = (k, text) => this.opSay(op, tally, k, text);
         const inBody = new Set(op.body ?? []);
         let tips = this.opMembers(op).filter(tipOf);
         let pbody = new Set(tips.filter(a => inBody.has(a.id)).map(a => a.id));
@@ -5427,8 +5430,11 @@ class GameEngine {
             op.wp++; wpMoved = true;
         }
         if (wpMoved) { this.orderVersion++; tally.notes.push(`La punta avanza hacia el punto ${op.wp + 1} de ${op.cells.length}`); }
-        // El seguimiento.
-        if (this.opMembers(op).some(a => !tipOf(a))) this.opMarch(op, free, tally, live, a => !tipOf(a));
+        // El seguimiento (D3): releva las guarniciones, limpia o cerca las bolsas y los demás marchan.
+        const busy = this.opRelieve(op, free, tally);
+        if (!this.over) for (const x of this.opPockets(op, free, tally, busy)) busy.add(x);
+        if (this.over) return;
+        if (this.opMembers(op).some(a => !tipOf(a) && !busy.has(a.id))) this.opMarch(op, free, tally, live, a => !tipOf(a) && !busy.has(a.id));
         if (this.over) return;
         const goal = op.cells[op.wp];
         tips = this.opMembers(op).filter(tipOf);
@@ -5496,6 +5502,192 @@ class GameEngine {
         }
         const out = grp.find(a => this.starving(id, a.cell)) ?? grp.find(a => !this.inSupply(id, a.cell));
         say('supply', out ? `La punta ${this.starving(id, out.cell) ? 'pasa hambre' : 'está sin suministro'} en ${this.placeName(out.cell)}; sigue mientras tenga ventaja` : '');
+    }
+    // El parte de una ofensiva sin repetirse: dice `text` bajo la clave `k` solo si no es lo último que dijo de ella; sin
+    // texto, la olvida (para volver a decirla cuando vuelva a pasar). Sin `tally` no dice nada ni lo apunta. op._said no
+    // se guarda.
+    opSay(op, tally, k, text) {
+        const said = op._said ??= new Map();
+        if (!text) said.delete(k);
+        else if (tally && said.get(k) !== text) { said.set(k, text); tally.notes.push(text); }
+    }
+    // --- Escalón de seguimiento y logística (D3) ---
+    // Miembros del seguimiento de `list` que siguen en la operación, en su casilla.
+    opFollowers(op, list) {
+        return list.filter(a => this.armies.has(a.id) && a.owner === op.owner && a.op === op.id && this.armyOn(a.cell) === a && this.opEchelon(op, a) === 'seguimiento');
+    }
+    // 1) Releva las guarniciones que dejó la punta. Las ciudades de op.garrisons que ya no asedia (han caído o se han
+    // perdido) salen de la lista. A cada una que sigue asediada va el miembro libre del seguimiento más cercano (uno por
+    // ciudad): al entrar se funde con el destacamento, que vuelve así a la operación, y se queda en la ciudad con todas
+    // sus tropas mientras dure el asedio; cuando cae, sigue con el seguimiento. Devuelve los ids de los que relevan o
+    // mantienen un asedio: este turno no marchan con los demás.
+    opRelieve(op, free = this.opMembers(op), tally = null) {
+        const id = op.owner, busy = new Set();
+        const kept = [];
+        for (const city of op.garrisons ?? []) {
+            if (this.sieges.get(city)?.by === id) { kept.push(city); continue; }
+            if (this.owner[city] === id && this.legal[city] === id) tally?.notes.push(`${this.placeName(city)} ya es tuya: su guarnición sigue con el seguimiento`);
+            else tally?.notes.push(`Se pierde el asedio de ${this.placeName(city)}`);
+        }
+        op.garrisons = kept;
+        const follow = this.opFollowers(op, free);
+        for (const city of kept) {
+            if (this.over) break;
+            const at = this.armyOn(city);
+            if (at && at.owner === id && at.op === op.id) { busy.add(at.id); continue; }   // ya relevada: mantiene el asedio
+            const f = this.orderField(id, city);
+            let best = null, bd = Infinity;
+            for (const a of follow) {
+                if (busy.has(a.id) || !this.armies.has(a.id) || this.armyOn(a.cell) !== a || this.mp(a) <= 0) continue;
+                const d = f.to(a.cell);
+                if (d < bd) { bd = d; best = a; }
+            }
+            if (!best) continue;
+            busy.add(best.id);
+            const a = this.detach(best), r = this.reach(id, a.cell, this.mp(a), a.used === 0);
+            if (this.advance(a, city, r, true) === 'blocked') { this.reattach(a); continue; }
+            const now = this.armyOn(city);
+            if (now && now.owner === id && now.op === op.id) {
+                busy.add(now.id);
+                tally?.notes.push(`El seguimiento releva la guarnición de ${this.placeName(city)}`);
+            }
+        }
+        return busy;
+    }
+    // 2) Bolsas: fuera de la lista las casillas que ya no tienen un ejército enemigo a la vista (se ha ido, ha muerto o se
+    // ha rendido). Contra cada una que queda, de la más atrasada a la más adelantada, el seguimiento libre (sin los de
+    // `busy`) ataca en conjunto si llega a op.ratio, como el asalto de la ofensiva; si no llega, la cerca: los que ya
+    // están a su lado se quedan, y los que alcanzan este turno una vecina libre la ocupan hasta tenerla cercada
+    // (CONFIG.SURROUNDED_SIDES lados con enemigos suyos). Devuelve los ids de los que atacan o cercan: este turno no
+    // marchan con los demás.
+    opPockets(op, free = this.opMembers(op), tally = null, busy = new Set()) {
+        const id = op.owner, hold = new Set();
+        const foeAt = c => { const e = isLand(c) ? this.armyOn(c) : null; return e && this.atWar(id, e.owner) && this.sees(id, c) ? e : null; };
+        op.pockets = (op.pockets ?? []).filter(c => foeAt(c));
+        const avail = () => this.opFollowers(op, free).filter(a => !busy.has(a.id) && !hold.has(a.id));
+        for (const c of [...op.pockets].sort((x, y) => this.opAlong(op, x) - this.opAlong(op, y))) {
+            if (this.over) break;
+            const def = foeAt(c);
+            if (!def) continue;
+            const where = this.placeName(c);
+            // Ataque conjunto, si llega.
+            const list = this.jointCandidates(id, c, new Set(avail().map(a => a.id)));
+            if (list.length) {
+                const seen = this.intel(id, def.owner, c).exact ? def
+                    : { id: def.id, owner: def.owner, units: { infantry: echelonCeil(countUnits(def.units)), tank: 0, artillery: 0 } };
+                const j = this.jointFactors(id, list.map(x => ({ units: x.army.units, from: x.from, id: x.army.id })), seen, c);
+                if (j.atk / j.dfn >= op.ratio) {
+                    for (const x of list) hold.add(x.army.id);
+                    this.attackJoint(list, c);
+                    if (tally) tally.attacked++;
+                    tally?.notes.push(`El seguimiento ataca la bolsa de ${where} con ${plural(list.length, 'ejército', 'ejércitos')}`);
+                    continue;
+                }
+            }
+            // Si no, la cerca.
+            let sides = this.hostileSides(def.owner, c), moved = 0;
+            for (const a of avail()) if (hexDist(a.cell, c) === 1 && !afloat(a.cell)) hold.add(a.id);
+            const open = [];
+            for (let d = 0; d < 6; d++) { const v = G.nb[c * 6 + d]; if (v >= 0 && isLand(v) && !this.armyAt[v]) open.push(v); }
+            const near = avail().filter(a => this.mp(a) > 0).sort((x, y) => hexDist(x.cell, c) - hexDist(y.cell, c) || x.id - y.id);
+            for (const a0 of near) {
+                if (this.over || sides >= CONFIG.SURROUNDED_SIDES || !open.length) break;
+                if (!this.armies.has(a0.id) || this.armyOn(a0.cell) !== a0) continue;
+                const a = this.detach(a0), r = this.reach(id, a.cell, this.mp(a), a.used === 0), to = this.destinations(r);
+                const k = open.findIndex(v => to.has(v));
+                if (k < 0) { this.reattach(a); continue; }
+                this.moveArmy(a, open.splice(k, 1)[0], r);
+                hold.add(a0.id); hold.add(a.id); moved++;
+                sides = this.hostileSides(def.owner, c);
+            }
+            if (moved) tally?.notes.push(`El seguimiento cerca la bolsa de ${where}: ${sides} de sus 6 lados`);
+        }
+        op.pockets = op.pockets.filter(c => foeAt(c));
+        return hold;
+    }
+    // El miembro más adelantado de la ofensiva (en tierra), de la punta si la hay; null si no tiene ninguno.
+    opTip(op) {
+        const members = this.opMembers(op).filter(a => !afloat(a.cell));
+        const tips = members.filter(a => this.opEchelon(op, a) === 'punta'), list = tips.length ? tips : members;
+        let best = null, ba = -Infinity;
+        for (const a of list) { const x = this.opAlong(op, a.cell); if (x > ba) { ba = x; best = a; } }
+        return best;
+    }
+    // 3) Logística con el fondo de obras de la ofensiva (op.workPool), y siempre con oro del tesoro, tras moverse:
+    //   a) repara los tramos rotos del pasillo con sus dos casillas propias, de atrás adelante (startRepair: la mitad de
+    //      construirlos y sus turnos de obra);
+    //   b) construye la carretera más corta (planRoad) de la red propia a la casilla propia más cercana a la punta sin
+    //      enemigos al lado (opTip), si no está ya en la red: desde la red, los tramos que pague; el resto, otro turno.
+    // No se trabaja con un enemigo al lado (repairBlocked), ni se construye por un tramo que ya se está reparando.
+    // Devuelve { repaired, built, cost, why } (why: por qué no ha hecho nada, o ''). Con `tally`, el parte lo dice, sin
+    // repetir el porqué. op._work guarda lo último que hizo (no se guarda).
+    opLogistics(op, tally = null) {
+        const id = op.owner, n = this.nations[id], out = { repaired: 0, built: 0, cost: 0, why: '' };
+        if (op.kind !== 'ofensiva' || !op.logistics) return out;
+        const pool = op.workPool ?? 0;
+        let left = Math.min(pool, n.gold), blocked = false, short = false;
+        if (pool < 1) out.why = op.gold ? 'aún no hay oro para obras' : 'la operación no tiene oro';
+        else if (n.gold < 1) out.why = 'no hay oro en el tesoro';
+        else {
+            const lane = this.opCorridor(op), mult = this.rules(id).roadCost, keys = new Set(), todo = [];
+            for (const u of lane) {
+                if (!isLand(u) || this.owner[u] !== id) continue;
+                for (let d = 0; d < 6; d++) {
+                    const cls = this.broken[u * 6 + d], v = G.nb[u * 6 + d], key = edgeKey(u, d);
+                    if (!cls || v < 0 || keys.has(key) || !lane.has(v) || this.owner[v] !== id || this.roadWork.has(key)) continue;
+                    keys.add(key);
+                    todo.push([u, d, Math.min(this.opAlong(op, u), this.opAlong(op, v))]);
+                }
+            }
+            todo.sort((x, y) => x[2] - y[2]);
+            for (const [u, d] of todo) {
+                if (this.repairBlocked(id, u, G.nb[u * 6 + d])) { blocked = true; continue; }
+                const cost = Math.round(this.roadEdgeCost(u, d, this.broken[u * 6 + d], mult) / 2);
+                if (cost > left) { short = true; continue; }
+                const before = n.gold;
+                if (!this.startRepair(id, { edges: [[u, d]], cost, cls: 'repair' })) continue;
+                left -= before - n.gold; out.cost += before - n.gold; out.repaired++;
+            }
+            // La casilla propia sin enemigos al lado más cercana a la punta (a igual distancia, la más adelantada).
+            const tip = this.opTip(op), net = this.economy(id).seen;
+            let target = -1, td = Infinity, ta = -Infinity, hot = false;
+            if (tip) for (const [c, k] of this.nearCells(tip.cell, this.opLaneWidth(op))) {
+                if (!isLand(c) || this.owner[c] !== id) continue;
+                if (this.repairBlocked(id, c, c)) { hot = true; continue; }
+                const x = this.opAlong(op, c);
+                if (k < td || (k === td && x > ta)) { target = c; td = k; ta = x; }
+            }
+            if (target < 0 && hot) blocked = true;
+            const plan = target >= 0 && !net[target] && left >= 1 && this.owner[n.capitalCell] === id ? this.planRoad(id, target, x => net[x] === 1, 1) : null;   // sin capital no hay red
+            if (plan) {
+                // Desde la red hacia la punta, mientras haya oro, sin enemigos al lado ni tramos en reparación.
+                let k = plan.path.length - 1, cost = 0, fresh = 0;
+                for (; k > 0; k--) {
+                    const a = plan.path[k], b = plan.path[k - 1], d = G.dirTo(a, b);
+                    if (this.road[a * 6 + d] >= 1) continue;
+                    if (this.roadWork.has(edgeKey(a, d))) break;
+                    if (this.repairBlocked(id, a, b)) { blocked = true; break; }
+                    const c = this.roadEdgeCost(a, d, 1, mult);
+                    if (Math.round(cost + c) > left) { short = true; break; }
+                    cost += c; fresh++;
+                }
+                if (fresh) {
+                    const before = n.gold, built = this.buildRoad(id, { path: plan.path.slice(k), cost: Math.round(cost), cls: 1 });
+                    if (built) { out.built += built; out.cost += before - n.gold; left -= before - n.gold; }
+                }
+            }
+            if (!out.repaired && !out.built) out.why = blocked ? 'hay enemigos junto a la obra' : short ? 'no llega el oro para el siguiente tramo' : '';
+        }
+        op.workPool = Math.max(0, pool - out.cost);
+        op._work = { turn: this.turn, ...out };
+        if (out.repaired || out.built) {
+            this.opSay(op, tally, 'work', '');
+            const parts = [];
+            if (out.repaired) parts.push(`repara ${plural(out.repaired, 'tramo roto', 'tramos rotos')} del pasillo`);
+            if (out.built) parts.push(`abre ${plural(out.built, 'tramo', 'tramos')} de carretera hacia la punta`);
+            tally?.notes.push(`Logística: ${parts.join(' y ')} (${out.cost} de oro)`);
+        } else this.opSay(op, tally, 'work', out.why ? `Logística sin obras: ${out.why}` : '');
+        return out;
     }
     // Lo que la punta prefiere tomar de camino: una ciudad enemiga sin guarnición o un cruce de carreteras enemigo (tres
     // tramos o más) del pasillo que alcance este turno, sin pasar del tope `lim` ni quedar más de 2 casillas por detrás de
@@ -5613,6 +5805,7 @@ class GameEngine {
             }
             if (op.phase === 'avance') this.opAdvance(op, free, tally, live);
             if (this.owner[obj] === id) done = `objetivo cumplido, ${this.placeName(obj)} es tuya`;
+            else if (op.phase === 'avance' && !this.over && this.ops.has(op.id)) this.opLogistics(op, tally);   // tras moverse (D3)
         } else if (op.kind === 'defensa') {
             this.defenseStep(op, free, tally, live);
             op.uncovered = this.opNeed(op);
@@ -5983,12 +6176,15 @@ class GameEngine {
         this.reinforceEnd(op);
     }
     // Fondo del turno, formación nueva si toca y marcha de lo reclutado el turno anterior. Devuelve con qué reclutar, o null.
+    // La parte de logística del oro de una ofensiva (op.logistics %, D3) va a su fondo de obras (op.workPool, hasta 6
+    // turnos) y el resto, a refuerzos.
     reinforceBegin(op) {
         const id = op.owner;
         if (op.poolTurn !== this.turn) {   // una vez por turno
             op.poolTurn = this.turn;
-            const tpl = this.opTemplate(op);
-            op.pool = Math.min((op.pool ?? 0) + op.gold, Math.max(op.gold * 6, this.templateCost(id, tpl.units) * 3)) + (op.extra ?? 0);
+            const tpl = this.opTemplate(op), work = Math.round(op.gold * (op.logistics ?? 0) / 100), gold = op.gold - work;
+            if (work) op.workPool = Math.min((op.workPool ?? 0) + work, Math.max(work * 6, op.workPool ?? 0));
+            op.pool = Math.min((op.pool ?? 0) + gold, Math.max(gold * 6, this.templateCost(id, tpl.units) * 3)) + (op.extra ?? 0);
             op.extra = 0;
         }
         let f = op.form;

@@ -187,6 +187,43 @@ const setup = () => {
             }
             throw new Error('no hay bahía');
         },
+        // Ciudad X de Francia que la punta `a` (3 infanterías y 6 tanques) acaba de tomar y asedia, con un camino de 8
+        // casillas por delante hasta otra provincia, y el seguimiento `b` (6 infanterías) a 2 casillas por detrás:
+        // { g, es, X, a, b, op }.
+        siege() {
+            const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+            g.start(es); g.declareWar(es, fr);
+            let X = -1, O = -1;
+            for (const p of PROVINCES) {
+                if (g.owner[p.city] !== es || CAPITAL_OF[p.city] >= 0) continue;
+                for (const [c, d] of g.nearCells(p.city, 8)) if (d === 8 && isLand(c) && CITY_OF[c] < 0 && G.prov[c] !== G.prov[p.city] && T.clearRoute(g, es, [p.city, c], 1)) { X = p.city; O = c; break; }
+                if (X >= 0) break;
+            }
+            T.ok(X >= 0, 'ciudad con camino');
+            g.owner[X] = fr; g.legal[X] = fr; g.owner[O] = fr; g.legal[O] = fr; g.version++;
+            const a = T.army(g, es, X, 3, 6, 0);
+            g.capture(X, es, true);
+            const op = g.createOp(es, 'ofensiva', [X, O], { doctrine: 'lanza' });
+            const back = [...g.nearCells(X, 2)].find(([c, d]) => d === 2 && T.free(g, c) && g.owner[c] === es && g.opAlong(op, c) === 0)?.[0];
+            T.ok(back !== undefined, 'casilla detrás de la ciudad');
+            const b = T.army(g, es, back, 6, 0, 0);
+            for (const x of [a, b]) g.assignArmy(x, op.id);
+            g.opLaunch(op);
+            op.echelon = { [a.id]: 'punta', [b.id]: 'seguimiento' };
+            return { g, es, X, a, b, op };
+        },
+        // Casilla de la recta de S a O a unos `along` de la salida de `op`, con carretera (si no tiene, se le pone una hacia
+        // la siguiente casilla de la recta).
+        roadAt(g, op, S, O, along) {
+            const pts = T.samples(S, O).sort((x, y) => g.opAlong(op, x) - g.opAlong(op, y));
+            const i = pts.reduce((b, c, k) => Math.abs(g.opAlong(op, c) - along) < Math.abs(g.opAlong(op, pts[b]) - along) ? k : b, 0), C = pts[i];
+            if (![0, 1, 2, 3, 4, 5].some(d => g.road[C * 6 + d])) {
+                const d = G.dirTo(C, pts[i + 1]);
+                T.ok(d >= 0, 'casillas seguidas');
+                g.road[C * 6 + d] = 1; g.road[pts[i + 1] * 6 + (d + 3) % 6] = 1; g.roadVersion++;
+            }
+            return C;
+        },
         // Empieza una partida en la interfaz con el país dado y devuelve su motor.
         uiStart(key, fog = false) {
             for (const d of document.querySelectorAll('dialog[open]')) d.close();
@@ -442,6 +479,269 @@ const CHECKS = [
         T.eq(bs.length, 1, 'un solo combate');
         T.eq(bs[0].joint.slice().sort(), xs.map(a => a.id).sort(), 'con los tres a la vez');
         T.eq(g.owner[target], es, 'y lo ganan');
+        return true;
+    }],
+    ['D1 · la anchura no baja de 3, 4 y 6 casillas: Europa 3/6/10 y el mundo 3/4/6', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        const [S, O] = T.straight(g, es, 8);
+        const op = g.createOp(es, 'ofensiva', [S, O]);
+        const widths = () => Object.keys(OP_WIDTHS).map(w => { op.width = w; return g.opLaneWidth(op); });
+        const was = MAP.cellKm;
+        try {
+            T.eq(widths(), [3, 6, 10], 'Europa');
+            MAP.cellKm = MAPS.mundo.cellKm;
+            T.eq(widths(), [3, 4, 6], 'el mundo');
+        } finally { MAP.cellKm = was; }
+        return true;
+    }],
+    ['D3 · el seguimiento releva la guarnición y el asedio termina', () => {
+        const { g, es, X, a, b, op } = T.siege();
+        T.turns(g, es, 1);
+        const gar = g.armyOn(X);
+        T.ok(gar && gar !== a && !gar.op && op.garrisons.includes(X), 'la punta deja guarnición');
+        let relieved = null;
+        for (let t = 0; t < 4 && !relieved; t++) {
+            T.turns(g, es, 1);
+            const at = g.armyOn(X);
+            if (at && at.op === op.id) relieved = at;
+        }
+        T.ok(relieved, 'el seguimiento entra en la ciudad');
+        T.ok(!g.armies.has(b.id) || relieved.id === b.id, 'y se funde con la guarnición');
+        T.ok(relieved.units.infantry >= 8, `con las tropas de los dos (${relieved.units.infantry})`);
+        T.eq(g.opEchelon(op, relieved), 'seguimiento', 'en el seguimiento');
+        T.ok(g.logs.some(l => l.msg.includes('releva la guarnición')), 'el parte lo dice');
+        // Mantiene el asedio hasta que cae: no se va con el seguimiento.
+        const cell = relieved.cell;
+        for (let t = 0; t < 4 && g.sieges.has(X); t++) {
+            g.beginNationTurn(es);
+            if (!g.sieges.has(X)) break;
+            T.turns(g, es, 1);
+            T.ok(g.armyOn(X)?.owner === es, 'la ciudad no queda vacía');
+            T.eq(relieved.cell, cell, 'el relevo no se va mientras dura el asedio');
+        }
+        T.ok(!g.sieges.has(X) && g.owner[X] === es && g.ops.has(op.id), 'el asedio termina: la ciudad es suya');
+        T.turns(g, es, 1);
+        T.eq(op.garrisons, [], 'y sale de la lista');
+        // Una ciudad que se pierde también sale.
+        const lost = PROVINCES.find(p => g.owner[p.city] === T.nation('fr')).city;
+        op.garrisons.push(lost);
+        T.turns(g, es, 1);
+        T.ok(!op.garrisons.includes(lost), 'sin asedio, fuera de la lista');
+        return true;
+    }],
+    ['D3 · limpia una bolsa con ataque conjunto si llega, y si no la cerca', () => {
+        let g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        // Llega: tres del seguimiento junto a una bolsa débil atacan juntos.
+        let { target, sides } = T.ring(g, es, fr, 3);
+        let foe = g.settle(g.newArmy(fr, target, { infantry: 2, tank: 0, artillery: 0 }, 0));
+        let far = T.cellsAt(g, es, target, [5])[0];
+        let op = g.createOp(es, 'ofensiva', [far, target], { doctrine: 'lanza' });
+        let xs = sides.map(c => T.army(g, es, c, 0, 0, 30));
+        for (const x of xs) g.assignArmy(x, op.id);
+        g.opLaunch(op);
+        for (const x of xs) g.playerOpSet(op, `echelon:${x.id}`, 'seguimiento');
+        op.pockets = [target];
+        const seen = new Set(g.motion);
+        g.opPockets(op);
+        const bs = g.motion.filter(e => e.kind === 'battle' && !seen.has(e) && e.cell === target);
+        T.eq(bs.length, 1, 'un combate');
+        T.eq(bs[0].joint.slice().sort(), xs.map(a => a.id).sort(), 'con los tres');
+        T.ok(!g.armies.has(foe.id) || foe.cell !== target, 'la bolsa cae');
+        T.eq(op.pockets, [], 'y sale de la lista');
+        // No llega: cinco del seguimiento a 2 casillas ocupan las vecinas libres y la cercan, sin atacar.
+        g = T.game(); es = T.nation('es'); fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        target = G.land.find(c => CELL_TERRAIN[c] === 'plain' && [...g.nearCells(c, 2).keys()].every(x => T.free(g, x) && g.owner[x] === es && CAPITAL_OF[x] < 0));
+        g.owner[target] = fr; g.legal[target] = fr; g.version++;
+        foe = g.settle(g.newArmy(fr, target, { infantry: 400, tank: 0, artillery: 0 }, 0));
+        far = T.cellsAt(g, es, target, [6])[0];
+        op = g.createOp(es, 'ofensiva', [far, target], { doctrine: 'lanza' });
+        xs = T.cellsAt(g, es, target, [2, 2, 2, 2, 2, 2]).map(c => T.army(g, es, c, 2, 0, 0));
+        for (const x of xs) g.assignArmy(x, op.id);
+        g.opLaunch(op);
+        for (const x of xs) g.playerOpSet(op, `echelon:${x.id}`, 'seguimiento');
+        op.pockets = [target];
+        const seen2 = new Set(g.motion);
+        const said = { notes: [], attacked: 0 };
+        g.opPockets(op, undefined, said);
+        T.eq(g.motion.filter(e => e.kind === 'battle' && !seen2.has(e)).length, 0, 'no ataca lo que no puede');
+        T.eq(g.hostileSides(fr, target), CONFIG.SURROUNDED_SIDES, 'la cerca: 5 de sus 6 lados');
+        T.eq(g.flankFactor(fr, target), g.rules(fr).surrounded, 'cercada');
+        T.eq(op.pockets, [target], 'sigue en la lista');
+        T.ok(xs.some(x => g.armies.has(x.id) && hexDist(x.cell, target) === 2), 'no manda a más de los que hacen falta');
+        // El turno siguiente los que la cercan no se van con el seguimiento.
+        const ring = xs.filter(x => g.armies.has(x.id) && hexDist(x.cell, target) === 1).map(x => [x.id, x.cell]);
+        for (const x of g.armies.values()) if (x.owner === es) x.used = 0;
+        g.executeOp(op);
+        T.eq(ring.map(([id]) => g.armies.get(id)?.cell), ring.map(([, c]) => c), 'mantienen el cerco');
+        T.ok(said.notes.some(s => s.includes('cerca la bolsa de') && s.includes('5 de sus 6 lados')), `el parte lo dice: ${said.notes}`);
+        return true;
+    }],
+    ['D3 · logística repara los tramos rotos del pasillo con el oro de la operación', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 10, { m: 1, supply: true });
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        // El oro de la operación se reparte: la parte de logística al fondo de obras, el resto a refuerzos.
+        const op = g.createOp(es, 'ofensiva', [S, O], { doctrine: 'lanza', gold: 100 });
+        g.reinforceBegin(op);
+        T.eq([op.workPool, op.pool], [50, 50], 'la mitad a obras');
+        const old = g.createOp(es, 'ofensiva', [S, O], { gold: 100, noCap: true });
+        g.reinforceBegin(old);
+        T.eq([old.workPool, old.pool], [0, 100], 'el asalto, todo a refuerzos');
+        const tk = T.army(g, es, S, 0, 4, 0);
+        g.assignArmy(tk, op.id);
+        g.opLaunch(op);
+        // Tramos rotos en mitad del pasillo, en territorio propio.
+        const C = T.roadAt(g, op, S, O, 5);
+        const n = g.breakRoads(C);
+        T.ok(n > 0, 'rotos');
+        op.workPool = 500;
+        const nat = g.nations[es];
+        nat.gold = 5000;
+        const res = g.opLogistics(op);
+        T.eq(res.repaired, n, `repara los ${n} tramos`);
+        T.ok(res.cost > 0 && nat.gold === 5000 - res.cost && op.workPool === 500 - res.cost, `con el oro de la operación (${res.cost})`);
+        for (let d = 0; d < 6; d++) if (g.broken[C * 6 + d]) T.eq(g.roadWork.get(edgeKey(C, d))?.owner, es, 'en obra');
+        T.eq(g.opLogistics(op).repaired, 0, 'no paga dos veces la misma obra');
+        // Con los turnos de obra, quedan reparados.
+        for (let t = 0; t < g.rules(es).fortTurns; t++) g.beginNationTurn(es);
+        T.ok([0, 1, 2, 3, 4, 5].every(d => !g.broken[C * 6 + d]), 'reparados');
+        // El parte lo dice.
+        g.breakRoads(C);
+        const tally = { notes: [] };
+        g.opLogistics(op, tally);
+        T.ok(tally.notes.some(s => s.includes('repara') && s.includes('de oro')), `el parte: ${tally.notes}`);
+        return true;
+    }],
+    ['D3 · logística construye carretera hacia la punta', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 10, { m: 1, supply: true });
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O], { doctrine: 'lanza' });
+        const P = T.samples(S, O).sort((x, y) => Math.abs(g.opAlong(op, x) - 6) - Math.abs(g.opAlong(op, y) - 6))[0];
+        // Sin carreteras alrededor de la punta: queda fuera de la red.
+        for (const c of g.nearCells(P, 3).keys()) for (let d = 0; d < 6; d++) { const j = G.nb[c * 6 + d]; if (j >= 0) { g.road[c * 6 + d] = 0; g.road[j * 6 + (d + 3) % 6] = 0; g.broken[c * 6 + d] = 0; g.broken[j * 6 + (d + 3) % 6] = 0; } }
+        g.roadVersion++;
+        T.ok(!g.economy(es).seen[P], 'la punta, fuera de la red');
+        const tk = T.army(g, es, P, 0, 4, 0), inf = T.army(g, es, S, 4, 0, 0);
+        for (const x of [tk, inf]) g.assignArmy(x, op.id);
+        g.opLaunch(op);
+        T.eq(g.opEchelon(op, tk), 'punta', 'los tanques, en la punta');
+        op.workPool = 3000;
+        const nat = g.nations[es];
+        nat.gold = 10000;
+        const res = g.opLogistics(op);
+        T.ok(res.built > 0, 'construye');
+        T.ok(g.economy(es).seen[P] === 1, 'la punta queda unida a la red');
+        T.ok(nat.gold === 10000 - res.cost && op.workPool === 3000 - res.cost, `con el oro de la operación (${res.cost})`);
+        T.eq(g.opLogistics(op).built, 0, 'ya unida, no construye más');
+        // Con poco oro construye desde la red lo que pague y sigue el turno siguiente.
+        for (const c of g.nearCells(P, 3).keys()) for (let d = 0; d < 6; d++) { const j = G.nb[c * 6 + d]; if (j >= 0) { g.road[c * 6 + d] = 0; g.road[j * 6 + (d + 3) % 6] = 0; } }
+        g.roadVersion++;
+        op.workPool = 40;
+        const part = g.opLogistics(op);
+        T.ok(part.built >= 1 && part.cost <= 40 && !g.economy(es).seen[P], `obra a medias (${part.built} tramos, ${part.cost} de oro)`);
+        op.workPool = 3000;
+        T.ok(g.opLogistics(op).built >= 1 && g.economy(es).seen[P] === 1, 'y la termina después');
+        return true;
+    }],
+    ['D3 · sin oro o con enemigo al lado no gasta y el parte dice por qué', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 10, { m: 1, supply: true });
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O], { doctrine: 'lanza' });
+        const C = T.roadAt(g, op, S, O, 6);
+        g.breakRoads(C);
+        // La punta, en la red y lejos de la obra: no hay carretera que construir.
+        const home = [...g.opCorridor(op)].find(c => T.free(g, c) && g.owner[c] === es && g.economy(es).seen[c] === 1 && hexDist(c, C) > 3);
+        T.ok(home !== undefined, 'casilla en la red');
+        const tk = T.army(g, es, home, 0, 4, 0);
+        g.assignArmy(tk, op.id);
+        g.opLaunch(op);
+        const nat = g.nations[es];
+        nat.gold = 5000;
+        // Sin oro en la operación.
+        let res = g.opLogistics(op);
+        T.eq([res.repaired, res.built, res.cost, nat.gold], [0, 0, 0, 5000], 'sin oro no gasta');
+        T.ok(/oro/.test(res.why), `dice por qué (${res.why})`);
+        g.executeOp(op);
+        T.ok(g.logs.some(l => l.msg.includes('Logística') && l.msg.includes('oro')), 'el parte lo dice');
+        // Sin oro en el tesoro.
+        op.workPool = 500; nat.gold = 0;
+        res = g.opLogistics(op);
+        T.eq([res.cost, op.workPool, nat.gold], [0, 500, 0], 'sin tesoro no gasta');
+        T.ok(/tesoro/.test(res.why), `dice por qué (${res.why})`);
+        // Con un enemigo al lado de la obra.
+        nat.gold = 5000;
+        const nb = [0, 1, 2, 3, 4, 5].map(d => G.nb[C * 6 + d]).find(j => j >= 0 && isLand(j) && !g.armyAt[j]);
+        const foe = g.settle(g.newArmy(fr, nb, { infantry: 1, tank: 0, artillery: 0 }, 0));
+        const tally = { notes: [] };
+        res = g.opLogistics(op, tally);
+        T.eq([res.repaired, res.cost, nat.gold, op.workPool], [0, 0, 5000, 500], 'con el enemigo al lado no gasta');
+        T.ok(/enemigo/.test(res.why) && tally.notes.some(s => s.includes('enemigo')), `y lo dice (${res.why})`);
+        // No se queda bloqueada: cuando el enemigo se va, repara.
+        g.removeArmy(foe);
+        T.ok(g.opLogistics(op).repaired > 0, 'sin enemigo, repara');
+        return true;
+    }],
+    ['D3 · bolsas que se van o mueren salen de la lista', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        const [S, O] = T.straight(g, es, 10, { m: 1, supply: true });
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O], { doctrine: 'lanza' });
+        const tk = T.army(g, es, S, 0, 4, 0);
+        g.assignArmy(tk, op.id);
+        g.opLaunch(op);
+        const pts = T.samples(S, O).filter(c => g.opAlong(op, c) >= 3 && CITY_OF[c] < 0 && !g.armyAt[c]);
+        const [P1, P2, P3, P4] = pts;
+        const foes = [P1, P2, P3].map(c => g.settle(g.newArmy(fr, c, { infantry: 1, tank: 0, artillery: 0 }, 0)));
+        op.pockets = [P1, P2, P3, P4];
+        g.opPockets(op);
+        T.eq(op.pockets, [P1, P2, P3], 'fuera la casilla sin enemigo');
+        g.removeArmy(foes[0]);   // muere
+        const away = [...g.nearCells(P2, 12).keys()].find(c => isLand(c) && !g.armyAt[c] && !g.opCorridor(op).has(c));
+        g.armyAt[P2] = 0; foes[1].cell = away; g.settle(foes[1]);   // se va
+        g.changeOwner(foes[2], es);   // se rinde
+        g.opPockets(op);
+        T.eq(op.pockets, [], 'las que mueren, se van o se rinden, fuera');
+        // Y en el paso de la operación.
+        op.pockets = [P4];
+        T.turns(g, es, 1);
+        T.ok(!op.pockets.includes(P4), 'el turno las limpia');
+        return true;
+    }],
+    ['D3 · guardar y cargar a mitad conserva escalones, bolsas, guarniciones y fondo de obras', () => {
+        const { g, es, X, b, op } = T.siege();
+        T.turns(g, es, 1);
+        T.ok(op.garrisons.includes(X), 'guarnición anotada');
+        const P = [...g.nearCells(X, 3).keys()].find(c => isLand(c) && !g.armyAt[c] && CITY_OF[c] < 0);
+        g.settle(g.newArmy(T.nation('fr'), P, { infantry: 1, tank: 0, artillery: 0 }, 0));
+        op.pockets.push(P);
+        op.workPool = 123;
+        const data = JSON.parse(JSON.stringify(g.serialize()));
+        let h = GameEngine.load(JSON.parse(JSON.stringify(data)));
+        const ho = h.ops.get(op.id), all = o => [o.echelon, o.pockets, o.garrisons, o.workPool, o.logistics, o.doctrine];
+        T.eq(all(ho), all(op), 'se conserva');
+        // Lo que no vale, a cero (o al tope); las de antes, sin fondo.
+        for (const [v, w] of [['x', 0], [-5, 0], [null, 0], [1e12, 1e7]]) {
+            const bad = JSON.parse(JSON.stringify(data));
+            for (const o of bad.ops) if (o.id === op.id) o.workPool = v;
+            T.eq(GameEngine.load(bad).ops.get(op.id).workPool, w, `fondo ${v}`);
+        }
+        const older = JSON.parse(JSON.stringify(data));
+        for (const o of older.ops) delete o.workPool;
+        T.eq(GameEngine.load(older).ops.get(op.id).workPool, 0, 'las de antes, sin fondo');
+        // La partida cargada sigue: el seguimiento releva la guarnición.
+        let relieved = false;
+        for (let t = 0; t < 4 && !relieved; t++) { T.turns(h, es, 1); relieved = h.armyOn(X)?.op === op.id; }
+        T.ok(relieved, 'tras cargar, el seguimiento releva la guarnición');
+        T.ok(h.armies.has(b.id) || h.armyOn(X).units.infantry >= 8, 'con su tropa');
         return true;
     }],
 ];
