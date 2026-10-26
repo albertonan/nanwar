@@ -3562,18 +3562,26 @@ class GameEngine {
         return s && s[1] === this.turn ? [id, s[0]] : [id];
     }
     // Las escoltas de ataque que despegarían ya con un ataque de los ejércitos `ids` de `owner` (sin repetir): a su
-    // alcance y con el vuelo de este turno sin gastar.
-    escortSupport(owner, ids) {
+    // alcance y con el vuelo de este turno sin gastar. Con `cell`, la casilla atacada, solo las que también la tienen a su
+    // alcance desde su base (la que no llega ni golpea, ni apoya, ni gasta su vuelo).
+    escortSupport(owner, ids, cell = -1) {
         const out = [];
         if (!this.escortPieces().length) return out;
         for (const id of new Set(ids.flatMap(x => this.supportIds(x)))) {
             const e = this.escortsOf(owner, id);
             for (const q of [...e.squadrons, ...e.swarms]) {
-                if (q.task.mode === 'ataque' && !out.includes(q) && (this.isSwarm(q) ? this.canFlySwarm(q) : this.canFly(q))) out.push(q);
+                const sw = this.isSwarm(q);
+                if (q.task.mode !== 'ataque' || out.includes(q) || !(sw ? this.canFlySwarm(q) : this.canFly(q))) continue;
+                if (cell >= 0 && hexDist(q.base, cell) > (sw ? this.droneRange(owner) : this.airRange(owner))) continue;
+                out.push(q);
             }
         }
         return out;
     }
+    // ¿Conocerá `owner` al defensor de `cell` antes del combate gracias a la escolta de ataque de los ejércitos `ids`? Sí si
+    // despegaría algún enjambre que llega a `cell`: su golpe previo lo deja conocido (escortStrike). Es lo que ve el que
+    // mira (la previsión exacta del ataque), sin desvelar nada más de lo que verían sus drones.
+    escortEyes(owner, ids, cell) { return this.escortSupport(owner, ids, cell).some(q => this.isSwarm(q)); }
     // «Apoyo aéreo» de las piezas `list` (en el aire): ESCORT.SQ por escuadrón, con el tope SQ_CAP, por ESCORT.SW por
     // enjambre, con el tope SW_CAP. null sin ninguna.
     airSupport(list) {
@@ -3583,10 +3591,10 @@ class GameEngine {
     }
     // Factor de la escolta del ejército `armyId` de `owner` en un combate: en el ataque ('atk'), la de ataque que
     // despegaría ahora (la previsión; el combate usa las que de verdad siguen en el aire tras el golpe previo, `pieces`);
-    // en la defensa ('def'), la de defensa que defiende ahora. [nombre, factor] o null.
-    escortFactor(owner, armyId, side, pieces = null) {
+    // en la defensa ('def'), la de defensa que defiende ahora. [nombre, factor] o null. `cell`: la casilla atacada.
+    escortFactor(owner, armyId, side, pieces = null, cell = -1) {
         if (pieces) return this.airSupport(pieces);
-        if (side === 'atk') return this.airSupport(this.escortSupport(owner, [armyId]));
+        if (side === 'atk') return this.airSupport(this.escortSupport(owner, [armyId], cell));
         const e = this.escortsOf(owner, armyId);
         return this.airSupport([...e.squadrons, ...e.swarms].filter(q => this.escortGuarding(q)));
     }
@@ -3595,11 +3603,12 @@ class GameEngine {
     // de los escuadrones no va a ciegas y el parte lo cuenta entero), y luego los escuadrones, cada grupo en una misión
     // «Atacar ejército» con sus reglas (cazas, capas de defensa, antiaéreo, fracaso). Si la misión no se puede (ya hay un
     // acierto este turno), vuelan igual, como apoyo. Devuelve las que siguen en el aire (ni derribadas ni dañadas): el
-    // «apoyo aéreo» del combate. Sin escolta de ataque no hace nada ni tira dados.
+    // «apoyo aéreo» del combate. Sin escolta de ataque no hace nada ni tira dados. Solo vuelan las que llegan a `cell`, y
+    // solo los enjambres que vuelan dejan conocido al defensor.
     escortStrike(owner, ids, cell) {
-        const fly = this.escortSupport(owner, ids);
+        const fly = this.escortSupport(owner, ids, cell);
         if (!fly.length) return fly;
-        const sws = fly.filter(q => this.isSwarm(q)), sqs = fly.filter(q => !this.isSwarm(q));
+        const sws = this.fliers(owner, fly.filter(q => this.isSwarm(q)), cell, true), sqs = fly.filter(q => !this.isSwarm(q));
         if (sws.length) {
             const k = owner * G.N + cell;
             if (!(this.droneSeen.get(k) >= this.turn)) this.droneSeen.set(k, this.turn);
@@ -6404,14 +6413,40 @@ class GameEngine {
 
     attack(army, from, target, r) {
         // Un destacamento que ataca desde su propia casilla aún no está registrado en ella: battle() lo asienta al final.
+        const left = this.leftAt(army, from, r);
         if (from !== army.cell) army = this.moveArmy(army, from, r);
         let def = this.armyOn(target);
         if (!def) { this.settle(army); return; }
         // Antes, el golpe de su escolta de ataque, que puede acabar con el defensor.
-        const support = this.escortStrike(army.owner, [army.id], target);
+        const foe = def.owner, support = this.escortStrike(army.owner, [army.id], target);
         def = this.armyOn(target);
-        if (!def) { this.settle(army); return; }
+        if (!def) { this.fallBefore([[army, left]], target, foe); return; }
         this.battle(army, def, target, support);
+    }
+    // Lo que le queda de movimiento a `army` en la casilla de ataque `from` de su alcance `r`: { mp, fresh } (fresh: aún
+    // no se ha movido este turno). Sin azar.
+    leftAt(army, from, r) {
+        if (from === army.cell) return { mp: r.mp, fresh: army.used === 0 };
+        return { mp: Math.max(0, r.mp - (this.entry(r, from)?.cost ?? r.mp)), fresh: false };
+    }
+    // El golpe previo de la escolta ha acabado con el defensor de `target` (de `foe`): no hay combate. El primero de los
+    // atacantes ([ejército, leftAt] en `atts`) que pueda entra en la casilla vacía como en un movimiento normal desde su
+    // casilla de ataque, con lo que le quedaba de movimiento (el terreno y la zona de control cuentan; al mar no entra,
+    // como tras ganar un combate); los demás se quedan donde están. El parte lo cuenta.
+    fallBefore(atts, target, foe) {
+        let inside = null;
+        for (const [a, left] of atts) {
+            if (!inside && isLand(target) && this.armies.has(a.id) && (left.mp > 0 || left.fresh)) {
+                const r = this.reach(a.owner, a.cell, left.mp, left.fresh);
+                if (this.destinations(r).has(target)) { inside = this.moveArmy(a, target, r); continue; }
+            }
+            this.settle(a);
+        }
+        const owner = atts[0][0].owner;
+        if (!this.involvesPlayer(owner, foe)) return;
+        const X = this.placeName(target);
+        if (owner === this.player) this.log(`En ${X}, el defensor cae antes del asalto: ${inside ? `tu ejército entra en ${X}` : 'a tu ejército no le queda movimiento para entrar'}.`);
+        else this.log(`En ${X}, tu ejército cae antes del asalto de ${this.nm(owner)}${inside ? ', que entra en la casilla' : ''}.`);
     }
     // Ejércitos de `owner` que pueden atacar `target` este turno (está entre sus ataques, les queda movimiento y no han
     // atacado ya), cada uno con la casilla desde la que atacaría y su alcance. Con `ids` (un Set), solo esos.
@@ -6441,7 +6476,7 @@ class GameEngine {
     jointFactors(owner, parts, def, cell, support = undefined) {
         const sea = afloat(cell), ignore = this.rules(owner).ignoreRiver;
         const all = parts.map(p => this.combatFactors(owner, p.units, p.from, def, cell, p.id, p.id, null));
-        const air = this.airSupport(support ?? this.escortSupport(owner, parts.map(p => p.src ?? p.id).filter(Boolean)));
+        const air = this.airSupport(support ?? this.escortSupport(owner, parts.map(p => p.src ?? p.id).filter(Boolean), cell));
         const members = parts.map((p, i) => {
             const d = G.dirTo(p.from, cell), river = !sea && !ignore && d >= 0 && !!RIVER[p.from * 6 + d];
             return { id: p.id, atk: all[i].atk / (river ? CONFIG.RIVER_DEFENSE : 1), attState: all[i].attState, attParts: all[i].attParts, river };
@@ -6456,18 +6491,18 @@ class GameEngine {
     // van cada uno a su casilla de ataque y combaten juntos.
     attackJoint(list, target) {
         if (list.length === 1) { const [{ army, from, r }] = list; this.attack(army, from, target, r); return; }
-        const atts = [];
+        const atts = [], left = new Map();
         for (const { army, from, r } of list) {
             if (!this.armies.has(army.id)) continue;   // se juntó con otro participante al llegar
-            const a = from !== army.cell ? this.moveArmy(army, from, r) : army;
-            if (!atts.includes(a)) atts.push(a);
+            const mp = this.leftAt(army, from, r), a = from !== army.cell ? this.moveArmy(army, from, r) : army;
+            if (!atts.includes(a)) { atts.push(a); left.set(a, mp); }
         }
         let def = this.armyOn(target);
         if (!def) { for (const a of atts) this.settle(a); return; }
         // La escolta de ataque de todos golpea antes y apoya al conjunto.
-        const support = this.escortStrike(atts[0].owner, atts.map(a => a.id), target);
+        const foe = def.owner, support = this.escortStrike(atts[0].owner, atts.map(a => a.id), target);
         def = this.armyOn(target);
-        if (!def) { for (const a of atts) this.settle(a); return; }
+        if (!def) { this.fallBefore(atts.map(a => [a, left.get(a)]), target, foe); return; }
         if (atts.length === 1) this.battle(atts[0], def, target, support);
         else this.jointBattle(atts, def, target, support);
     }
@@ -6500,7 +6535,7 @@ class GameEngine {
         const baseAtk = unitPower(attUnits, 'atk', ra), baseDef = unitPower(def.units, 'def', rd);
         // Desde un barco se ataca con asalto anfibio; un ejército en el mar solo cuenta con el casco (sin terreno ni tope).
         const attParts = afloat(fromCell) ? [['asalto anfibio', ra.amphibious]] : [];
-        const aAir = support !== undefined ? this.airSupport(support) : attFrom ? this.escortFactor(attOwner, attFrom, 'atk') : null;
+        const aAir = support !== undefined ? this.airSupport(support) : attFrom ? this.escortFactor(attOwner, attFrom, 'atk', null, cell) : null;
         if (aAir) attParts.push(aAir);
         return { baseAtk, baseDef, parts, bonus, cap, capped: raw > bonus, attState, defState, attParts,
             atk: baseAtk * attState.mult * attParts.reduce((m, [, x]) => m * x, 1), dfn: Math.max(0.5, baseDef * bonus * defState.mult) };
@@ -10341,11 +10376,14 @@ class GameUI {
         }
         if (!sea && g.spies.has(G.prov[cell])) lines.push('Tienes un espía en esta provincia');
         if (g.player !== null && o === g.player && !g.inSupply(g.player, cell)) lines.push('<span style="color:#ffb347">Sin suministro</span>');
-        if (this.reachInfo?.attacks.has(cell) && a && g.armyView(g.player, a).n === null) {
+        // Sin identificar, la previsión sale igual si una escolta de drones de los que atacan lo va a ver antes del combate.
+        const blind = this.reachInfo?.attacks.has(cell) && a && g.armyView(g.player, a).n === null, eyes = blind && this.droneEyes(cell);
+        const seenBy = '<span class="muted">Lo identificará tu escolta de drones al atacar: la previsión cuenta con lo que verá.</span>';
+        if (blind && !eyes) {
             lines.push('<b style="color:#ffd166">Clic para atacar a un ejército sin identificar</b>');
             const n = this.jointList(cell).length - 1;
             if (n > 0) lines.push(`Atacan contigo: ${plural(n, 'ejército vecino', 'ejércitos vecinos')}`);
-            lines.push('<span class="muted">Sin Reconocimiento 2 ni un espía en la provincia no hay previsión del combate.</span>');
+            lines.push('<span class="muted">Sin Reconocimiento 2, un espía en la provincia o una escolta de drones no hay previsión del combate.</span>');
         } else if (this.reachInfo?.attacks.has(cell) && a && this.jointList(cell).length > 1) {
             // Ataque conjunto: la fuerza de todos sumada contra la defensa, sin el río (cada uno lleva el suyo).
             const list = this.jointList(cell), mine = list[0].army;
@@ -10357,6 +10395,7 @@ class GameUI {
             lines.push(`<b style="color:${color}">Clic para atacar: ${Math.round(chance * 100)} % de victoria</b>`);
             lines.push(`Atacan contigo: ${plural(list.length - 1, 'ejército vecino', 'ejércitos vecinos')}${this.jointAll ? ' (todos los que llegan)' : ''}`);
             lines.push(`Fuerza sumada ${Math.round(fx.atk)} (${fx.members.map(m => `${Math.round(m.atk)}${m.river ? ' tras un río' : ''}`).join(' + ')}${fx.air ? `, ${fx.air[0]} ×${decimal(fx.air[1])}` : ''}) contra su defensa ${Math.round(dfn)}${factors ? ` (${factors})` : ''}`);
+            if (eyes) lines.push(seenBy);
         } else if (this.reachInfo?.attacks.has(cell) && a) {
             const mine = this.selectedArmy();
             const fx = g.combatFactors(g.player, this.send, this.reachInfo.from.get(cell) ?? mine.cell, a, cell, sameUnits(this.send, mine.units) ? mine.id : 0, mine.id);
@@ -10372,6 +10411,7 @@ class GameUI {
             lines.push(`<b style="color:${color}">Clic para atacar: ${Math.round(chance * 100)} % de victoria</b>`);
             lines.push(`Tu ataque ${Math.round(fx.atk)}${fx.attState.parts.length + fx.attParts.length ? ` (${state([...fx.attState.parts, ...fx.attParts]).join(', ')})` : ''} contra su defensa ${Math.round(dfn)}${factors ? ` (${factors})` : ''}`);
             lines.push(`Si ganas te quedan unas ${winLeft} de ${n}; si pierdes, unas ${loseLeft}`);
+            if (eyes) lines.push(seenBy);
         } else if (this.reachInfo?.attacks.has(cell)) lines.push('<b style="color:#ff8a78">Clic para atacar</b>');
         else if (this.reachInfo?.moves.has(cell)) lines.push(`<b style="color:#a8e38a">${afloat(cell) && isLand(this.selectedArmy()?.cell ?? -1) ? 'Clic para embarcar' : 'Clic para mover aquí'}</b>`);
         const prev = this.view.preview;
@@ -11184,6 +11224,11 @@ class GameUI {
     }
     // Quiénes atacan `cell` con el ejército elegido: él (con la parte que mandas) y, de los que también llegan, los de la
     // selección múltiple o, sin ella, los de su agrupación; con «Sumar a todos los vecinos», todos. [{ army, send?, from }]
+    // ¿Verá una escolta de drones de los que atacarían `cell` (jointList) al defensor antes del combate (escortEyes)?
+    droneEyes(cell) {
+        const list = this.jointList(cell);
+        return list.length > 0 && this.game.escortEyes(this.game.player, list.map(x => x.army.id), cell);
+    }
     jointList(cell) {
         const g = this.game, mine = this.selectedArmy();
         if (!mine || !this.reachInfo?.attacks.has(cell)) return [];
@@ -12072,7 +12117,7 @@ class GameUI {
             const ech = echelonOf(countUnits(a.units));
             sections.push(`<section class="sec"><h3>Ejército de ${g.nm(a.owner)}</h3>
                 <p class="small">Un ${ech.name} sin identificar (escalón ${ech.mark}: ${ech.range} unidades).</p>
-                <p class="note">Con Reconocimiento 2 o un espía en la provincia sabrías su tipo, su número y su fuerza.</p></section>`);
+                <p class="note">Con Reconocimiento 2, un espía en la provincia o tus drones (un reconocimiento, o una escolta de drones al atacarlo) sabrías su tipo, su número y su fuerza.</p></section>`);
         } else if (foreign && g.sees(p0, cell)) {
             sections.push(`<section class="sec"><h3>Ejército de ${g.nm(a.owner)}</h3>
                 <div class="units">${UNIT_KEYS.filter(k => a.units[k] > 0).map(k => `<div class="unit-row">${unitIcon(k, g.nations[a.owner].color)}<div>${a.units[k]} ${CONFIG.TYPES[k].name.toLowerCase()}</div><span></span></div>`).join('')}</div>

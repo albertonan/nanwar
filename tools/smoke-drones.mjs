@@ -1043,6 +1043,85 @@ const CHECKS = [
     T.eq(g.airTargets(es, [e], ['aa']).map(x => [x.kind, x.cell]), [['aa', e]], 'conocida, sí');
     return true;
 }],
+// Arreglos de la revisión final (I1, I2, M1–M11).
+['Rev I2 · con una escolta de drones en ataque hay previsión exacta', () => {
+    const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr');
+    g.declareWar(es, fr); T.bare(g); T.noIntegrated(g); T.learn(g, es, 'drones1', 'drones2');
+    const D = g.droneRange(es);
+    let c = -1, e = -1, base = -1;
+    for (let k = 0; k < 40 && base < 0; k++) {
+        [c, e] = T.border(g, es, fr, k);
+        base = PROVINCES.map(p => p.city).find(x => g.owner[x] === es && hexDist(x, e) <= D) ?? -1;
+    }
+    const mine = T.army(g, es, c, 20), foe = g.armyOn(e) ?? T.army(g, fr, e, 5);
+    T.eq(g.armyView(es, foe).n, null, 'sin identificar');
+    ui.setTool('command'); ui.select(c);
+    T.ok(/no hay previsión del combate/.test(T.hover(e)) && /o una escolta de drones/.test(T.hover(e)), `sin escolta, sin previsión: ${T.hover(e)}`);
+    const [w] = T.swarm(g, es, base);
+    g.setEscort(w, { army: mine.id }, 'ataque'); ui.select(c);
+    const tip = T.hover(e);
+    T.ok(/Clic para atacar: \d+ % de victoria/.test(tip) && /Lo identificará tu escolta de drones/.test(tip), `con escolta, previsión: ${tip}`);
+    T.ok(!g.droneRevealed(es, e) && g.armyView(es, foe).n === null, 'no desvela nada antes de volar');
+    // Con su base fuera de alcance del blanco, no vale.
+    w.base = PROVINCES.map(p => p.city).filter(x => g.owner[x] === es).sort((x, y) => hexDist(y, e) - hexDist(x, e))[0]; g.airVersion++; ui.select(c);
+    T.ok(/no hay previsión del combate/.test(T.hover(e)), 'fuera de alcance, sin previsión');
+    return true;
+}],
+['Rev M1 · la escolta que no llega al blanco ni apoya, ni golpea, ni gasta su vuelo, ni desvela', () => {
+    const g = T.game(7, true), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'drones1', 'drones2');
+    const R = g.airRange(es), D = g.droneRange(es), land = G.land.filter(x => g.owner[x] === es);
+    let c = -1, e = -1, fb = -1, sb = -1;
+    for (let k = 0; k < 60 && (fb < 0 || sb < 0); k++) {
+        [c, e] = T.border(g, es, fr, k);
+        fb = land.find(x => hexDist(x, c) === R && hexDist(x, e) === R + 1) ?? -1;
+        sb = land.find(x => hexDist(x, c) <= D && hexDist(x, e) === D + 1) ?? -1;
+    }
+    T.ok(fb >= 0 && sb >= 0, 'bases a una casilla de más');
+    T.airfield(g, es, fb); const [q] = T.squad(g, es, fb), [w] = T.swarm(g, es, sb);
+    const mine = T.army(g, es, c, 20), foe = g.armyOn(e) ?? T.army(g, fr, e, 10);
+    g.setEscort(q, { army: mine.id }, 'ataque'); g.setEscort(w, { army: mine.id }, 'ataque');
+    T.eq([g.escortSupport(es, [mine.id]).length, g.escortSupport(es, [mine.id], e).length], [2, 0], 'escoltan, pero no llegan al blanco');
+    const fx = g.combatFactors(es, mine.units, c, foe, e, mine.id);
+    T.eq(fx.attParts.filter(([n]) => n === 'apoyo aéreo'), [], 'sin apoyo aéreo en la previsión');
+    T.luck(g, 0.5);
+    const n = g.logs.length;
+    g.attack(mine, c, e, g.reach(es, c, g.mp(mine), true));
+    T.eq([q.flown, w.flown], [0, 0], 'no gastan su vuelo');
+    T.ok(!g.droneRevealed(es, e), 'los drones que no vuelan no desvelan al defensor');
+    T.ok(!g.logs.slice(n).some(l => /apoyo aéreo/.test(l.msg)), 'ni apoyo en el parte');
+    return true;
+}],
+['Rev M3 · si el golpe previo acaba con el defensor, el atacante entra en la casilla', () => {
+    const run = (left = null) => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); T.bare(g); T.noIntegrated(g); g.declareWar(es, fr); T.learn(g, es, 'drones1', 'drones2');
+        const D = g.droneRange(es);
+        let c = -1, e = -1, base = -1;
+        for (let k = 0; k < 40 && base < 0; k++) {
+            [c, e] = T.border(g, es, fr, k);
+            base = PROVINCES.map(p => p.city).find(x => g.owner[x] === es && hexDist(x, e) <= D) ?? -1;
+        }
+        if (g.armyOn(e)) g.removeArmy(g.armyOn(e));
+        T.army(g, fr, e, 1);
+        const sws = T.swarm(g, es, base, 2), mine = T.army(g, es, c, 10);
+        for (const w of sws) g.setEscort(w, { army: mine.id }, 'ataque');
+        if (left !== null) mine.used = g.moveBudget(es, c, mine.units, 0) - left;
+        T.luck(g, 0.99);
+        const n = g.logs.length;
+        g.attack(mine, c, e, g.reach(es, c, g.mp(mine), mine.used === 0));
+        return { g, es, c, e, mine, logs: g.logs.slice(n).map(l => l.msg) };
+    };
+    const r = run();
+    T.ok(/^Tus 2 enjambres atacan el ejército/.test(r.logs[0]) && /se disuelve/.test(r.logs[0]), `el golpe previo: ${r.logs[0]}`);
+    T.eq([r.g.armyOn(r.e)?.owner, r.g.owner[r.e], r.mine.cell], [r.es, r.es, r.e], 'entra en la casilla y la toma');
+    T.ok(r.logs.some(l => /el defensor cae antes del asalto: tu ejército entra/.test(l)), `en el parte: ${r.logs.join(' | ')}`);
+    // Sin movimiento para entrar, se queda donde está.
+    const s = run(1);
+    T.eq([s.g.armyOn(s.e), s.g.armyOn(s.c)?.id], [null, s.mine.id], 'se queda');
+    T.ok(s.logs.some(l => /el defensor cae antes del asalto: a tu ejército no le queda movimiento/.test(l)), `en el parte: ${s.logs.join(' | ')}`);
+    return true;
+}],
 ];
 
 const exe = process.env.CHROME ?? ['C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome'].find(existsSync);
