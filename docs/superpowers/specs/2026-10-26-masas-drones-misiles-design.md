@@ -326,13 +326,13 @@ Dos ramas nuevas en el área Militar:
   - **Frente amplio**: ocupar territorio a lo ancho; evita las batallas grandes (D4).
 - **Anchura del frente (Decisión mía):** se elige en la ficha entre estrecha, media y amplia. Por defecto, estrecha en asalto y en punta de lanza, y amplia en frente amplio.
   - En el mapa de Europa son 3, 6 y 10 casillas a cada lado de la flecha.
-  - En el del mundo, 1, 2 y 3, porque cada casilla mide unos 85 km. Se calcula en km como los demás radios: 60, 120 y 200 km.
+  - Se calcula en km como los demás radios (60, 120 y 200 km), con un mínimo de 3, 4 y 6 casillas: en el mundo, donde cada casilla mide unos 85 km, quedan 3, 4 y 6, y el asalto conserva el pasillo de 3 casillas de la parte A.
 - **(Decisión mía)** Las fases de la parte A (reunión con lanzamiento «cuando esté lista» o «cuando yo lo diga») valen para las tres doctrinas.
 
 ### D2 · Punta de lanza
 - **(Usuario)** Ataques rápidos y de conquista rápida.
 - **(Decisión mía)** Al lanzarse, la ofensiva reparte a sus miembros en dos escalones:
-  - **Punta**: los ejércitos de velocidad 6 o más (con tanques; la infantería mecanizada y la artillería autopropulsada cuentan si llegan a 6 con la investigación).
+  - **Punta**: los ejércitos de velocidad 6 o más. Un ejército va a la velocidad de su unidad más lenta. **(Usuario)** En las ofensivas del jugador no se parte ningún ejército: si lo ha formado mixto, va junto y a su paso; el comportamiento lo elige él. La IA sí puede separar los tipos rápidos de sus ejércitos para formar su punta, si le conviene.
   - **Seguimiento**: el resto.
   - Si no hay ninguno rápido, la punta es el miembro más rápido. La ficha deja pasar un ejército de un escalón al otro a mano.
 - **La punta (Decisión mía):**
@@ -341,19 +341,19 @@ Dos ramas nuevas en el área Militar:
   - Prefiere ocupar ciudades sin guarnición o con guarnición débil y los cruces de carreteras. Al entrar en una ciudad enemiga empieza el asedio, como hoy.
   - **Deja guarnición**: al seguir adelante desde una ciudad asediada, deja en ella un destacamento que mantiene el asedio. Son 2 infanterías, o la unidad más barata si no lleva infantería. Así el asedio no se pierde.
   - Una punta que se queda sin suministro o pasa hambre lo dice el parte. Igualmente sigue mientras tenga el umbral.
-  - Se detiene si se aleja más de 6 casillas por delante del seguimiento (10 en el mundo, en km: 120 y 850 km), para no quedar cercada. Espera a que el seguimiento se acerque.
+  - Se detiene si se aleja más de 6 casillas por delante del seguimiento, en los dos mapas (unos 120 km en Europa y 510 km en el mundo), para no quedar cercada. Espera a que el seguimiento se acerque.
 - **(Decisión mía)** Con la parte A, «aislado» y «sin carretera» ya castigan a la punta que se interna sola. Es el precio de la velocidad, y el seguimiento lo compensa (D3).
 
 ### D3 · Escalón de seguimiento y logística
 - **(Usuario)** Otros más lentos que vayan creando logística por detrás.
 - **(Decisión mía)** El seguimiento va por el camino de la punta, con su propia cohesión (la de la parte A, a su paso), y hace por orden:
-  1. **Releva las guarniciones** de las ciudades asediadas que dejó la punta: entra en ellas, se funde con el destacamento y, si el asedio necesita más tropas, las deja.
-  2. **Limpia las bolsas** anotadas por la punta con ataque conjunto, solo si llega a `op.ratio`. Si no llega, las cerca: ocupa casillas vecinas para que queden rodeadas (rodeado ×0,75 / cercado ×0,5 y, en territorio ocupado, hambre).
+  1. **Releva las guarniciones** de las ciudades asediadas que dejó la punta: entra en ellas, se funde con el destacamento y, si el asedio necesita más tropas, las deja. Cuando la ciudad cae, el parte la da por tomada y su guarnición sigue con el seguimiento; si nadie llegó a relevarla, vuelve a la operación como seguimiento (ruling M1). Quien mantiene un asedio no cuenta como ejército libre para otras operaciones.
+  2. **Limpia las bolsas** anotadas por la punta con ataque conjunto, solo si llega a `op.ratio`. Si no llega, las cerca, pero solo si con la bolsa cercada (su defensa con el factor de cercado de su dueño) todo el seguimiento llegaría a `op.ratio`: ocupa casillas vecinas para que queden rodeadas (rodeado ×0,75 / cercado ×0,5 y, en territorio ocupado, hambre). Si ni así, la **contiene**: la vigila un solo ejército y los demás siguen; el parte lo recuerda cada 3 turnos («el seguimiento contiene una bolsa en X»). El tope de la punta solo cuenta a los del seguimiento que marchan, no a los que relevan, asedian, cercan o vigilan (ruling I1).
   3. **Logística** con el oro de la operación:
      - Un ajuste nuevo, **«Logística»**, decide qué parte del oro por turno de la operación (`op.gold`) va a obras: 0, 25, 50 o 75 %. Por defecto es 50 % en punta de lanza y en frente amplio, y 0 en asalto.
      - Con ese oro, cada turno, en este orden:
        - **repara** los tramos rotos dentro del pasillo, en territorio ya propio (`startRepair`);
-       - **construye** la carretera más corta desde la red propia hasta la casilla propia más cercana a la punta (`planRoad`), para que la punta tenga suministro y el pasillo cuente para la renta.
+       - **construye** la carretera más corta desde la red propia hasta la casilla propia más cercana a la punta (`planRoad`), para que la punta tenga suministro y el pasillo cuente para la renta. Un tramo roto del camino no se rehace: se repara (una autovía rota sigue siendo autovía) y se sigue cuando esté listo.
      - Las obras siguen las reglas de siempre: turnos de obra y no se trabaja con enemigo al lado.
      - La ficha y el parte dicen qué se ha reparado y construido.
 - **(Decisión mía)** Lo que se recluta por la plantilla de la operación entra en el seguimiento.
@@ -370,6 +370,7 @@ Dos ramas nuevas en el área Militar:
     - Evita las masas enemigas: si un ejército enemigo fuerte entra en su franja, el miembro se aparta a la franja vecina o se detiene. La ficha avisa: «Masa enemiga en la franja 3: el frente se detiene ahí».
   - La logística es la de D3, con el seguimiento formado por los miembros más lentos. Con pocos miembros (menos de 3), todos van en el frente y la logística la hace la propia operación.
 - **(Decisión mía)** Con frente amplio, una ofensiva no termina al tomar el objetivo si quedan provincias enemigas con ciudad dentro del pasillo: termina cuando no quede ninguna.
+- **(Ruling M11)** Antes del objetivo, si pasan 6 turnos sin avanzar (sin ganar terreno enemigo del pasillo, sin que el frente avance media casilla y sin asediar), también termina, con aviso. La ficha avisa cuando espera ante un objetivo defendido entre `op.ratio` y `op.ratio` + 0,5 (un asalto ya atacaría). Lo que el jugador elige en la ficha para cada escalón se respeta en los repartos; solo si no cabe en las franjas vuelve al seguimiento, con aviso.
 
 ### D5 · IA
 - **(Decisión mía)** La IA elige la doctrina de sus ofensivas nuevas:
@@ -392,6 +393,72 @@ Dos ramas nuevas en el área Militar:
   - las bolsas, con un contorno a trazos;
   - las obras de logística, como las demás obras de carretera.
 - **Símbolos:** la flecha de penetración de la OTAN para la punta de lanza y la flecha de avance de frente ancho para el frente amplio, en el estilo de las flechas que ya se dibujan.
+
+---
+
+## Parte E · Guerras con motivo
+
+### Por qué
+- **(Usuario)** «Las guerras que empiezan en un turno y acaban al siguiente. Una guerra se declara por un motivo: o se consigue ese objetivo, o se ve en inferioridad, o lo que sea, y entonces se negocia. Pero declarar la guerra y proponer la paz al siguiente pasa en casi todos los turnos con muchísimos países».
+- **(Usuario)** «Si eres aliado pero no quiere entrar, no se declara la guerra y luego la paz: mejor no declarar la guerra».
+- **(Usuario)** «Si se ve muy superior, no tiene por qué proponer la paz, ni aceptarla. Solo si ha pasado un tiempo, se ve igual, ha perdido algo de territorio o la guerra no la empezó él».
+- **Lo que pasa hoy:**
+  - Al atacar a un miembro de un bloque, `declareWar` mete en la guerra a todos sus aliados, sin preguntarles.
+  - Cada turno, `wantsPeace` compara la fuerza de un país con la de un solo enemigo, sin contar a los aliados de ninguno de los dos. Así, un aliado pequeño que acaba de entrar «se ve inferior» y pide la paz al momento.
+  - Entre dos IA, la paz se firma si el otro también la quiere o, si no, con un 30 % al azar.
+  - Además, a partir de `peaceAfter` turnos, cualquiera la quiere con un 25 % al azar, gane o pierda.
+
+### E1 · Cada guerra tiene un motivo
+- **(Decisión mía)** Al declarar una guerra se guarda en la relación (`rel`):
+  - `war = { by, goal, since, start }`;
+  - `by` es quien la declaró;
+  - `goal` es su objetivo:
+    - **conquista**: las provincias fronterizas del atacado que tocan al atacante, las que elige la IA para su ataque;
+    - **defensa**: para el atacado;
+    - **alianza**: para quien entra a defender a un aliado;
+    - **señor**: para el satélite que entra por su señor;
+  - `start` es cuántas casillas legales tenía cada bando al empezar, para medir lo ganado y lo perdido.
+- Las guerras de partidas viejas cargan sin `by`, porque no se sabe quién empezó, y se tratan como si ninguno la hubiera empezado.
+
+### E2 · Los aliados deciden si entran
+- **(Usuario)** El aliado que no quiere entrar no declara la guerra.
+- **(Decisión mía)** Cuando atacan a un miembro de su bloque, cada aliado de la IA decide si entra:
+  - **Entra seguro** si comparte frontera con el atacante o con el atacado y el bando defensor, con él dentro, suma al menos el 70 % de la fuerza del bando atacante.
+  - **Si no**, entra con una probabilidad que crece con la fuerza del bando defensor frente al atacante (de 0 a 0,8). Si el aliado es mucho más débil que el atacante (menos de un 15 % de su fuerza), no entra.
+  - **El que no entra** no está en guerra. El registro dice «X no acude en defensa de Y». Si el bloque es público, pierde la confianza del atacado: deja el bloque con un 30 % de probabilidad.
+- Los satélites siguen entrando siempre en las guerras de su señor, como hoy.
+- El jugador aliado sigue recibiendo la llamada y decidiendo él, como hoy.
+
+### E3 · Cuándo se quiere la paz
+- **(Decisión mía)** La fuerza se mide **por bandos**: cada uno con sus aliados en esa misma guerra y sus satélites. Ya no se compara un país contra otro solo.
+- **(Decisión mía)** Hay un **mínimo de 8 turnos de guerra** antes de proponer o aceptar la paz. Solo hay una salida antes: estar **vencido** (capital ocupada, el 40 % de su tierra ocupada o menos de un tercio de la fuerza del otro bando). El vencido puede pedirla en cualquier momento.
+- **(Usuario)** Pasado ese mínimo, un país quiere la paz (proponerla o aceptarla) si se cumple al menos una de estas condiciones:
+  1. **Objetivo cumplido**: el atacante tiene ocupadas todas las provincias de su objetivo, o la mitad si lleva más de `peaceAfter` turnos. Entonces quiere la paz quedándose lo ocupado.
+  2. **Se ve igual o inferior**: la fuerza de su bando es menos de 1,25 veces la del otro.
+  3. **Ha perdido territorio**: el otro bando le ocupa más casillas de las que él le ocupa.
+  4. **No la empezó él** (defensa, alianza o señor), y la guerra lleva más de `peaceAfter` turnos sin que gane terreno en los últimos 6.
+- **(Usuario)** Si es muy superior (su bando tiene 1,25 veces la fuerza del otro o más), no ha perdido territorio, la empezó él y aún no ha cumplido su objetivo, **ni propone ni acepta** la paz.
+- **(Decisión mía)** Fuera el azar: dos IA firman la paz solo si las dos la quieren según estas reglas. Ya no hay un 30 % al azar.
+- **(Decisión mía)** Una paz firmada da la tregua de siempre (`TRUCE_TURNS`). Después de una guerra, la IA no vuelve a declarar la guerra al mismo país hasta pasados otros 10 turnos.
+- **Con el jugador:**
+  - La IA propone la paz al jugador con las mismas reglas.
+  - Acepta la del jugador con las mismas reglas.
+  - Además acepta, como hoy, «quedarse lo ocupado» si va ganando, y ser satélite solo si está vencida.
+
+### E4 · Declarar la guerra
+- **(Decisión mía)** La IA declara la guerra con un objetivo y contando con lo que pasará:
+  - suma a la fuerza del objetivo la de los aliados de este que **probablemente entren** (la regla de E2, sin azar: los que entrarían seguro, más la mitad de la fuerza de los dudosos);
+  - solo declara si, aun así, supera la `warRatio` de su agresividad.
+- Así se evita declarar la guerra para pedir la paz al turno siguiente al ver entrar a los aliados del otro.
+
+### E5 · Que se vea
+- **En el cajón de Países, para cada guerra del jugador:**
+  - quién la empezó, el motivo, cuántos turnos lleva y la fuerza de cada bando;
+  - y lo que hace falta para que el otro acepte la paz, por ejemplo: «No aceptará la paz: se ve muy superior y aún no ha cumplido su objetivo. Lo hará si pierde territorio, si se igualan fuerzas o dentro de 4 turnos si se estanca».
+- **En el registro:**
+  - «X no acude en defensa de Y»;
+  - «X propone la paz: ha cumplido su objetivo» (o «se ve inferior», «ha perdido territorio», «la guerra se ha estancado»).
+- **Medida de éxito:** en 30 turnos de Europa y del mundo con «Caos total», casi ninguna guerra dura 1 o 2 turnos. Solo valen las de un país vencido de verdad.
 
 ---
 
