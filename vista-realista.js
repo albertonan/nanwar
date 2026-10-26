@@ -176,7 +176,10 @@ class ArmyMotion {
                 this.air.push({ from: ev.from, cell: ev.cell, owner: ev.owner, result: ev.result, mission: ev.mission, start: now, end: now + 900 * this.speed, done: false });
             } else if (ev.kind === 'strike') {   // se ve si es del jugador o si ve el blanco o el lanzador; la nuclear, siempre
                 if (ev.weapon !== 'nuclear' && ev.owner !== g.player && !this.visible([ev.cell, ev.from])) continue;
-                this.strikes.push(this.strikeOf(ev, now));
+                // Si solo ve el lanzador, los arcos salen y se pierden en el blanco: sin intercepciones, impactos ni
+                // «llegan X de N», que la niebla no le diría.
+                const blind = ev.weapon !== 'nuclear' && ev.owner !== g.player && !this.visible([ev.cell]);
+                this.strikes.push(this.strikeOf(blind ? { ...ev, through: ev.n, blind } : ev, now));
             }
         }
     }
@@ -282,6 +285,7 @@ class ArmyMotion {
             const at = a.start + (a.end - a.start) * a.stop;
             if (a.done || now < at) continue;
             a.done = true;
+            if (t.blind) continue;   // blanco que no ve: nada en él
             const [x, y] = strikePoint(t, a, a.stop);
             if (a.cut) { if (real) { this.spawn('flash', x, y, { life: 260 }); this.spawn('smoke', x, y, { life: 1300, vy: -0.0004, g: 200 }); } continue; }
             if (!real) { this.spawn('ring', x, y, { life: t.weapon === 'nuclear' ? 1400 : 650 }); continue; }
@@ -298,7 +302,8 @@ class ArmyMotion {
     drawParticles(ctx, view, now) {
         const s = view.scale;
         for (const p of this.particles) {
-            const t = (now - p.t0) / p.life, [x, y] = view.toScreen(p.x + p.vx * (now - p.t0), p.y + p.vy * (now - p.t0));
+            // spawn la fecha con performance.now(), que puede ser posterior al now del fotograma: sin edades negativas
+            const age = Math.max(0, now - p.t0), t = age / p.life, [x, y] = view.toScreen(p.x + p.vx * age, p.y + p.vy * age);
             if (p.kind === 'dust') { ctx.fillStyle = `rgba(196,178,138,${0.42 * (1 - t)})`; ctx.beginPath(); ctx.arc(x, y, (0.25 + t * 0.7) * s, 0, TAU); ctx.fill(); }
             else if (p.kind === 'smoke') { ctx.fillStyle = `rgba(${p.g | 0},${p.g | 0},${p.g | 0},${0.5 * (1 - t)})`; ctx.beginPath(); ctx.arc(x, y, (0.4 + t * 1.3) * s, 0, TAU); ctx.fill(); }
             else if (p.kind === 'flash') {
@@ -430,7 +435,7 @@ function drawStrikeTrails(ctx, view, now) {
                 ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(hx, hy, R, 0, TAU); ctx.fill(); ctx.restore();
             }
         }
-        if (now >= t.end && fade > 0) {   // lo que ha llegado, sobre el blanco
+        if (now >= t.end && fade > 0 && !t.blind) {   // lo que ha llegado, sobre el blanco (si lo ve)
             const [x, y] = view.toScreen(G.cx[t.cell], G.cy[t.cell]), w = WEAPONS[t.weapon];
             const label = !t.through ? (t.n === 1 ? (w.fem ? 'interceptada' : 'interceptado') : `${t.n} ${w.fem ? 'interceptadas' : 'interceptados'}`)
                 : `${t.through === 1 ? 'llega' : 'llegan'} ${t.through} de ${t.n}`;

@@ -1240,6 +1240,43 @@ const CHECKS = [
         T.ok(/queda destruido con 2 escuadrones/.test(res.text), `parte: ${res.text}`);
         return true;
     }],
+    ['Revisión · el lanzamiento de la IA sobre un blanco que no ves no dice cuántas llegan', () => {
+        const g = T.uiStart('es', true), es = g.player, fr = T.nation('fr');
+        g.declareWar(es, fr);
+        const from = G.land.find(c => g.owner[c] === fr && g.sees(es, c)), hidden = G.land.find(c => g.owner[c] === fr && !g.sees(es, c));
+        const seen = PROVINCES.find(p => g.owner[p.city] === es).city;
+        T.ok(from !== undefined && hidden !== undefined, 'casillas');
+        const ctx = ui.view.ctx, fill = ctx.fillText, said = [];
+        ctx.fillText = function (t, ...r) { said.push(String(t)); return fill.call(this, t, ...r); };
+        try {
+            const run = cell => {
+                ui.view.motion.clear(); said.length = 0;
+                g.note({ kind: 'strike', owner: fr, from, cell, weapon: 'missile', n: 6, through: 2 });
+                ui.view.draw();
+                const s = ui.view.motion.strikes.at(-1), shift = s.end - performance.now() + 50;   // todos han llegado
+                s.end -= shift; for (const a of s.arcs) { a.start -= shift; a.end -= shift; }
+                ui.view.draw();
+                return [!!s.blind, s.arcs.some(a => a.cut), said.some(x => /llegan|interceptad/.test(x)), ui.view.motion.particles.length > 0];
+            };
+            T.eq(run(hidden), [true, false, false, false], 'blanco oculto: sin intercepciones, impactos ni etiqueta');
+            T.eq(run(seen), [false, true, true, true], 'blanco a la vista: todo');
+        } finally { ctx.fillText = fill; ui.view.motion.clear(); }
+        return true;
+    }],
+    ['Revisión · el resumen del país da precio y mantenimiento y lleva a la herramienta', () => {
+        const g = T.uiStart('es'), es = g.player;
+        Object.assign(g.nations[es].arsenal, { rocket: 2 });
+        T.learn(g, es, 'cohete2');
+        ui.tab = 'paises'; ui.focusNation = es; ui.drawerOpen = true; ui.render();
+        const t = document.querySelector('#drawer-body').textContent.replace(/\s+/g, ' ');
+        T.ok(/Arsenal ?2 cohetes; mantenimiento: −10 de oro por turno\./.test(t), `existencias y mantenimiento: ${t}`);
+        T.ok(t.includes(`cohete ${g.weaponPrice(es, 'rocket')} de oro (y 5 por turno)`) && t.includes(`misil ${g.weaponPrice(es, 'missile')} de oro (y 20 por turno)`), `precios: ${t}`);
+        T.ok(!t.includes('misil pesado'), 'solo lo que puede comprar');
+        document.querySelector('#drawer-body [data-action="tool"][data-tool="strike"]').click();
+        T.eq(ui.tool, 'strike', 'lleva a la herramienta');
+        ui.setTool('command');
+        return true;
+    }],
     ['Revisión · una partida de antes de las nucleares siembra a las potencias al cargar', () => {
         const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), S = ['estrategicas1', 'estrategicas2', NUKE_TECH];
         g.start(es);
@@ -1258,6 +1295,32 @@ const CHECKS = [
         T.ok(!GameEngine.load(JSON.parse(JSON.stringify(data))).nations[fr].tech.done.has(NUKE_TECH), 'prohibidas: nada');
         data.settings.nukes = true;
         T.ok(!GameEngine.load(data).nations[fr].tech.done.has(NUKE_TECH), 'partida nueva: lo guardado');
+        return true;
+    }],
+    ['Revisión · la confirmación de la bomba cuenta también los ejércitos de tus aliados', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr'), it = T.nation('it');
+        g.declareWar(es, fr); T.bare(g); T.noIntegrated(g); T.learn(g, es, 'estrategicas3');
+        g.nations[es].arsenal.nuclear = 1;
+        const bloc = g.createBloc(es, 'Pacto de prueba', false);
+        bloc.members.add(it); g.blocsChanged();
+        const cell = T.clear(g, fr, 3), spots = hexDisc(cell, 1).filter(c => c !== cell && isLand(c) && !g.armyAt[c]);
+        T.army(g, es, spots[0], 4); T.army(g, it, spots[1], 4); T.army(g, it, spots[2], 4);
+        ui.setTool('strike');
+        document.querySelector('#card [data-action="strike-weapon"][data-weapon="nuclear"]').click();
+        ui.clickCell(cell);
+        document.querySelector('#card [data-action="strike-launch"]').click();
+        const t = document.querySelector('#card').textContent;
+        T.ok(/aquí, 1 ejército tuyo y 2 de tus aliados/.test(t), `consecuencias: ${t}`);
+        document.querySelector('#card [data-action="strike-cancel"]').click();
+        ui.setTool('command');
+        return true;
+    }],
+    ['Revisión · una partícula fechada después del fotograma no rompe el dibujo', () => {
+        T.uiStart('es');
+        const m = ui.view.motion, now = performance.now();
+        m.clear();
+        for (const kind of ['dust', 'smoke', 'flash', 'ring']) m.particles.push({ kind, x: G.cx[0], y: G.cy[0], t0: now + 2000, life: 600, vx: 0, vy: -0.001, g: 120 });
+        try { m.drawParticles(ui.view.ctx, ui.view, now); } finally { m.clear(); }
         return true;
     }]
 ];

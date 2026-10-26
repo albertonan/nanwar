@@ -13576,6 +13576,16 @@ class GameUI {
         const g = this.game, xs = WEAPON_KEYS.filter(k => g.nations[id].arsenal[k] > 0).map(k => plural(g.nations[id].arsenal[k], g.weaponWord(k, 1), WEAPONS[k].many));
         return xs.length > 1 ? `${xs.slice(0, -1).join(', ')} y ${xs[xs.length - 1]}` : xs[0] ?? 'vacío';
     }
+    // La fila «Arsenal» del resumen del país (C7): existencias y mantenimiento; el precio y el mantenimiento de cada arma
+    // que puedes comprar, y el enlace a la herramienta, donde se compra y se lanza.
+    arsenalFacts(id) {
+        const g = this.game, r = g.rules(id), up = g.arsenalUpkeep(id);
+        const buy = this.strikeWeapons().filter(k => !WEAPONS[k].needs || r[WEAPONS[k].needs])
+            .map(k => `${g.weaponWord(k, 1)} ${g.weaponPrice(id, k)} de oro (y ${WEAPONS[k].upkeep} por turno)`);
+        return `${this.arsenalText(id)}; mantenimiento: ${up ? `−${up} de oro por turno` : 'nada'}.
+            <span class="small muted">Precios: ${buy.join('; ')}.</span>
+            <button class="link" data-action="tool" data-tool="strike">Ataque a distancia</button>`;
+    }
     renderStrikeCard() {
         const g = this.game, el = $('#card'), p0 = g.player, S = this.strike;
         const target = S.weapon && S.target >= 0 ? this.strikeTargetSection() : '', arsenal = this.strikeArsenalSection(), salvo = this.strikeSalvoSection();
@@ -13652,11 +13662,14 @@ class GameUI {
         if (!fx.nuke) act = `<div class="row" style="margin-top:10px"><button class="btn primary" data-action="strike-launch">Lanzar ${salvo}</button></div>`;
         else if (!S.confirm) act = `<div class="row" style="margin-top:10px"><button class="btn war" data-action="strike-launch">Lanzar ${salvo}…</button></div>`;
         else {
+            // Los ejércitos tuyos y los de tus aliados que ves en el radio: la bomba no distingue.
             const zone = hexDisc(c, kmCells(NUKE.KM)), own = zone.filter(x => g.armyOn(x)?.owner === p0).length;
+            const ally = zone.filter(x => { const a = g.armyOn(x); return !!a && g.allied(p0, a.owner) && g.sees(p0, x); }).length;
+            const here = [own ? plural(own, 'ejército tuyo', 'ejércitos tuyos') : '', ally ? `${ally} de tus aliados` : ''].filter(Boolean).join(' y ');
             act = `<div class="alert" style="margin-top:10px"><p><b>¿Lanzar ${salvo} sobre ${esc(g.placeName(c))}?</b> No tiene vuelta atrás:</p>
                 <ul class="small" style="margin:6px 0 8px;padding-left:18px">
                     <li>Quedas paria ${NUKE.PARIAH_TURNS} turnos, aunque te la intercepten: ningún país de la IA firmará la paz ni alianzas contigo, te declararán la guerra con mucha menos ventaja y cada aliado tuyo de la IA puede dejar su bloque.</li>
-                    <li>Arrasa ${NUKE.KM} km a la redonda (${plural(zone.length, 'casilla', 'casillas')}): destruye lo que hay en la casilla y quita la mitad de sus unidades a todos los ejércitos del radio, también a los tuyos${own ? ` (aquí, ${plural(own, 'ejército tuyo', 'ejércitos tuyos')})` : ''}; destruye fortificaciones, antiaéreo, baterías, aeródromos y enjambres y rompe las carreteras.</li>
+                    <li>Arrasa ${NUKE.KM} km a la redonda (${plural(zone.length, 'casilla', 'casillas')}): destruye lo que hay en la casilla y quita la mitad de sus unidades a todos los ejércitos del radio, también a los tuyos y a los de tus aliados${here ? ` (aquí, ${here})` : ''}; destruye fortificaciones, antiaéreo, baterías, aeródromos y enjambres y rompe las carreteras.</li>
                     <li>La zona queda contaminada ${NUKE.FALLOUT_TURNS} turnos: no da renta y el ejército que termina su turno en ella pierde el ${Math.round(NUKE.FALLOUT_LOSS * 100)} % de sus unidades. El desarrollo de la provincia cae a 0.</li>
                 </ul>
                 <div class="row"><button class="btn war" data-action="strike-nuke">Lanzar la bomba</button><button class="btn ghost" data-action="strike-cancel">Cancelar</button></div></div>`;
@@ -15345,7 +15358,7 @@ class GameUI {
                         ${n.overlord === g.player ? `<dt>Tributo</dt><dd>${Math.round(g.economy(t).total * CONFIG.TRIBUTE)} de oro por turno</dd>` : ''}
                         ${g.satellitesOf(t).length ? `<dt>Satélites</dt><dd>${g.satellitesOf(t).map(x => g.nm(x)).join(', ')}</dd>` : ''}
                         ${g.isPariah(t) ? `<dt>Paria nuclear</dt><dd class="warn-text">hasta el turno ${n.pariahUntil - 1}: ningún país de la IA firma la paz ni alianzas ${t === g.player ? 'contigo' : 'con él'}</dd>` : ''}
-                        ${t === g.player ? `<dt>Arsenal</dt><dd>${this.arsenalText(t)} <button class="link" data-action="tool" data-tool="strike">Ataque a distancia</button></dd>` : ''}
+                        ${t === g.player ? `<dt>Arsenal</dt><dd>${this.arsenalFacts(t)}</dd>` : ''}
                     </dl>
                     ${t === g.player ? this.economyFacts(t) : ''}
                     <button class="btn" style="margin-top:10px" data-action="goto" data-cell="${n.capitalCell}" ${n.alive ? '' : 'disabled'}>Ver en el mapa</button>
