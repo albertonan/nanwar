@@ -1168,6 +1168,45 @@ const CHECKS = [
         g.turn += 12;
         T.eq(ui.view.falloutZones().length, 0, 'se acaba');
         return true;
+    }],
+    // --- Revisión final ---
+    ['Revisión · lo apartado para la salva se libera también tras cargar la partida', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        // Francia aparta 300 para una salva que quiso este turno; sin guerra, no vuelve a quererla: se libera a los
+        // AI_ARMS_KEEP turnos, cargue o no la partida.
+        g.nations[fr].armsFund = 300;
+        (g.armsSave ??= new Map()).set(fr, { turn: g.turn, cap: 300 });
+        const run = h => Array.from({ length: AI_ARMS_KEEP + 3 }, () => { h.turn++; h.aiStrikes(fr); h.aiRecruit(fr); return h.nations[fr].armsFund; });
+        const data = JSON.parse(JSON.stringify(g.serialize()));
+        const want = [...Array(AI_ARMS_KEEP).fill(300), 0, 0, 0];
+        T.eq(run(GameEngine.load(JSON.parse(JSON.stringify(data)))), want, 'cargada');
+        T.eq(run(g), want, 'sin cargar');
+        // Una partida que no trae la cuenta: empieza al cargar, y también se libera.
+        for (const x of data.nations) delete x.armsSave;
+        const old = run(GameEngine.load(data));
+        T.eq([old[0], old.at(-1)], [300, 0], `partida sin la cuenta: ${old}`);
+        return true;
+    }],
+    ['Revisión · una partida de antes de las nucleares siembra a las potencias al cargar', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), S = ['estrategicas1', 'estrategicas2', NUKE_TECH];
+        g.start(es);
+        const data = JSON.parse(JSON.stringify(g.serialize()));
+        // Como era: sin el ajuste ni la rama; Francia, a medias con la primera.
+        delete data.settings.nukes;
+        for (const x of data.nations) { x.tech.done = x.tech.done.filter(t => !S.includes(t)); x.tech.seeded = []; }
+        data.nations[fr].tech.progress = [['estrategicas1', 1]]; data.nations[fr].tech.current = ['estrategicas1'];
+        const h = GameEngine.load(JSON.parse(JSON.stringify(data))), t = h.nations[fr].tech;
+        T.ok(S.every(x => t.done.has(x) && t.seeded.has(x)), 'Francia las tiene, sembradas');
+        T.eq([t.progress.has('estrategicas1'), t.current], [false, []], 'sin lo que tenía a medias');
+        T.eq(h.researchedCount(fr), 0, 'no encarecen');
+        T.ok(!h.nations[es].tech.done.has('estrategicas1'), 'España, no');
+        // Con el ajuste guardado (prohibidas o permitidas), no se toca.
+        data.settings.nukes = false;
+        T.ok(!GameEngine.load(JSON.parse(JSON.stringify(data))).nations[fr].tech.done.has(NUKE_TECH), 'prohibidas: nada');
+        data.settings.nukes = true;
+        T.ok(!GameEngine.load(data).nations[fr].tech.done.has(NUKE_TECH), 'partida nueva: lo guardado');
+        return true;
     }]
 ];
 

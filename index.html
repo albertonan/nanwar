@@ -1538,10 +1538,12 @@ class GameEngine {
             roadWork: [...this.roadWork].map(([k, w]) => [k, w.owner, w.left, w.cls]),
             spies: [...this.spies].map(([pid, s]) => [pid, s.since, s.revealedTurn]),
             sieges: [...this.sieges].map(([c, s]) => [c, s.by, s.prev, s.held]),
-            nations: this.nations.map(n => ({ gold: n.gold, airFund: n.airFund, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord, templates: n.templates, command: n.command,
+            nations: this.nations.map((n, i) => ({ gold: n.gold, airFund: n.airFund, alive: n.alive, recruited: [...n.recruited], overlord: n.overlord, templates: n.templates, command: n.command,
                 groups: n.groups.map(x => ({ id: x.id, num: x.num, name: x.name, color: x.color, custom: x.custom, order: x.order, reinforce: x.reinforce, ...(x.air ? { air: true } : {}) })),
                 tech: { done: [...n.tech.done], progress: [...n.tech.progress], current: [...n.tech.current], seeded: [...n.tech.seeded] },
-                arsenal: n.arsenal, pariahUntil: n.pariahUntil, lastStrike: n.lastStrike, armsFund: n.armsFund, nukeFund: n.nukeFund })),
+                arsenal: n.arsenal, pariahUntil: n.pariahUntil, lastStrike: n.lastStrike, armsFund: n.armsFund, nukeFund: n.nukeFund,
+                // la salva para la que aparta la IA: [turno en que la quiso, su coste] (aiStrikes); sin ella, null
+                armsSave: this.armsSave?.has(i) ? [this.armsSave.get(i).turn, this.armsSave.get(i).cap] : null })),
             relations,
             armies: [...this.armies.values()].map(a => [a.id, a.owner, a.cell, a.units.infantry, a.units.tank, a.units.artillery, a.used, a.hunger || 0, a.disorgUntil || 0, a.units.antiair || 0, a.rocketTurn || 0]),
             nextArmyId: this.nextArmyId,
@@ -1738,6 +1740,24 @@ class GameEngine {
             nukeFund: int(n?.nukeFund, 0, 1e9, 0),
             tech: techOf(n?.tech)
         }));
+        // Lo apartado por la IA para su salva lleva la cuenta de cuándo la quiso (aiRecruit lo libera AI_ARMS_KEEP turnos
+        // después); en las partidas que no la traen, empieza al cargar.
+        g.armsSave = new Map();
+        list(data.nations).slice(0, NN).forEach((n, i) => {
+            const v = n?.armsSave;
+            if (Array.isArray(v)) g.armsSave.set(i, { turn: int(v[0], 0, g.turn, g.turn), cap: int(v[1], 0, 1e9, 0) });
+        });
+        // Una partida de antes de la parte C (sin el ajuste) carga con las nucleares permitidas: las potencias nucleares
+        // reciben las investigaciones de partida que les faltan, como en configure (sembradas: no encarecen las demás).
+        if (g.settings.nukes && !Object.hasOwn(s, 'nukes')) for (const x of g.nations) {
+            if (!NUKE_POWERS.includes(x.key)) continue;
+            const t = x.tech;
+            for (const id of ['estrategicas1', 'estrategicas2', NUKE_TECH]) {
+                if (t.done.has(id)) continue;
+                t.done.add(id); t.seeded.add(id); t.progress.delete(id);
+                t.current = t.current.filter(k => k !== id);
+            }
+        }
         g.techVersion++;   // lo calculado hasta aquí no conocía la investigación
         for (const c of oldForts) g.fort[c] = g.owner[c] >= 0 ? g.fortMax(g.owner[c]) : 1;
         for (const row of g.relations) for (const r of row) if (r) Object.assign(r, { state: 'paz', since: 0, truceUntil: 0, noWarUntil: 0, war: null });
@@ -9884,7 +9904,9 @@ class GameEngine {
         // blanco así hace AI_ARMS_KEEP turnos o menos (sus blancos van y vienen), y para la bomba (aiNukes).
         const inc = Math.max(0, this.income(id)), nuke = this.nukeSave?.get(id) === this.turn;   // la bomba, antes: mientras aparta para ella, no para otra cosa
         if (nuke) n.nukeFund = Math.min(this.weaponPrice(id, 'nuclear'), n.nukeFund + Math.round(AI_ARMS_SHARE * inc));
-        const saves = (this.armsSave ??= new Map()), arms = saves.get(id) ?? { turn: this.turn, cap: n.armsFund };   // recién cargada, lo que tenía
+        const saves = (this.armsSave ??= new Map());
+        if (!saves.has(id) && n.armsFund > 0) saves.set(id, { turn: this.turn, cap: n.armsFund });   // sin cuenta (una partida vieja): empieza ahora
+        const arms = saves.get(id) ?? { turn: this.turn, cap: 0 };
         if (this.turn - arms.turn > AI_ARMS_KEEP) { n.armsFund = 0; saves.delete(id); }
         else if (arms.turn === this.turn && !nuke) n.armsFund = Math.min(arms.cap, n.armsFund + Math.round(AI_ARMS_SHARE * inc));
         const reserve = this.aiReserve(id) + n.airFund + n.armsFund + n.nukeFund;
