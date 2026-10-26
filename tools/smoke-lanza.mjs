@@ -224,6 +224,27 @@ const setup = () => {
             }
             return C;
         },
+        // Frente amplio estrecho (3 casillas a cada lado) por una flecha recta de `len` casillas sin ciudades en el pasillo;
+        // lo que queda a 3 o más a lo largo de la flecha pasa a Francia. `n` ejércitos junto a la salida: los primeros con
+        // `units` y, si son 3 o más, el último con `last` (el más lento, al seguimiento). Ya lanzada: { g, es, fr, op, xs }.
+        wide(n, { units = [0, 4, 0], last = [4, 0, 0], len = 14 } = {}) {
+            const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+            g.start(es); g.declareWar(es, fr);
+            let op = null;
+            for (let skip = 0; !op; skip++) {
+                const [S, O] = T.straight(g, es, len, { m: 3, skip });
+                const o = g.createOp(es, 'ofensiva', [S, O], { doctrine: 'amplio', width: 'estrecha', noCap: true });
+                if ([...g.opCorridor(o)].some(c => CITY_OF[c] >= 0)) { g.endOp(o); continue; }
+                op = o;
+            }
+            for (const c of g.opCorridor(op)) if (isLand(c) && g.opAlong(op, c) >= 3) { g.owner[c] = fr; g.legal[c] = fr; }
+            g.version++;
+            const cs = T.cellsAt(g, es, op.cells[0], [0, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2].slice(0, n));
+            const xs = cs.map((c, k) => T.army(g, es, c, ...(n >= 3 && k === n - 1 ? last : units)));
+            for (const a of xs) g.assignArmy(a, op.id);
+            g.opLaunch(op);
+            return { g, es, fr, op, xs };
+        },
         // Empieza una partida en la interfaz con el país dado y devuelve su motor.
         uiStart(key, fog = false) {
             for (const d of document.querySelectorAll('dialog[open]')) d.close();
@@ -795,6 +816,184 @@ const CHECKS = [
         for (let t = 0; t < 4 && !relieved; t++) { T.turns(h, es, 1); relieved = h.armyOn(X)?.op === op.id; }
         T.ok(relieved, 'tras cargar, el seguimiento releva la guarnición');
         T.ok(!h.armies.has(b.id) && [...h.armies.values()].filter(x => x.op === op.id).reduce((s, x) => s + x.units.infantry, 0) >= 8, 'con su tropa y la del destacamento');
+        return true;
+    }],
+    ['D4 · los miembros se reparten por franjas y ocupan a lo ancho', () => {
+        const { g, es, op, xs } = T.wide(4);
+        const [tk1, tk2, tk3, inf] = xs;
+        T.eq(xs.map(a => g.opEchelon(op, a)), ['punta', 'punta', 'punta', 'seguimiento'], 'el más lento, al seguimiento; los demás, al frente');
+        const lanes = g.opLanes(op), lane = g.opCorridor(op);
+        T.eq(lanes.length, 3, 'tres franjas, una por miembro del frente');
+        T.eq(lanes.map(l => l.member).sort(), [tk1, tk2, tk3].map(a => a.id).sort(), 'cada una con su miembro');
+        T.ok(lanes.every(l => [...l.cells].some(isLand) && !l.stalled), 'con tierra y sin detenerse');
+        T.eq(lanes.reduce((s, l) => s + l.cells.size, 0), lane.size, 'sin repetir casillas');
+        T.ok([...lane].every(c => lanes.some(l => l.cells.has(c))), 'y cubren el pasillo');
+        const mid = l => { const p = [...l.cells].map(c => g.opPerp(op, c)); return p.reduce((s, x) => s + x, 0) / p.length; };
+        T.ok(mid(lanes[0]) < mid(lanes[1]) && mid(lanes[1]) < mid(lanes[2]), 'ordenadas a lo ancho');
+        const perpOf = id => g.opPerp(op, g.armies.get(id).cell);
+        T.ok(perpOf(lanes[0].member) <= perpOf(lanes[1].member) && perpOf(lanes[1].member) <= perpOf(lanes[2].member), 'cada miembro a la franja de su lado');
+        const ids = [...op.lanes];
+        const spread = [];
+        for (let t = 0; t < 7 && g.ops.has(op.id); t++) {
+            T.turns(g, es, 1);
+            const al = [tk1, tk2, tk3].filter(a => g.armies.has(a.id)).map(a => g.opAlong(op, a.cell));
+            spread.push(Math.max(...al) - Math.min(...al));
+            T.ok(spread[t] <= OP_LEAD + 1e-9, `nadie más de ${OP_LEAD} por delante del más atrasado (${spread.map(x => x.toFixed(2))})`);
+            T.eq(op.lanes, ids, 'cada uno sigue en su franja');
+        }
+        // Ocupa a lo ancho: casillas tomadas en las tres franjas.
+        const taken = lanes.map(l => [...l.cells].filter(c => isLand(c) && g.owner[c] === es && g.opAlong(op, c) >= 3).length);
+        T.ok(taken.every(n => n >= 2), `toma casillas en cada franja (${taken})`);
+        T.ok([tk1, tk2, tk3].every((a, k) => g.opLanes(op).find(l => l.member === a.id).cells.has(a.cell)), 'cada uno por la suya');
+        T.ok(g.opAlong(op, inf.cell) > 0.5, 'el seguimiento también avanza');
+        // Se guardan y se cargan.
+        const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+        T.eq(h.ops.get(op.id).lanes, op.lanes, 'las franjas se guardan');
+        const bad = JSON.parse(JSON.stringify(g.serialize()));
+        for (const o of bad.ops) if (o.id === op.id) o.lanes = ['x', -3, tk1.id, tk1.id];
+        T.eq(GameEngine.load(bad).ops.get(op.id).lanes, [tk1.id], 'y se validan');
+        return true;
+    }],
+    ['D4 · evita la masa y ataca la guarnición débil', () => {
+        // Se aparta a la franja vecina: masa en la del centro.
+        let { g, es, fr, op, xs } = T.wide(4);
+        let lanes = g.opLanes(op);
+        const at = (l, x) => [...l.cells].filter(c => T.free(g, c) && g.owner[c] === fr && Math.abs(g.opPerp(op, c) - l.mid) < 0.6).sort((p, q) => Math.abs(g.opAlong(op, p) - x) - Math.abs(g.opAlong(op, q) - x))[0];
+        const M = at(lanes[1], 5);
+        const mass = g.settle(g.newArmy(fr, M, { infantry: 400, tank: 0, artillery: 0 }, 0));
+        const mover = g.armies.get(lanes[1].member);
+        lanes = g.opLanes(op);
+        T.ok(lanes[1].mass === M && lanes[1].shift >= 0 && !lanes[1].stalled, 'la franja del centro ve la masa y se aparta');
+        const seen = new Set(g.motion);
+        for (let t = 0; t < 8 && g.ops.has(op.id); t++) T.turns(g, es, 1);
+        T.eq(g.motion.filter(e => e.kind === 'battle' && !seen.has(e) && e.cell === M).length, 0, 'no ataca la masa');
+        T.ok(g.armies.has(mass.id) && mass.units.infantry === 400, 'la masa sigue entera');
+        T.ok(hexDist(mover.cell, M) > 1 || !g.armies.has(mover.id), 'no se queda a su lado');
+        T.ok(g.logs.some(l => l.msg.includes('Masa enemiga en la franja 2') && l.msg.includes('se aparta a la franja')), 'el parte lo dice');
+        T.ok(op.pockets.includes(M) || g.opAlong(op, M) > Math.min(...xs.filter(a => g.armies.has(a.id) && g.opEchelon(op, a) === 'punta').map(a => g.opAlong(op, a.cell))), 'la que deja atrás, bolsa');
+        // Sin franja vecina se detiene.
+        ({ g, es, fr, op, xs } = T.wide(1));
+        lanes = g.opLanes(op);
+        T.eq(lanes.length, 1, 'una franja');
+        const M2 = at(lanes[0], 4), a = xs[0];
+        g.settle(g.newArmy(fr, M2, { infantry: 400, tank: 0, artillery: 0 }, 0));
+        T.ok(g.opLanes(op)[0].stalled, 'se detiene');
+        const seen2 = new Set(g.motion);
+        for (let t = 0; t < 4; t++) T.turns(g, es, 1);
+        T.eq(g.motion.filter(e => e.kind === 'battle' && !seen2.has(e)).length, 0, 'sin atacar');
+        T.ok(g.opAlong(op, a.cell) < g.opAlong(op, M2) - 1, 'sin pasar de la masa');
+        T.ok(g.logs.some(l => l.msg.includes('Masa enemiga en la franja 1: el frente se detiene ahí')), 'el parte lo dice');
+        // Ataca una guarnición débil solo con op.ratio + 0.5.
+        const strike = off => {
+            const { g, es, fr, op, xs } = T.wide(1), a = xs[0];
+            const W = [...g.nearCells(a.cell, 1)].find(([c, d]) => d === 1 && T.free(g, c) && g.opCorridor(op).has(c))[0];
+            g.owner[W] = fr; g.legal[W] = fr; g.version++;
+            const w = g.settle(g.newArmy(fr, W, { infantry: 3, tank: 0, artillery: 0 }, 0));
+            const from = g.reach(es, a.cell, g.mp(a), true).attacks.get(W);
+            const j = g.jointFactors(es, [{ units: a.units, from, id: a.id }], w, W);
+            op.ratio = j.atk / j.dfn - off;
+            const seen = new Set(g.motion);
+            g.executeOp(op);
+            return g.motion.some(e => e.kind === 'battle' && !seen.has(e) && e.cell === W);
+        };
+        T.ok(!strike(0.3), 'con op.ratio no basta');
+        T.ok(strike(0.6), 'con op.ratio + 0,5, ataca');
+        // Con el vecino de franja: ninguno solo llega, juntos sí.
+        ({ g, es, fr, op, xs } = T.wide(4, { units: [2, 0, 0], last: [1, 0, 0] }));
+        lanes = g.opLanes(op);
+        const [l0, l1] = [lanes[0], lanes[1]].map(l => g.armies.get(l.member));
+        const W = [...g.nearCells(l0.cell, 1).keys()].find(c => hexDist(c, l1.cell) === 1 && c !== l0.cell && c !== l1.cell && T.free(g, c));
+        T.ok(W !== undefined, 'casilla al lado de los dos');
+        g.owner[W] = fr; g.legal[W] = fr; g.version++;
+        const w = g.settle(g.newArmy(fr, W, { infantry: 2, tank: 0, artillery: 0 }, 0));
+        const ratio = list => { const j = g.jointFactors(es, list.map(x => ({ units: x.units, from: g.reach(es, x.cell, g.mp(x), true).attacks.get(W), id: x.id })), w, W); return j.atk / j.dfn; };
+        const solo = Math.max(ratio([l0]), ratio([l1])), both = ratio([l0, l1]);
+        T.ok(both > solo + 0.2, `juntos pueden más (${solo.toFixed(2)} / ${both.toFixed(2)})`);
+        op.ratio = Math.min(solo + 0.1 - 0.5, both - 0.5 - 0.05);
+        T.ok(solo < op.ratio + 0.5 && both >= op.ratio + 0.5, 'umbral entre los dos');
+        g.setOrder(xs[3], { kind: 'hold' });   // el seguimiento, quieto: ataca con op.ratio
+        const seen3 = new Set(g.motion);
+        g.executeOp(op);
+        const bs = g.motion.filter(e => e.kind === 'battle' && !seen3.has(e) && e.cell === W);
+        T.eq(bs.length, 1, 'un ataque');
+        T.eq(bs[0].joint.slice().sort(), [l0.id, l1.id].sort(), 'con el vecino de franja');
+        return true;
+    }],
+    ['D4 · no termina al tomar el objetivo si quedan provincias en el pasillo', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es); g.declareWar(es, fr);
+        let X = -1, S = -1, O = -1;
+        for (const p of PROVINCES) {
+            if (g.owner[p.city] !== es || CAPITAL_OF[p.city] >= 0 || !p.cells.every(c => g.owner[c] === es)) continue;
+            const ok = c => isLand(c) && T.free(g, c) && g.owner[c] === es && G.prov[c] !== p.id && CELL_TERRAIN[c] === 'plain';
+            for (const [s, d] of g.nearCells(p.city, 3)) {
+                if (d !== 3 || !ok(s)) continue;
+                const o = [...g.nearCells(s, 2)].find(([c, k]) => k === 2 && ok(c) && hexDist(c, p.city) >= 3)?.[0];
+                if (o !== undefined && T.clearRoute(g, es, [s, o], 1)) { X = p.city; S = s; O = o; break; }
+            }
+            if (X >= 0) break;
+        }
+        T.ok(X >= 0, 'ciudad cerca de la flecha');
+        const P = PROVINCES[CITY_OF[X]];
+        for (const c of P.cells) { const x = g.armyOn(c); if (x) g.removeArmy(x); g.owner[c] = fr; g.legal[c] = fr; }
+        g.owner[O] = fr; g.legal[O] = fr; g.version++;
+        const op = g.createOp(es, 'ofensiva', [S, O], { doctrine: 'amplio', width: 'estrecha' });
+        T.ok(g.opCorridor(op).has(X), 'la ciudad, dentro del pasillo');
+        const a = T.army(g, es, S, 8, 4, 0);
+        g.assignArmy(a, op.id);
+        g.opLaunch(op);
+        T.eq(g.opWideLeft(op), [X], 'queda una provincia enemiga en el pasillo');
+        let t = 0;
+        for (; t < 6 && g.owner[O] !== es; t++) T.turns(g, es, 1);
+        T.ok(g.owner[O] === es, 'toma el objetivo');
+        g.executeOp(op);
+        T.ok(g.ops.has(op.id), 'y no termina');
+        T.ok(g.logs.some(l => l.msg.includes('quedan') && l.msg.includes(P.cityName)), 'el parte dice lo que queda');
+        // Un asalto con el mismo objetivo termina ya.
+        const op2 = g.createOp(es, 'ofensiva', [S, O], { noCap: true });
+        g.executeOp(op2);
+        T.ok(!g.ops.has(op2.id), 'el asalto, sí');
+        // Toma la ciudad y termina.
+        for (t = 0; t < 14 && g.ops.has(op.id); t++) { g.beginNationTurn(es); if (g.ops.has(op.id)) T.turns(g, es, 1); }
+        T.ok(g.owner[X] === es && !g.sieges.has(X), 'toma la ciudad');
+        T.ok(!g.ops.has(op.id), 'y termina');
+        T.ok(g.logs.some(l => l.msg.includes('no quedan provincias enemigas en el pasillo')), 'el parte lo dice');
+        return true;
+    }],
+    ['D4 · un solo miembro y más miembros que casillas de ancho', () => {
+        // Un solo miembro: una franja, todo el pasillo; sin seguimiento.
+        let { g, es, op, xs } = T.wide(1);
+        let lanes = g.opLanes(op);
+        T.eq([lanes.length, lanes[0].member, lanes[0].cells.size], [1, xs[0].id, g.opCorridor(op).size], 'una franja con todo el pasillo');
+        T.eq(g.opEchelon(op, xs[0]), 'punta', 'en el frente');
+        const O = op.cells[op.cells.length - 1];
+        for (let t = 0; t < 12 && g.ops.has(op.id); t++) T.turns(g, es, 1);
+        T.ok(!g.ops.has(op.id) && g.owner[O] === es, 'llega y termina');
+        // Dos: los dos en el frente.
+        ({ g, es, op, xs } = T.wide(2));
+        T.eq([xs.map(a => g.opEchelon(op, a)), g.opLanes(op).length], [['punta', 'punta'], 2], 'con menos de 3, todos en el frente');
+        // Más miembros que casillas de ancho: tantas franjas como caben; los demás, al seguimiento.
+        ({ g, es, op, xs } = T.wide(12));
+        const R = g.opLaneWidth(op);
+        lanes = g.opLanes(op);
+        T.ok(lanes.length <= 2 * R + 1 && lanes.length >= 3, `franjas que caben (${lanes.length} de ${2 * R + 1})`);
+        T.ok(lanes.every(l => [...l.cells].some(isLand)), 'todas con tierra');
+        T.eq(new Set(lanes.map(l => l.member)).size, lanes.length, 'un miembro distinto en cada una');
+        const front = xs.filter(a => g.opEchelon(op, a) === 'punta');
+        T.eq(front.length, lanes.length, 'los del frente, uno por franja');
+        T.ok(xs.length - front.length >= 4, 'el resto, al seguimiento');
+        for (let t = 0; t < 4 && g.ops.has(op.id); t++) T.turns(g, es, 1);
+        // Los atascados (sin paso entre tantos) no marcan el paso hasta alcanzar a los demás.
+        const alive = front.filter(a => g.armies.has(a.id) && a.op === op.id && (op.wideStall?.get(a.id) ?? 0) < OP_STALL);
+        T.ok(alive.length >= front.length - 2, `casi todos marcan el paso (${alive.length} de ${front.length})`);
+        const al = alive.map(a => g.opAlong(op, a.cell));
+        T.ok(Math.max(...al) - Math.min(...al) <= OP_LEAD + 1e-9, 'avanzan juntos');
+        // Si se va un miembro del frente, las franjas se rehacen.
+        const gone = g.armies.get(g.opLanes(op)[0].member);
+        g.removeArmy(gone);
+        const after = g.opLanes(op);
+        T.ok(after.every(l => l.member && g.armies.get(l.member)?.op === op.id), 'sin franjas vacías');
+        T.ok(!after.some(l => l.member === gone.id), 'sin el que se fue');
         return true;
     }],
 ];
