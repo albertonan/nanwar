@@ -356,6 +356,9 @@
         .theatre-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 2px 8px; font-size: 12.5px; color: var(--muted); }
         .small-seg button { padding: 3px 7px; font-size: 11.5px; }
         .suggest { margin: 8px 0; padding: 8px 10px; border-radius: 8px; border: 1px dashed var(--line); display: grid; gap: 6px; }
+        .th-card { display: grid; gap: 4px; }
+        .th-card .chip { margin-right: 2px; }
+        .th-warn { margin: 4px 0 8px; padding: 8px 10px; border-radius: 8px; background: rgba(240, 196, 25, 0.12); font-size: 13px; line-height: 1.4; }
         .goal { display: grid; gap: 2px; padding: 2px 8px; font-size: 13px; }
         .goal .meter { margin: 0; }
         .budget { display: grid; gap: 4px; padding: 6px 8px; }
@@ -11093,6 +11096,17 @@ class MapView {
         this.ox = this.w / 2 - G.cx[cell] * this.scale;
         this.oy = this.h * yFrac - G.cy[cell] * this.scale;
     }
+    // Encaja unas casillas en la pantalla (en el móvil, en la parte de arriba, sobre la hoja), sin acercar más de 8
+    // píxeles por casilla ni alejar menos de 1,5.
+    frameCells(cells) {
+        if (!cells.length) return;
+        let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+        for (const c of cells) { x0 = Math.min(x0, G.cx[c]); x1 = Math.max(x1, G.cx[c]); y0 = Math.min(y0, G.cy[c]); y1 = Math.max(y1, G.cy[c]); }
+        const mobile = isMobile(), h = this.h * (mobile ? 0.5 : 0.9), w = this.w * 0.9;
+        this.scale = Math.min(8 / G.S, Math.max(1.5 / G.S, Math.min(w / (x1 - x0 + 2 * G.W), h / (y1 - y0 + 2 * G.S))));
+        this.ox = this.w / 2 - (x0 + x1) / 2 * this.scale;
+        this.oy = this.h * (mobile ? 0.27 : 0.5) - (y0 + y1) / 2 * this.scale;
+    }
 
     hexPath(path, i, r = 1) {
         const x = G.cx[i], y = G.cy[i], k = G.corners;
@@ -14002,7 +14016,11 @@ class GameUI {
     }
     // Centra el mapa en el ejército de la agrupación que está más en medio.
     centerGroup(gid) {
-        const g = this.game, xs = g.player === null ? [] : g.groupMembers(g.player, gid);
+        const g = this.game;
+        return this.centerArmies(g.player === null ? [] : g.groupMembers(g.player, gid));
+    }
+    // Centra el mapa en el ejército de la lista que está más en medio.
+    centerArmies(xs) {
         if (!xs.length) return false;
         const mx = xs.reduce((s, a) => s + G.cx[a.cell], 0) / xs.length, my = xs.reduce((s, a) => s + G.cy[a.cell], 0) / xs.length;
         const mid = xs.reduce((b, a) => (Math.hypot(G.cx[a.cell] - mx, G.cy[a.cell] - my) < Math.hypot(G.cx[b.cell] - mx, G.cy[b.cell] - my) ? a : b));
@@ -14284,6 +14302,26 @@ class GameUI {
             case 'ob-garrisons': this.obGarrisonsOpen = !this.obGarrisonsOpen; break;
             case 'ob-select': if (isMobile()) this.drawerOpen = false; this.selectGroup(+d.id); return;
             case 'ob-center': if (isMobile()) this.drawerOpen = false; this.centerGroup(+d.id); break;
+            // Pestaña Mando: teatros
+            case 'th-pick': {
+                // Los sin encargo del teatro, a la selección múltiple (el mayor queda elegido), con el mapa centrado en ellos.
+                const xs = (g.theatres(g.player)[+d.th]?.idle ?? []).filter(a => g.armyOn(a.cell) === a);
+                if (!xs.length || g.over) return;
+                if (isMobile()) this.drawerOpen = false;
+                if (this.tool !== 'command') this.setTool('command');
+                this.centerArmies(xs);
+                this.sel = new Set(xs.map(a => a.id));
+                this.select(xs.reduce((b, a) => (countUnits(a.units) > countUnits(b.units) ? a : b)).cell, true);
+                return;
+            }
+            case 'th-goto': {
+                const t = g.theatres(g.player)[+d.th];
+                if (!t) return;
+                if (isMobile()) this.drawerOpen = false;
+                this.view.frameCells([...t.cells]);
+                break;
+            }
+            case 'th-propose': return;   // «Proponer organización»: llega con la propuesta de los teatros
             case 'ob-color': { const gr = g.groupById(g.player, +d.id); if (gr) g.recolorGroup(g.player, gr.id, (gr.color + 1) % GROUP_COLORS.length); break; }
             case 'ob-disband': this.obOpen.delete(+d.id); g.playerDisbandGroup(+d.id); break;
             case 'ob-new': {
@@ -15897,6 +15935,7 @@ class GameUI {
             <p class="small muted">Línea: ${esc(sg.lineInfo.label)} · ${sg.lineInfo.rel === null ? 'sin enemigos a la vista' : `${decimal(sg.lineInfo.rel)} a 1 prevista${sg.lineInfo.rel < 1 ? ', no basta: hacen falta refuerzos' : ''}`}${sg.lineInfo.front.length ? ` · deja delante ${esc(sg.lineInfo.front.join(', '))} (con guarnición)` : ''}</p></div>`).join('');
         body.innerHTML = `
             ${this.directiveSection()}
+            ${this.theatreSection()}
             <p class="group-title">Operaciones · ${ops.length} de ${cap}</p>
             <div class="row">${Object.entries(OP_KINDS).map(([k, v]) => `<button class="btn" data-action="op-new" data-kind="${k}" ${ops.length >= cap ? 'disabled' : ''}>${v.icon.replace('<svg ', '<svg width="15" height="15" aria-hidden="true" ')}${v.name}</button>`).join('')}</div>
             ${sug}
@@ -15905,6 +15944,37 @@ class GameUI {
             ${detail}
             <p class="note" style="margin-top:10px">Tu estado mayor lleva ${cap} operaciones a la vez: ${rules.commandOps} por Doctrina y una más por cada 20 provincias.</p>
             ${this.templatesSection()}`;
+    }
+    // Sección «Teatros» de la pestaña Mando: el aviso de reparto (si hay a la vez un teatro muy defendido y uno poco
+    // defendido) y una tarjeta por teatro. Sin teatros, nada.
+    theatreSection() {
+        const g = this.game, p0 = g.player, th = g.theatres(p0);
+        if (!th.length) return '';
+        const bal = g.troopBalance(p0), pct = x => `${Math.round(100 * x)} %`;
+        let warn = '';
+        if (bal.over.length && bal.under.length) {
+            const parts = [
+                ...bal.over.map((i, k) => `<b>${esc(th[i].name)}</b>${k ? ',' : ' tiene'} el ${pct(bal.share[i].troops)} de tus tropas y el ${pct(bal.share[i].danger)} del peligro`),
+                ...bal.under.map(i => `<b>${esc(th[i].name)}</b>, el ${pct(bal.share[i].troops)} de las tropas y el ${pct(bal.share[i].danger)} del peligro`)];
+            warn = `<p class="th-warn" data-th-warning>Reparto descompensado: ${parts.join('; ')}.</p>`;
+        }
+        const card = t => {
+            const shown = t.border.slice(0, 4), more = t.border.length - shown.length;
+            const border = t.border.length
+                ? `Frontera: ${shown.map(b => `<span title="${b.war ? 'En guerra' : b.weight === 2 ? 'Con ejércitos cerca' : 'En calma'}">${this.nationChip(b.nation)} ${b.cells.length}${b.war ? ' <span class="chip guerra">guerra</span>' : ''}</span>`).join(', ')}${more ? ` y ${more} más` : ''}`
+                : 'Sin frontera con países que no sean aliados.';
+            return `<div class="bloc th-card" data-theatre="${t.idx}">
+                <b>${esc(t.name)}</b>
+                <p class="small">${plural(t.provinces.length, 'provincia', 'provincias')} · ${plural(t.armies.length, 'ejército', 'ejércitos')} · ${plural(t.units, 'unidad', 'unidades')} · ${plural(t.garrisons.length, 'guarnición', 'guarniciones')}</p>
+                <p class="small">${t.ops.length ? `Operaciones: ${t.ops.map(op => `«${esc(op.name)}»`).join(', ')}` : '<span class="muted">Sin operaciones.</span>'}</p>
+                <p class="small">${border}</p>
+                <div class="row"><span class="small">Sin encargo: ${t.idle.length}</span>
+                    <button class="btn" data-action="th-pick" data-th="${t.idx}" ${t.idle.length ? '' : 'disabled'} title="Los pone en la selección y centra el mapa en ellos">Elegirlos</button>
+                    <button class="btn" data-action="th-goto" data-th="${t.idx}">Ver</button>
+                    <button class="btn" data-action="th-propose" data-th="${t.idx}">Proponer organización</button></div>
+            </div>`;
+        };
+        return `<p class="group-title">Teatros</p>${warn}${th.map(card).join('')}`;
     }
     // Qué hace una agrupación, en una o dos palabras: su ataque coordinado, las órdenes de sus ejércitos o su operación.
     obGroupState(gr, members) {

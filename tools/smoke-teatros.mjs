@@ -332,6 +332,42 @@ const CHECKS = [
         T.eq(g.theatreOf(es, sea), -1, 'ni teatro para el mar');
         T.eq(g.troopBalance(es), { over: [], under: [], share: [] }, 'ni reparto');
         return true;
+    }],
+    ['5 · Mando: tarjetas de teatro, aviso y elegir los sin encargo', () => {
+        const g = T.uiStart('es'), es = g.player, pt = T.nation('pt'), fr = T.nation('fr');
+        const block = T.twoBlocks(g, es, fr);
+        for (const a of [...g.armies.values()]) g.removeArmy(a);
+        for (let i = 0; i < 3; i++) T.army(g, es, T.freeIn(g, block), 10);
+        g.declareWar(es, pt);
+        const th = g.theatres(es), far = th.findIndex(t => !t.capital), metro = th.findIndex(t => t.capital), N = th[far].idle.length;
+        T.eq(N, 3, 'tres ejércitos sin encargo en el teatro francés');
+        for (const d of document.querySelectorAll('dialog[open]')) d.close();
+        ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        const body = $('#drawer-body'), cards = body.querySelectorAll('[data-theatre]');
+        T.eq(cards.length, 2, 'dos tarjetas');
+        th.forEach((t, i) => T.ok(cards[i].textContent.includes(t.name), 'la tarjeta ' + i + ' lleva su nombre: ' + t.name));
+        const warn = body.querySelector('[data-th-warning]');
+        T.ok(warn && warn.textContent.includes('Reparto descompensado'), 'el aviso de reparto');
+        T.ok(warn.textContent.includes('100 % de tus tropas') && warn.textContent.includes(th[far].name), 'con el teatro francés y sus porcentajes: ' + warn.textContent);
+        T.ok(body.innerHTML.indexOf('data-th-warning') < body.innerHTML.indexOf('data-theatre') && body.textContent.indexOf('Teatros') < body.textContent.indexOf('Operaciones ·'), 'la sección va antes de Operaciones');
+        const card = body.querySelector(`[data-theatre="${far}"]`), mcard = body.querySelector(`[data-theatre="${metro}"]`);
+        T.ok(card.textContent.includes(`Sin encargo: ${N}`), 'Sin encargo: N en la tarjeta francesa: ' + card.textContent.replace(/\s+/g, ' '));
+        T.ok(card.textContent.includes('3 ejércitos') && card.textContent.includes('30 unidades') && card.textContent.includes('4 provincias'), 'el resumen del teatro');
+        T.ok(mcard.textContent.includes(g.nm(pt)) && mcard.querySelector('.chip.guerra'), 'la frontera de la metrópoli con Portugal, en guerra');
+        T.ok(card.querySelector('[data-action="th-goto"]') && card.querySelector('[data-action="th-propose"]'), 'los botones Ver y Proponer organización');
+        card.querySelector('[data-action="th-pick"]').click();
+        T.eq(ui.sel.size, N, 'elegir los sin encargo los pone en la selección');
+        T.ok([...ui.sel].every(id => th[far].idle.some(a => a.id === id)), 'y son ellos');
+        ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        $('#drawer-body').querySelector(`[data-theatre="${far}"] [data-action="th-goto"]`).click();
+        const [sx, sy] = ui.view.toScreen(...(() => { const cs = [...th[far].cells]; return [cs.reduce((s, c) => s + G.cx[c], 0) / cs.length, cs.reduce((s, c) => s + G.cy[c], 0) / cs.length]; })());
+        T.ok(sx > 0 && sx < ui.view.w && sy > 0 && sy < ui.view.h, 'Ver lleva el teatro a la pantalla');
+        ui.tab = 'mando'; ui.drawerOpen = true;
+        const t0 = performance.now();
+        for (let i = 0; i < 20; i++) ui.render();
+        const ms = (performance.now() - t0) / 20;
+        T.ok(ms < 100, 'la pestaña Mando tarda ' + ms.toFixed(1) + ' ms');
+        return true;
     }]
 ];
 
