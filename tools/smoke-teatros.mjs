@@ -149,6 +149,35 @@ const CHECKS = [
         const land = T.ringCell(g, C, 2); g.owner[land] = fr; g.version++;
         T.eq(g.isGarrison(a), true, 'tierra enemiga a 2 sin ejército');
         return true;
+    }],
+    ['2 · de lejos, la guarnición es un punto y no una ficha; con la casilla, ficha', () => {
+        const g = T.uiStart('es'), es = g.player;
+        ui.view.setMode('sencilla');
+        const C = T.cleanCity(g, es), D = T.cleanCity(g, es, 1);
+        const small = T.army(g, es, C, 2), big = T.army(g, es, D, 40);
+        T.ok(g.isGarrison(small) && !g.isGarrison(big), 'una guarnición y un ejército grande');
+        const at = (calls, c) => calls.filter(t => t.wx === G.cx[c] && t.wy === G.cy[c]).length;
+        const calls = [], draw = ui.view.drawCounter;
+        ui.view.drawCounter = function (t, ...rest) { calls.push(t); return draw.call(this, t, ...rest); };
+        try {
+            ui.view.scale = 3 / G.S; ui.view.centerOn(C, 3); ui.view.draw();
+            T.ok(G.S * ui.view.scale < FAR_HEX, 'de lejos');
+            T.eq(at(calls, C), 0, 'sin ficha de la guarnición');
+            T.ok(at(calls, D) > 0, 'el ejército grande se ve');
+            ui.setLayer('garrisons', true);
+            T.eq(readPrefs().garrisons, true, 'la casilla se recuerda');
+            calls.length = 0; ui.view.draw();
+            T.ok(at(calls, C) > 0, 'con la casilla, ficha');
+            ui.setLayer('garrisons', false);
+            const dest = T.farCell(g, es, C, 3);
+            T.ok(g.setOrder(small, { kind: 'march', dest }), 'orden de marcha');
+            calls.length = 0; ui.view.draw();
+            T.ok(at(calls, C) > 0, 'con una orden de marcha vuelve la ficha');
+        } finally { ui.view.drawCounter = draw; ui.setLayer('garrisons', false); }
+        ui.mapMenu = true; ui.render();
+        T.ok($('#map-menu').querySelector('[data-action="layer-garrisons"]') && $('#map-menu').textContent.includes('Guarniciones de lejos'), 'la casilla está en el panel Mapa');
+        ui.mapMenu = false; ui.render();
+        return true;
     }]
 ];
 

@@ -10873,7 +10873,7 @@ const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const PREFS_KEY = 'nanwar.prefs';
 const SPEEDS = { lenta: 1200, normal: 500, rapida: 150 };
 function readPrefs() {
-    const def = { watch: 'directo', speed: 'normal', view: 'realista', supply: false, ops: true, groups: false, sheet: 'media' };
+    const def = { watch: 'directo', speed: 'normal', view: 'realista', supply: false, ops: true, groups: false, garrisons: false, sheet: 'media' };
     try { return { ...def, ...JSON.parse(localStorage.getItem(PREFS_KEY) || '{}') }; } catch { return def; }
 }
 function writePrefs(p) { try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch { /* sin almacenamiento */ } }
@@ -10902,6 +10902,7 @@ class MapView {
         this.showSupply = false;
         this.showOps = true;
         this.showGroups = false;         // capa «Agrupaciones» (tecla G): fichas teñidas por su agrupación
+        this.showGarrisons = false;      // casilla «Guarniciones de lejos»: encendida, fichas como de cerca; apagada, un punto en la ciudad
         this.groupFocus = 0;             // agrupación bajo el ratón en el cajón Orden de batalla
         this.selGroup = 0;               // agrupación elegida entera
         this.highlight = null;   // { moves:Set, attacks:Set }
@@ -11446,7 +11447,7 @@ class MapView {
         if (g.player !== null && !g.over) { this.drawOps(hexPx, font); if (this.showOps) this.drawOrders(hexPx, font); }
 
         // Ejércitos: fichas OTAN en la vista sencilla, miniaturas en la realista. Mientras se mueven, siguen su camino.
-        const tokens = [];
+        const tokens = [], garrisonMarks = [];   // garrisonMarks: pantalla (x, y) de cada guarnición que de lejos es un punto
         const seen = (wx, wy, cell) => { const c = G.cellAt(wx, wy); return g.sees(g.player, c >= 0 ? c : cell); };
         // Embarcado según la casilla donde se dibuja: a medio camino, la ficha cambia al entrar o salir del mar.
         const onSea = (wx, wy, cell) => { const c = G.cellAt(wx, wy); return afloat(c >= 0 ? c : cell); };
@@ -11461,6 +11462,7 @@ class MapView {
             const [sx, sy] = this.toScreen(wx, wy);
             if (!visible(sx, sy)) continue;
             if (far && !pose?.moving && a.owner !== g.player && !g.atWar(g.player, a.owner)) continue;
+            if (far && !this.showGarrisons && !pose?.moving && a.owner === g.player && g.isGarrison(a)) { garrisonMarks.push(sx, sy); continue; }   // de lejos, un punto en su ciudad
             if (far && this.showOps && a.owner === g.player && a.op && g.ops.has(a.op) && !pose?.moving) continue;   // de lejos, una ficha por operación
             const grp = a.group && a.owner === g.player ? groups.get(a.group) ?? null : null;
             if (far && grp && !pose?.moving) continue;   // de lejos, un símbolo por agrupación (abajo)
@@ -11497,6 +11499,11 @@ class MapView {
             if (sh) { x += sh[0]; y += sh[1]; }
             if (real) this.realistic.drawArmy(ctx, { ...t, x, y, hexPx, color: t.tint ?? g.nations[t.owner].color, now });
             else this.drawCounter(t, x, y, hexPx, font);
+        }
+        // Guarniciones de lejos: un punto de 3 px del color del país, con borde oscuro, en las dos vistas.
+        if (garrisonMarks.length) {
+            ctx.fillStyle = g.nations[g.player].color; ctx.strokeStyle = INK; ctx.lineWidth = 1;
+            for (let i = 0; i < garrisonMarks.length; i += 2) { ctx.beginPath(); ctx.arc(garrisonMarks[i], garrisonMarks[i + 1], 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); }
         }
         // De lejos, cada agrupación propia es una ficha en el centro de sus miembros: tipo que más pesa, escalón y total
         // encima («XXX · 340»), su número abajo a la izquierda, un marco de su color y su nombre debajo (si no pisa otro).
@@ -12458,6 +12465,7 @@ class GameUI {
         this.view.showSupply = !!this.prefs.supply;
         this.view.showOps = this.prefs.ops !== false;
         this.view.showGroups = !!this.prefs.groups;
+        this.view.showGarrisons = !!this.prefs.garrisons;
         this.mapMenu = false;        // panel «Mapa»: vista y capas
         this.multi = new Set();      // provincias seleccionadas con la herramienta Ciudades
         this.ordering = null;        // { kind, ids }: orden a la espera de que se elija el destino en el mapa
@@ -12837,6 +12845,7 @@ class GameUI {
             lines.push(view.n === null ? `Ejército de ${g.nm(a.owner)}: ${ech.name} sin identificar (${ech.range} unidades)` : `Ejército de ${g.nm(a.owner)}: ${this.unitsLong(a.units)}`);
             const sides = sea ? 0 : g.hostileSides(a.owner, cell);   // en el mar no se rodea
             if (sides >= CONFIG.FLANKED_SIDES) lines.push(`<span class="warn-text">${sides >= CONFIG.SURROUNDED_SIDES ? 'Cercado' : 'Rodeado'} por ${sides} lados: ataque y defensa ×${g.flankFactor(a.owner, cell)}</span>`);
+            if (g.isGarrison(a)) lines.push(`Guarnición: ${plural(countUnits(a.units), 'unidad', 'unidades')}`);
             if (a.owner === g.player || view.n !== null) for (const w of this.wearLines(a)) lines.push(`<span class="warn-text">${w}</span>`);
         }
         if (!sea && g.spies.has(G.prov[cell])) lines.push('Tienes un espía en esta provincia');
@@ -14263,6 +14272,7 @@ class GameUI {
             case 'supply': this.setLayer('supply', !this.view.showSupply); return;
             case 'layer-ops': this.setLayer('ops', !this.view.showOps); return;
             case 'layer-groups': this.setLayer('groups', !this.view.showGroups); return;
+            case 'layer-garrisons': this.setLayer('garrisons', !this.view.showGarrisons); return;
             case 'view-mode': this.toggleViewMode(); return;
             case 'view-set': if (d.value !== this.prefs.view) this.toggleViewMode(); return;
             case 'map-menu': this.mapMenu = !this.mapMenu; break;
@@ -14444,7 +14454,7 @@ class GameUI {
     setLayer(key, on) {
         this.prefs[key] = on;
         writePrefs(this.prefs);
-        if (key === 'supply') this.view.showSupply = on; else if (key === 'groups') this.view.showGroups = on; else this.view.showOps = on;
+        if (key === 'supply') this.view.showSupply = on; else if (key === 'groups') this.view.showGroups = on; else if (key === 'garrisons') this.view.showGarrisons = on; else this.view.showOps = on;
         this.render();
     }
     // Panel «Mapa»: la vista (sencilla o realista) y las capas, todo en un sitio.
@@ -14461,7 +14471,8 @@ class GameUI {
             <span class="small muted">Capas</span>
             ${layer('supply', this.view.showSupply, 'Logística', 'Tu territorio sin suministro, en naranja: allí los ejércitos solo avanzan una casilla por turno.', 'L')}
             ${layer('layer-ops', this.view.showOps, 'Operaciones y órdenes', 'Flechas de ofensiva, líneas de defensa, zonas de reserva y los caminos de las órdenes de tus ejércitos.', '')}
-            ${layer('layer-groups', this.view.showGroups, 'Agrupaciones', 'Tus ejércitos, del color de su agrupación; los que no tienen, atenuados.', 'G')}`;
+            ${layer('layer-groups', this.view.showGroups, 'Agrupaciones', 'Tus ejércitos, del color de su agrupación; los que no tienen, atenuados.', 'G')}
+            ${layer('layer-garrisons', this.view.showGarrisons, 'Guarniciones de lejos', 'Encendida, las guarniciones pequeñas se ven de lejos como fichas; apagada, como un punto en su ciudad.', '')}`;
     }
     renderReplay(id, n, total) {
         const g = this.game, el = $('#replay');
