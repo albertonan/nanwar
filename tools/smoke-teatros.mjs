@@ -106,6 +106,34 @@ const setup = () => {
             }
             throw new Error('no hay sitio para el frente');
         },
+        bloc(g, ...ids) { const b = g.createBloc(ids[0], 'Pacto de prueba', false); for (const x of ids) b.members.add(x); g.blocsChanged(); return b; },
+        // Pasa a `a` todas las casillas de las provincias dadas (dueño y dueño legítimo), sin los ejércitos ajenos de encima.
+        give(g, a, pids) {
+            for (const pid of pids) for (const c of PROVINCES[pid].cells) { const x = g.armyOn(c); if (x && x.owner !== a) g.removeArmy(x); g.owner[c] = a; g.legal[c] = a; }
+            g.version++;
+        },
+        // ¿Toca la provincia `pid` tierra de `a` (fuera de ella misma)?
+        touches(g, a, pid) {
+            return PROVINCES[pid].cells.some(c => [0, 1, 2, 3, 4, 5].some(d => { const j = G.nb[c * 6 + d]; return j >= 0 && isLand(j) && g.owner[j] === a && G.prov[j] !== pid; }));
+        },
+        // Dos teatros para `a`: le pasa un bloque de 4 provincias de `b` lejos de su capital, sin tocar su tierra. Devuelve sus ids.
+        twoBlocks(g, a, b, n = 4) {
+            const cap = g.nations[a].capitalCell, theirs = PROVINCES.filter(p => g.owner[p.city] === b && p.country === b && CAPITAL_OF[p.city] < 0);
+            const nbs = p => new Set(p.cells.flatMap(c => [0, 1, 2, 3, 4, 5].map(d => G.nb[c * 6 + d]).filter(j => j >= 0 && isLand(j) && G.prov[j] !== p.id).map(j => G.prov[j])));
+            const seed = theirs.reduce((m, p) => (hexDist(p.city, cap) > hexDist(m.city, cap) ? p : m));
+            const block = [seed.id];
+            for (let i = 0; i < block.length && block.length < n; i++)
+                for (const q of nbs(PROVINCES[block[i]])) if (block.length < n && !block.includes(q) && theirs.some(p => p.id === q) && !T.touches(g, a, q)) block.push(q);
+            if (block.length < n) throw new Error('no hay bloque de ' + n);
+            T.give(g, a, block);
+            T.ok(block.every(pid => !PROVINCES[pid].cells.some(c => [0, 1, 2, 3, 4, 5].some(d => { const j = G.nb[c * 6 + d]; return j >= 0 && g.owner[j] === a && !block.includes(G.prov[j]); }))), 'el bloque no toca la metrópoli');
+            return block;
+        },
+        // Casilla de tierra libre y sin ciudad en las provincias dadas.
+        freeIn(g, pids, skip = 0) {
+            for (const pid of pids) for (const c of PROVINCES[pid].cells) if (T.free(g, c) && skip-- <= 0) return c;
+            throw new Error('no hay casilla libre');
+        },
         // Empieza una partida en la interfaz con el país dado y devuelve su motor.
         uiStart(key, fog = false) {
             for (const d of document.querySelectorAll('dialog[open]')) d.close();
@@ -200,6 +228,109 @@ const CHECKS = [
         for (const a of gars) g.removeArmy(a);
         ui.render();
         T.ok(!$('#drawer-body').querySelector('[data-ob-garrisons]'), 'sin guarniciones, no sale la fila');
+        return true;
+    }],
+    ['4 · teatros: dos bloques, un islote que se suma y nombres', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        T.eq(g.theatres(es).length, 1, 'al empezar, un teatro');
+        const block = T.twoBlocks(g, es, fr);
+        let th = g.theatres(es);
+        T.eq(th.length, 2, 'dos bloques, dos teatros');
+        const metro = th.find(t => t.capital), far = th.find(t => !t.capital);
+        T.ok(metro && metro.name.startsWith('Metrópoli: '), 'la metrópoli: ' + metro?.name);
+        T.eq(far.name, g.nm(fr), 'el otro, con el nombre de Francia');
+        T.ok(th[0].cells.size >= th[1].cells.size, 'de mayor a menor');
+        T.ok(th.every((t, i) => t.idx === i), 'idx es su índice');
+        T.eq(far.provinces.slice().sort((x, y) => x - y), block.slice().sort((x, y) => x - y), 'las provincias del bloque');
+        for (const pid of block) T.eq(g.theatreOf(es, PROVINCES[pid].city), far.idx, 'theatreOf de una casilla del bloque');
+        T.eq(g.theatreOf(es, g.nations[es].capitalCell), metro.idx, 'theatreOf de la capital');
+        // Un ejército en el mar, junto a la costa española, va a la metrópoli.
+        const sea = [...metro.cells].flatMap(c => CITY_OF[c] < 0 ? [0, 1, 2, 3, 4, 5].map(d => G.nb[c * 6 + d]) : []).find(j => j >= 0 && afloat(j) && !g.armyAt[j]);
+        const boat = T.army(g, es, sea, 2);
+        th = g.theatres(es);
+        T.eq(g.theatreOf(es, sea), th.find(t => t.capital).idx, 'el mar junto a España, a la metrópoli');
+        T.ok(th.find(t => t.capital).armies.includes(boat), 'y su ejército, en ella');
+        // Islote: una provincia francesa suelta, cerca del bloque y sin tocar tierra española.
+        const mine = G.land.filter(c => g.owner[c] === es).length;
+        const isle = PROVINCES.filter(p => g.owner[p.city] === fr && CAPITAL_OF[p.city] < 0 && !T.touches(g, es, p.id) && p.cells.length < 0.03 * mine)
+            .sort((x, y) => hexDist(x.city, PROVINCES[block[0]].city) - hexDist(y.city, PROVINCES[block[0]].city))[0];
+        T.ok(isle, 'hay una provincia para el islote');
+        const before = g.theatres(es).map(t => new Set(t.cells));
+        T.give(g, es, [isle.id]);
+        th = g.theatres(es);
+        T.eq(th.length, 2, 'el islote se suma: siguen siendo 2');
+        const gap = cells => Math.min(...isle.cells.flatMap(c => [...cells].map(x => hexDist(c, x))));
+        const near = before.reduce((m, s, i) => (gap(s) < gap(before[m]) ? i : m), 0);
+        const want = th.findIndex(t => [...before[near]].every(c => t.cells.has(c)));
+        T.ok(th[want].provinces.includes(isle.id) && isle.cells.every(c => th[want].cells.has(c)), 'el islote, en el teatro más cercano');
+        T.eq(g.theatreOf(es, isle.city), want, 'theatreOf del islote');
+        return true;
+    }],
+    ['4 · frontera peligrosa: pesos por vecino', () => {
+        const g = T.game(), es = T.nation('es'), pt = T.nation('pt'), fr = T.nation('fr');
+        g.start(es);
+        for (const a of [...g.armies.values()]) if (a.owner !== es) g.removeArmy(a);
+        const metro = () => g.theatres(es).find(t => t.capital), w = o => metro().border.find(b => b.nation === o)?.weight ?? 0;
+        T.ok(metro().border.length >= 2 && metro().border.every(b => b.weight === 1 && !b.war), 'en paz y sin ejércitos, todos peso 1');
+        T.eq([w(pt), w(fr)], [1, 1], 'Portugal y Francia, peso 1');
+        const ptb = metro().border.find(b => b.nation === pt);
+        T.ok(ptb.cells.every(c => g.owner[c] === es && [0, 1, 2, 3, 4, 5].some(d => g.owner[G.nb[c * 6 + d]] === pt)), 'las casillas de frontera son españolas junto a Portugal');
+        T.eq(metro().danger, metro().border.reduce((s, b) => s + b.weight * b.cells.length, 0), 'el peligro es la suma de casillas por peso');
+        // Un ejército portugués grande a 2 casillas de la frontera, fuera de ciudad.
+        const [c0] = T.border(g, es, pt);
+        const two = [...g.nearCells(c0, 2)].find(([x, k]) => k === 2 && isLand(x) && g.owner[x] === pt && CITY_OF[x] < 0 && !g.armyAt[x])[0];
+        const big = T.army(g, pt, two, 20);
+        T.eq(w(pt), 2, 'con 20 unidades a 2 casillas, peso 2');
+        g.removeArmy(big);
+        T.eq(w(pt), 1, 'sin él, otra vez 1');
+        // Uno pequeño en su propia ciudad, a 3 casillas o menos de la frontera: guarnición, no cuenta.
+        const city = PROVINCES.map(p => p.city).find(c => g.owner[c] === pt && [...g.nearCells(c, 3).keys()].some(x => g.owner[x] === es));
+        T.ok(city !== undefined, 'hay una ciudad portuguesa a 3 casillas de España');
+        const gar = T.army(g, pt, city, 3);
+        T.eq(w(pt), 1, 'una guarnición portuguesa en su ciudad no cuenta');
+        gar.units.infantry = 6; g.armyVersion++;
+        T.eq(w(pt), 2, 'con 6 unidades ya cuenta');
+        g.removeArmy(gar);
+        g.declareWar(es, fr);
+        const f = metro().border.find(b => b.nation === fr);
+        T.eq([f.weight, f.war], [3, true], 'en guerra con Francia, peso 3');
+        const dz = metro().border.map(b => b.weight * b.cells.length);
+        T.ok(dz.every((x, i) => !i || dz[i - 1] >= x), 'de más peligro a menos');
+        T.bloc(g, es, pt);
+        T.ok(!metro().border.some(b => b.nation === pt), 'un aliado no es frontera peligrosa');
+        return true;
+    }],
+    ['4 · reparto: aviso con la tropa lejos del peligro', () => {
+        const g = T.game(), es = T.nation('es'), pt = T.nation('pt'), fr = T.nation('fr');
+        g.start(es);
+        const block = T.twoBlocks(g, es, fr);
+        for (const a of [...g.armies.values()]) g.removeArmy(a);
+        for (let i = 0; i < 3; i++) T.army(g, es, T.freeIn(g, block), 10);
+        const th = g.theatres(es), metro = th.find(t => t.capital).idx, far = th.find(t => !t.capital).idx;
+        T.eq(th[far].units, 30, 'toda la tropa en el teatro francés');
+        let r = g.troopBalance(es);
+        T.eq([r.over, r.under], [[], []], 'sin guerra ni ejércitos vecinos, no avisa');
+        T.eq(r.share.length, 2, 'una parte por teatro');
+        T.eq(r.share[far].troops, 1, 'el francés tiene toda la tropa');
+        g.declareWar(es, pt);
+        r = g.troopBalance(es);
+        T.ok(r.over.includes(far), 'el francés, muy defendido: ' + JSON.stringify(r));
+        T.ok(r.under.includes(metro), 'la metrópoli, poco defendida');
+        T.ok(Math.abs(r.share.reduce((s, x) => s + x.danger, 0) - 1) < 1e-9, 'las partes de peligro suman 1');
+        return true;
+    }],
+    ['4 · sin territorio: sin teatros', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        for (const a of [...g.armies.values()]) if (a.owner === es) g.removeArmy(a);
+        for (const c of G.land) if (g.owner[c] === es) { g.owner[c] = fr; g.legal[c] = fr; }
+        g.version++;
+        const sea = G.land.flatMap(c => g.owner[c] === fr ? [0, 1, 2, 3, 4, 5].map(d => G.nb[c * 6 + d]) : []).find(j => j >= 0 && afloat(j) && !g.armyAt[j]);
+        T.army(g, es, sea, 3);
+        T.eq(g.theatres(es), [], 'sin territorio, sin teatros');
+        T.eq(g.theatreOf(es, sea), -1, 'ni teatro para el mar');
+        T.eq(g.troopBalance(es), { over: [], under: [], share: [] }, 'ni reparto');
         return true;
     }]
 ];

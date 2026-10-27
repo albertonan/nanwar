@@ -8054,6 +8054,127 @@ class GameEngine {
         return plan;
     }
 
+    // --- Teatros ---
+    // Un teatro es un bloque conectado de la tierra de `id` (vecindad de tierra); uno de 3 provincias o menos y menos del 3 %
+    // de sus casillas se suma al más cercano. Lleva sus provincias (por la ciudad), sus ejércitos (las guarniciones aparte;
+    // los del mar o de tierra ajena, al teatro más cercano), los que no tienen encargo, sus operaciones (por su punto clave,
+    // opKey) y su frontera peligrosa: sus casillas junto a tierra de un país que no es aliado ni satélite, por vecino, con un
+    // peso (3 en guerra; 2 con ejércitos que ves a 3 casillas o menos, sin las guarniciones de sus ciudades; 1 el resto).
+    // El peligro es la suma de casillas por peso. Ordenados de más casillas a menos; se calculan una vez por turno y
+    // versiones y no se guardan.
+    theatres(id) { return this.theatreData(id).list; }
+    // Índice del teatro de una casilla: la propia, el suyo; una ajena o del mar, el más cercano; sin teatros, −1.
+    theatreOf(id, cell) { return this.theatreData(id).of(cell); }
+    theatreData(id) {
+        const key = `${id}:${this.turn}:${this.version}:${this.armyVersion}:${this.orderVersion}:${this.blocVersion}:${this.warVersion}`;
+        if (this._theatres?.key === key) return this._theatres;
+        // Bloques conectados, en el orden de G.land.
+        const at = new Int32Array(G.N).fill(-1), comps = [];
+        for (const c0 of G.land) {
+            if (this.owner[c0] !== id || at[c0] >= 0) continue;
+            const k = comps.length, cells = [c0];
+            at[c0] = k;
+            for (let i = 0; i < cells.length; i++) {
+                const c = cells[i];
+                for (let d = 0; d < 6; d++) { const j = G.nb[c * 6 + d]; if (j >= 0 && at[j] < 0 && isLand(j) && this.owner[j] === id) { at[j] = k; cells.push(j); } }
+            }
+            comps.push({ cells, provinces: [] });
+        }
+        for (const p of PROVINCES) if (at[p.city] >= 0) comps[at[p.city]].provinces.push(p.id);
+        // Muestra de las casillas de borde de un bloque (las que tienen una vecina fuera de él), en coordenadas cúbicas.
+        const edge = (cells, k, max) => {
+            const out = cells.filter(c => { for (let d = 0; d < 6; d++) { const j = G.nb[c * 6 + d]; if (j < 0 || at[j] !== k) return true; } return false; });
+            const list = out.length ? out : cells, step = Math.max(1, Math.ceil(list.length / max)), res = [];
+            for (let i = 0; i < list.length; i += step) res.push(cubeOf(list[i]));
+            return res;
+        };
+        const gap = (xs, ys) => { let m = Infinity; for (const x of xs) for (const y of ys) m = Math.min(m, Math.max(Math.abs(x[0] - y[0]), Math.abs(x[1] - y[1]), Math.abs(x[2] - y[2]))); return m; };
+        // Los bloques pequeños se suman al grande más cercano (si todos son pequeños, el mayor hace de grande).
+        const total = comps.reduce((s, b) => s + b.cells.length, 0), small = b => b.provinces.length <= 3 && b.cells.length < 0.03 * total;
+        let big = comps.filter(b => !small(b));
+        if (!big.length && comps.length) big = [comps.reduce((m, b) => (b.cells.length > m.cells.length ? b : m))];
+        const bigEdges = new Map(big.map(b => [b, edge(b.cells, comps.indexOf(b), 200)]));
+        for (const [k, b] of comps.entries()) {
+            if (bigEdges.has(b)) continue;
+            const mine = edge(b.cells, k, 12);
+            const to = big.reduce((m, x) => (gap(mine, bigEdges.get(x)) < gap(mine, bigEdges.get(m)) ? x : m));
+            to.cells.push(...b.cells); to.provinces.push(...b.provinces);
+        }
+        big.sort((x, y) => y.cells.length - x.cells.length);
+        big.forEach((b, i) => { for (const c of b.cells) at[c] = i; });
+        const edges = big.map((b, i) => edge(b.cells, i, 300)), near = new Map();
+        const of = cell => {
+            if (cell >= 0 && at[cell] >= 0) return at[cell];
+            if (!edges.length || cell < 0) return -1;
+            if (!near.has(cell)) { const me = [cubeOf(cell)]; near.set(cell, edges.reduce((m, e, i) => (gap(me, e) < gap(me, edges[m]) ? i : m), 0)); }
+            return near.get(cell);
+        };
+        const cap = this.nations[id].capitalCell;
+        const list = big.map((b, idx) => {
+            const count = new Map();
+            for (const pid of b.provinces) { const k = PROVINCES[pid].country; if (k >= 0 && k < this.nations.length) count.set(k, (count.get(k) ?? 0) + 1); }
+            const top = [...count].sort((x, y) => y[1] - x[1] || x[0] - y[0]).map(([k]) => this.nm(k)), capital = at[cap] === idx;
+            const name = !top.length ? `Territorio de ${this.placeName(b.cells[0])}` : top.length === 1 ? top[0] : top.length === 2 ? `${top[0]} y ${top[1]}` : `${top[0]}, ${top[1]} y ${top.length - 2} más`;
+            return { idx, name: (capital ? 'Metrópoli: ' : '') + name, cells: new Set(b.cells), provinces: b.provinces, armies: [], garrisons: [], units: 0, idle: [], ops: [], border: [], danger: 0, capital };
+        });
+        // Ejércitos y operaciones.
+        for (const a of this.armies.values()) {
+            if (a.owner !== id || this.armyOn(a.cell) !== a) continue;
+            const t = list[of(a.cell)];
+            if (!t) continue;
+            t.units += countUnits(a.units);
+            if (this.isGarrison(a)) { t.garrisons.push(a); continue; }
+            t.armies.push(a);
+            if (!a.op && !a.group && !a.form && !a.order) t.idle.push(a);
+        }
+        for (const op of this.opsOf(id)) { const t = op.cells?.length ? list[of(this.opKey(op))] : null; if (t) t.ops.push(op); }
+        // Frontera peligrosa: por vecino, sus casillas; `bset` marca cada casilla con cada vecino (casilla × países + vecino).
+        const nN = this.nations.length, hostile = new Int8Array(nN);
+        for (let o = 0; o < nN; o++) hostile[o] = o !== id && !this.allied(id, o) && this.nations[o].overlord !== id ? 1 : 0;
+        const bset = new Set(), byNation = list.map(() => new Map()), foes = new Set();
+        for (const t of list) for (const c of t.cells) for (let d = 0; d < 6; d++) {
+            const j = G.nb[c * 6 + d], o = j >= 0 && isLand(j) ? this.owner[j] : -1;
+            if (o < 0 || !hostile[o] || bset.has(c * nN + o)) continue;
+            bset.add(c * nN + o); foes.add(o);
+            const m = byNation[t.idx];
+            if (!m.has(o)) m.set(o, []);
+            m.get(o).push(c);
+        }
+        // Peso 2: un ejército que ves de ese vecino (en paz) a 3 casillas o menos de esa frontera, sin contar las guarniciones
+        // de sus ciudades (5 unidades o menos en una ciudad suya).
+        const armed = new Set();
+        for (const a of this.armies.values()) {
+            const o = a.owner;
+            if (!foes.has(o) || this.atWar(id, o) || this.armyOn(a.cell) !== a || !this.sees(id, a.cell)) continue;
+            if (CITY_OF[a.cell] >= 0 && this.owner[a.cell] === o && countUnits(a.units) <= GARRISON_MAX) continue;
+            for (const x of this.nearCells(a.cell, 3).keys()) if (at[x] >= 0 && bset.has(x * nN + o)) armed.add(at[x] * nN + o);
+        }
+        for (const t of list) {
+            t.border = [...byNation[t.idx]].map(([nation, cells]) => {
+                const war = this.atWar(id, nation);
+                return { nation, cells, weight: war ? 3 : armed.has(t.idx * nN + nation) ? 2 : 1, war };
+            }).sort((x, y) => y.weight * y.cells.length - x.weight * x.cells.length || x.nation - y.nation);
+            t.danger = t.border.reduce((s, b) => s + b.weight * b.cells.length, 0);
+        }
+        return (this._theatres = { key, list, of, balance: null });
+    }
+    // Reparto de la tropa entre teatros: parte de tropa (sus unidades / todas) y de peligro (su peligro / todo). `over`: los
+    // muy defendidos (tropa > 2 × peligro y más del 20 % de la tropa); `under`: los poco defendidos (peligro > 2 × tropa y más
+    // del 20 % del peligro). Sin guerra ni vecinos armados (todo en peso 1) no avisa: los dos van vacíos.
+    troopBalance(id) {
+        const d = this.theatreData(id);
+        if (d.balance) return d.balance;
+        const th = d.list, troops = th.reduce((s, t) => s + t.units, 0), danger = th.reduce((s, t) => s + t.danger, 0);
+        const share = th.map(t => ({ troops: troops ? t.units / troops : 0, danger: danger ? t.danger / danger : 0 }));
+        const over = [], under = [];
+        if (danger > 0 && th.some(t => t.border.some(b => b.weight > 1)))
+            share.forEach((s, i) => {
+                if (s.troops > 2 * s.danger && s.troops > 0.2) over.push(i);
+                if (s.danger > 2 * s.troops && s.danger > 0.2) under.push(i);
+            });
+        return (d.balance = { over, under, share });
+    }
+
     // Movimientos, ataques y misiones aéreas que haría una operación asistida, sin hacerlos: se juegan en una copia.
     previewOps(id, ids) {
         const copy = GameEngine.load(JSON.parse(JSON.stringify(this.serialize())));
