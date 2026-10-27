@@ -1109,7 +1109,7 @@ const CHECKS = [
         T.eq(bs[0].joint.slice().sort(), [l0.id, l1.id].sort(), 'con el vecino de franja');
         return true;
     }],
-    ['D4 · no termina al tomar el objetivo si quedan provincias en el pasillo', () => {
+    ['D4 · no termina al tomar el objetivo si quedan provincias en el pasillo; la del jugador, nunca sola', () => {
         const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
         g.start(es); g.declareWar(es, fr);
         let X = -1, S = -1, O = -1;
@@ -1139,14 +1139,27 @@ const CHECKS = [
         g.executeOp(op);
         T.ok(g.ops.has(op.id), 'y no termina');
         T.ok(g.logs.some(l => l.msg.includes('quedan') && l.msg.includes(P.cityName)), 'el parte dice lo que queda');
-        // Un asalto con el mismo objetivo termina ya.
+        // Un asalto con el mismo objetivo lo tiene cumplido ya: el del jugador se queda, esperando sus órdenes.
         const op2 = g.createOp(es, 'ofensiva', [S, O], { noCap: true });
         g.executeOp(op2);
-        T.ok(!g.ops.has(op2.id), 'el asalto, sí');
-        // Toma la ciudad y termina.
-        for (t = 0; t < 14 && g.ops.has(op.id); t++) { g.beginNationTurn(es); if (g.ops.has(op.id)) T.turns(g, es, 1); }
+        T.ok(g.ops.has(op2.id) && op2.done.startsWith('objetivo cumplido'), 'el asalto del jugador no termina solo');
+        T.ok(g.logs.some(l => l.msg.startsWith(op2.name) && l.msg.includes('esperan tus órdenes')), 'el parte dice que espera órdenes');
+        // El de la IA, sí termina.
+        const op3 = g.createOp(es, 'ofensiva', [S, O], { noCap: true });
+        g.player = fr; g.executeOp(op3); g.player = es;
+        T.ok(!g.ops.has(op3.id), 'el de la IA, sí');
+        // Redibujarlo lo quita de cumplido; se guarda y se carga.
+        g.playerRedrawOp(op2, [S, O]);
+        T.eq(op2.done, '', 'al redibujarlo deja de estar cumplido');
+        g.executeOp(op2);
+        T.ok(op2.done, 'y lo vuelve a estar con el mismo objetivo');
+        T.ok(GameEngine.load(JSON.parse(JSON.stringify(g.serialize()))).ops.get(op2.id).done === op2.done, 'se guarda');
+        g.endOp(op2, 'terminada por orden tuya');
+        // Toma la ciudad: la ofensiva cumple y sigue con sus ejércitos.
+        for (t = 0; t < 14 && !op.done; t++) { g.beginNationTurn(es); T.turns(g, es, 1); }
         T.ok(g.owner[X] === es && !g.sieges.has(X), 'toma la ciudad');
-        T.ok(!g.ops.has(op.id), 'y termina');
+        T.ok(g.ops.has(op.id) && op.done.includes('no quedan provincias enemigas en el pasillo'), 'objetivo cumplido, y no termina');
+        T.ok(g.opMembers(op).length >= 1, 'sus ejércitos siguen en ella');
         T.ok(g.logs.some(l => l.msg.includes('no quedan provincias enemigas en el pasillo')), 'el parte lo dice');
         return true;
     }],
@@ -1157,8 +1170,8 @@ const CHECKS = [
         T.eq([lanes.length, lanes[0].member, lanes[0].cells.size], [1, xs[0].id, g.opCorridor(op).size], 'una franja con todo el pasillo');
         T.eq(g.opEchelon(op, xs[0]), 'punta', 'en el frente');
         const O = op.cells[op.cells.length - 1];
-        for (let t = 0; t < 12 && g.ops.has(op.id); t++) T.turns(g, es, 1);
-        T.ok(!g.ops.has(op.id) && g.owner[O] === es, 'llega y termina');
+        for (let t = 0; t < 12 && !op.done; t++) T.turns(g, es, 1);
+        T.ok(g.ops.has(op.id) && op.done && g.owner[O] === es, 'llega y espera órdenes');
         // Dos: los dos en el frente.
         ({ g, es, op, xs } = T.wide(2));
         T.eq([xs.map(a => g.opEchelon(op, a)), g.opLanes(op).length], [['punta', 'punta'], 2], 'con menos de 3, todos en el frente');
@@ -1186,7 +1199,7 @@ const CHECKS = [
         T.ok(!after.some(l => l.member === gone.id), 'sin el que se fue');
         return true;
     }],
-    ['D4 · con el objetivo tomado, termina a los 6 turnos sin tomar provincias', () => {
+    ['D4 · con el objetivo tomado, avisa a los 6 turnos sin tomar provincias (la de la IA termina)', () => {
         // Una ciudad del pasillo demasiado defendida para el frente amplio: el objetivo ya es suyo y no toma nada más.
         const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
         g.start(es); g.declareWar(es, fr);
@@ -1221,10 +1234,12 @@ const CHECKS = [
         for (const o of data.ops) { delete o.wideIdle; delete o.wideLast; }
         const k = GameEngine.load(data).ops.get(op.id);
         T.eq([k.wideIdle, k.wideLast], [0, -1], 'las viejas, sin cuenta');
-        for (t = 0; t < 8 && g.ops.has(op.id); t++) T.turns(g, es, 1);
-        T.ok(!g.ops.has(op.id), 'termina');
+        for (t = 0; t < 8 && op.wideIdle < OP_WIDE_IDLE; t++) T.turns(g, es, 1);
+        T.ok(g.ops.has(op.id) && op.wideIdle >= OP_WIDE_IDLE, 'la del jugador no termina: sigue esperando');
         T.ok(g.owner[X] === fr, 'sin tomar la ciudad');
-        T.ok(g.logs.some(l => l.msg.includes('queda 1 ciudad demasiado defendida en el pasillo')), 'el parte dice por qué');
+        T.ok(g.logs.some(l => /queda 1 ciudad demasiado defendida en el pasillo/i.test(l.msg)), 'el parte dice por qué');
+        g.player = fr; T.turns(g, es, 1); g.player = es;
+        T.ok(!g.ops.has(op.id), 'la de la IA, termina');
         // Tomar una provincia pone la cuenta a cero.
         const op2 = g.createOp(es, 'ofensiva', [S, O], { doctrine: 'amplio', width: 'estrecha' });
         Object.assign(op2, { phase: 'avance', wideIdle: 4, wideLast: 2 });
@@ -1560,7 +1575,7 @@ const CHECKS = [
         T.ok(g.logs[g.logs.length - 1].msg.includes('no cabe'), `aviso: ${g.logs[g.logs.length - 1].msg}`);
         return true;
     }],
-    ['D4 · antes del objetivo también termina tras 6 turnos sin avanzar, y la ficha avisa de por qué espera', () => {
+    ['D4 · antes del objetivo también avisa tras 6 turnos sin avanzar (la de la IA termina), y la ficha dice por qué espera', () => {
         const { g, es, fr, op } = T.wide(2);
         const O = op.cells[1];
         const foe = T.army(g, fr, O, 400, 0, 0);   // primero, demasiado para nadie: el frente se detiene delante
@@ -1573,9 +1588,11 @@ const CHECKS = [
         T.ok(odds().ratio >= op.ratio && odds().ratio < op.ratio + 0.5, `entre ${op.ratio} y ${op.ratio + 0.5} (${odds().ratio.toFixed(2)})`);
         ui.setGame(g);
         T.ok(ui.rearSection(op).includes(`El frente espera ante ${g.placeName(O)}`), 'la ficha dice por qué espera');
-        for (t = 0; t < 10 && g.ops.has(op.id); t++) T.turns(g, es, 1);
-        T.ok(!g.ops.has(op.id) && g.owner[O] === fr, 'termina sin tomarlo');
+        for (t = 0; t < 10 && op.wideIdle < OP_WIDE_IDLE; t++) T.turns(g, es, 1);
+        T.ok(g.ops.has(op.id) && op.wideIdle >= OP_WIDE_IDLE && g.owner[O] === fr, 'sin tomarlo, la del jugador sigue esperando');
         T.ok(g.logs.some(l => l.msg.includes('turnos sin avanzar ni tomar terreno antes de')), 'y el parte dice por qué');
+        g.player = fr; T.turns(g, es, 1); g.player = es;
+        T.ok(!g.ops.has(op.id), 'la de la IA, termina');
         // La cuenta se guarda.
         const op2 = g.createOp(es, 'ofensiva', op.cells, { doctrine: 'amplio', width: 'estrecha', noCap: true });
         Object.assign(op2, { phase: 'avance', wideIdle: 3, wideLast: 40, wideRear: 7 });

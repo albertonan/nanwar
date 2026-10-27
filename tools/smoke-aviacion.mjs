@@ -1028,6 +1028,28 @@ const CHECKS = [
     g.executeOps(es, [res.id]); T.eq(s.op, off.id, 'la reserva lo manda');
     return true;
 }],
+['7 · la aviación de una ofensiva golpea antes del asalto, y protege después donde han acabado sus ejércitos', () => {
+    const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+    g.start(es); T.bare(g); g.declareWar(es, fr);
+    const [base, target] = T.pair(g, es, fr);
+    T.airfield(g, es, base); const sqs = T.squad(g, es, base, 3);
+    if (g.armyOn(target)) g.removeArmy(g.armyOn(target));
+    const foe = T.army(g, fr, target, 6);
+    const from = [0, 1, 2, 3, 4, 5].map(d => G.nb[target * 6 + d]).find(c => c >= 0 && isLand(c) && !g.armyAt[c]);
+    const op = g.createOp(es, 'ofensiva', [base, target], { auto: 'auto' }); op.aims = ['army', 'patrol'];
+    const mine = T.army(g, es, from, 0, 30, 0); g.assignArmy(mine, op.id);
+    for (const q of sqs) g.assignSquadron(q, op.id);
+    g.opLaunch(op); op.wp = op.cells.length - 1;
+    T.luck(g, 0.3);
+    const seen = g.motion.length;
+    g.executeOp(op);
+    const evs = g.motion.slice(seen), hit = evs.findIndex(e => e.kind === 'air' && e.mission === 'army' && e.cell === target), fight = evs.findIndex(e => e.kind === 'battle' && e.cell === target);
+    T.ok(hit >= 0 && fight >= 0, `ataque aéreo y asalto (${hit}, ${fight})`);
+    T.ok(hit < fight, 'el ataque aéreo, antes del asalto');
+    const patrol = evs.findIndex(e => e.kind === 'air' && e.mission === 'patrol');
+    T.ok(patrol > fight && sqs.some(q => q.patrol === g.armies.get(mine.id)?.cell || q.patrol === mine.cell), 'y protege después, donde está su ejército');
+    return true;
+}],
 ['7 · orden de zona: un escuadrón suelto ataca en su zona cada turno', () => {
     const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
     g.start(es); T.bare(g); g.declareWar(es, fr);

@@ -256,7 +256,7 @@ const CHECKS = [
         T.eq(a.order?.kind, 'march', 'Mayúsculas + clic da la orden de marchar');
         return true;
     }],
-    ['F2 · una ofensiva automática avanza, ataca y termina al tomar su objetivo', () => {
+    ['F2 · una ofensiva automática avanza, ataca y, al tomar su objetivo, espera órdenes sin borrarse', () => {
         const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
         g.start(es);
         g.declareWar(es, fr);
@@ -271,8 +271,15 @@ const CHECKS = [
         T.turns(g, es, 1);
         const steps1 = Math.min(...g.opMembers(op).map(a => g.field(es, [obj])[a.cell]));
         T.ok(steps1 < steps0, `se acercan al objetivo (${steps0} → ${steps1})`);
-        for (let i = 0; i < 25 && g.ops.has(op.id); i++) T.turns(g, es, 1);
-        T.eq([g.owner[obj], g.ops.has(op.id)], [es, false], 'objetivo tomado y operación terminada');
+        for (let i = 0; i < 25 && !op.done; i++) T.turns(g, es, 1);
+        T.eq([g.owner[obj], g.ops.has(op.id), !!op.done], [es, true, true], 'objetivo tomado y la operación sigue, cumplida');
+        // Quieta con sus ejércitos, turno tras turno, sin repetir el aviso, hasta que el jugador la termine.
+        const cells = g.opMembers(op).map(a => a.cell).join(), said = g.logs.filter(l => l.msg.includes('esperan tus órdenes')).length;
+        T.turns(g, es, 3);
+        T.ok(g.ops.has(op.id) && g.opMembers(op).length && g.opMembers(op).map(a => a.cell).join() === cells, 'no se borra ni mueve a sus ejércitos');
+        T.eq(g.logs.filter(l => l.msg.includes('esperan tus órdenes')).length, said, 'avisa una sola vez');
+        g.endOp(op, 'terminada por orden tuya');
+        T.ok(!g.ops.has(op.id) && !g.armies.values().some(a => a.op === op.id), 'la termina el jugador');
         return true;
     }],
     ['F2 · una ofensiva nueva reúne los ejércitos libres de toda la zona, no solo los de la ciudad de salida', () => {
@@ -1243,6 +1250,30 @@ const CHECKS = [
         for (let k = 0; k < 4; k++) T.army(h, fr, s.front(k), 0, 8);
         h.executeOps(es, [op.id]);
         T.ok(h.logs.some(l => l.msg.includes('ninguna posición cercana da superioridad')), 'avisa de que hacen falta refuerzos');
+        return true;
+    }],
+    ['F2 · varias ofensivas preparadas en paz se lanzan a la vez al declarar la guerra, listas o no', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        const ops = [];
+        for (let k = 0; k < 3; k++) {
+            const [start] = T.border(g, es, fr, k * 4), obj = T.nearestCity(g, es, fr, start);
+            const op = g.createOp(es, 'ofensiva', [start, obj], { launch: 'orden', noCap: true });
+            g.assignArmy(T.army(g, es, start, 4, 4, 0), op.id);
+            ops.push(op);
+        }
+        const paused = g.createOp(es, 'ofensiva', ops[0].cells, { launch: 'orden', noCap: true });
+        g.assignArmy(T.army(g, es, T.farCell(g, es, ops[0].cells[0], 1, 3), 2, 0, 0), paused.id);
+        g.playerOpSet(paused, 'paused', true);
+        T.turns(g, es, 1);
+        T.ok(ops.every(op => op.phase === 'reunion'), 'en paz se reúnen y esperan la orden');
+        g.declareWar(es, fr);
+        ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        const btn = [...document.querySelectorAll('#drawer-body [data-action="op-launch-all"]')].find(b => b.textContent.includes('Lanzar las 3 ofensivas'));
+        T.ok(btn, 'un botón para las tres del frente (la de la pausa, no)');
+        btn.click();
+        T.ok(ops.every(op => op.phase === 'avance') && paused.phase === 'reunion', 'salen las tres; la pausada se queda');
+        T.ok(g.logs.some(l => l.msg.startsWith('Lanzas 3 ofensivas a la vez')), 'el parte lo dice');
+        T.ok(!document.querySelector('#drawer-body [data-action="op-launch-all"]'), 'y el botón desaparece');
         return true;
     }],
     ['Mapa · vista y capas en un solo panel, recordadas en el dispositivo', () => {

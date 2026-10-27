@@ -645,6 +645,7 @@ const CONFIG = {
     WAR_MIN_TURNS: 8,          // nadie negocia la paz antes, salvo el vencido
     WAR_REDECLARE_TURNS: 10,   // tras una paz, la IA no vuelve a atacar al mismo país hasta pasada la tregua y estos turnos más
     WAR_SUPERIOR: 1.25,        // un bando con esta fuerza o más frente al otro se ve muy superior
+    CRUSH_LOST: 0.15,          // la fuerza abrumadora solo vence a quien ya ha perdido esta parte de su tierra
     WAR_STALL_TURNS: 6,        // sin ganar terreno en estos turnos, la guerra está estancada
     PEACE_LOG_TURNS: 5,        // la propuesta de paz que sigue en pie se repite en el registro cada estos turnos
     RECRUIT_PER_MILLION: 1 / 1.5,   // reclutas por turno y provincia: 1 + población/1,5 M
@@ -883,7 +884,7 @@ const OP_LOGISTICS = [0, 25, 50, 75];   // parte del oro de la operación (%) pa
 const OP_SPEAR_SPEED = 6;    // un ejército de esta velocidad o más va en la punta de lanza
 const OP_SPEAR_KM = 120;     // la punta se detiene a esta distancia por delante del seguimiento, a lo largo de la flecha
 const OP_SPEAR_MIN = 6;      // y nunca a menos de estas casillas (en el mapa del mundo, 120 km son una casilla)
-const OP_WIDE_IDLE = 6;      // un frente amplio termina tras estos turnos sin avanzar (con el objetivo tomado, sin tomar más provincias)
+const OP_WIDE_IDLE = 6;      // un frente amplio de la IA termina tras estos turnos sin avanzar (con el objetivo tomado, sin tomar más provincias); el del jugador avisa
 const OP_CONTAIN_SAY = 3;    // cada cuántos turnos recuerda el parte que el seguimiento contiene una bolsa que no puede tomar
 // Directiva nacional: la postura fija la ventaja con la que atacan las ofensivas nuevas y un reparto de la renta.
 const POSTURES = {
@@ -1554,7 +1555,7 @@ class GameEngine {
                     doctrine: o.doctrine, width: o.width, logistics: o.logistics, echelon: Object.entries(o.echelon ?? {}).filter(([x]) => this.armies.get(+x)?.op === o.id).map(([x, e]) => [+x, e]),
                     manual: (o.manual ?? []).filter(x => this.armies.get(x)?.op === o.id),
                     pockets: o.pockets, garrisons: o.garrisons, workPool: o.workPool ?? 0, lanes: Array.isArray(o.lanes) ? o.lanes.filter(x => this.armies.get(x)?.op === o.id) : null,
-                    wideIdle: o.wideIdle ?? 0, wideLast: o.wideLast ?? -1, wideRear: o.wideRear ?? -1 } : {}) })),
+                    wideIdle: o.wideIdle ?? 0, wideLast: o.wideLast ?? -1, wideRear: o.wideRear ?? -1, done: o.done || '' } : {}) })),
             armyForms: [...this.armies.values()].filter(a => a.form).map(a => [a.id, a.form]),
             nextOpId: this.nextOpId,
             armyOps: [...this.armies.values()].filter(a => a.op).map(a => [a.id, a.op]),
@@ -1834,6 +1835,8 @@ class GameEngine {
                     wideIdle: int(o.wideIdle, 0, 1e4, 0), wideLast: int(o.wideLast, -1, 1e5, -1),
                     // Antes de tomar el objetivo, lo más adelantado que ha llegado el más atrasado del frente (en medias casillas).
                     wideRear: int(o.wideRear, -1, 1e5, -1),
+                    // Objetivo cumplido (solo las del jugador): por qué; espera sus órdenes.
+                    done: str(o.done, 300),
                     // Escalones que eligió el jugador en la ficha (ids de ejército).
                     manual: [...new Set(list(o.manual).slice(0, 5000).filter(x => Number.isInteger(x) && x >= 1 && x <= 1e9))] });
                 op.bySea = g.opAxisSea(op);
@@ -4170,22 +4173,33 @@ class GameEngine {
     // o en la reserva no vuela. Las de la IA no atacan ejércitos de menos de AI_MIN_ARMY unidades.
     // Con «Proteger y escoltar», antes reparte escoltas (opEscorts); las de defensa no vuelan aquí. Las de ataque que no
     // han volado este turno (lo escoltado no ha atacado) sí: vuela al final, tras los ataques de la operación, y el vuelo
-    // vuelve a estar libre el turno que viene. Sus enjambres sin escolta reconocen antes los blancos que no conoce
+    // vuelve a estar libre el turno que viene.
+    // `stage`: executeOp la hace volar en dos tiempos. 'before', antes de que sus ejércitos se muevan y asalten: reparte las
+    // escoltas (que así acompañan ya a los asaltos de este turno) y sus escuadrones sin escolta golpean los blancos de
+    // ataque, para ablandar al enemigo antes del asalto; si también protege, se guardan hasta AIR_PATROLS escuadrones (al
+    // menos uno ataca). 'after', tras los asaltos: protege donde han acabado sus ejércitos, con las escoltas de ataque que
+    // no han golpeado y lo que siga libre. 'all', todo de una vez, como antes. Sus enjambres sin escolta reconocen antes los blancos que no conoce
     // (flyTargets). Una ofensiva de la IA que solo protege y escolta para que la acompañen sus drones (aiEscortOnly) no
     // manda escuadrones a proteger sus casillas.
-    opAir(op) {
+    opAir(op, stage = 'all') {
         const id = op.owner, aims = op.aims ?? [], idle = op.kind === 'reserva' || op.auto === 'manual' || op.paused || !aims.length || this.over;
-        this.opEscorts(op, !idle && aims.includes('patrol'));
-        if (idle) return { flown: 0, hits: 0, strikes: 0, notes: [] };
-        const pool = [], free = q => q.op === op.id && q.owner === id && (!q.task || (q.task.kind === 'escort' && q.task.mode === 'ataque'));
+        const none = { flown: 0, hits: 0, strikes: 0, notes: [] }, before = stage === 'before';
+        if (stage !== 'after') this.opEscorts(op, !idle && aims.includes('patrol'));
+        if (idle) return none;
+        const pool = [], free = q => q.op === op.id && q.owner === id && (!q.task || (!before && q.task.kind === 'escort' && q.task.mode === 'ataque'));
         for (const q of this.squadrons.values()) if (free(q) && this.canFly(q)) pool.push(q);
-        if (!pool.length) return { flown: 0, hits: 0, strikes: 0, notes: [] };
+        const strike = aims.filter(k => k !== 'patrol'), patrol = aims.includes('patrol') && !this.aiEscortOnly.has(op.id);
+        if (before) {
+            if (!strike.length) return none;
+            if (patrol) pool.sort((x, y) => x.id - y.id).splice(pool.length - Math.min(AIR_PATROLS, pool.length - 1));
+        }
+        if (!pool.length) return none;
         const members = this.opMembers(op), zone = new Set(), obj = op.kind === 'ofensiva' ? op.cells[op.cells.length - 1] : -1;
         const around = (c, k) => { for (const x of this.nearCells(c, k).keys()) zone.add(x); };
         if (obj >= 0) { around(obj, 3); for (const a of members) around(a.cell, 2); } else for (const c of op.cells) around(c, 3);
-        const strike = aims.filter(k => k !== 'patrol'), opts = { obj, members, pool, minArmy: id === this.player ? 1 : AI_MIN_ARMY };
+        const opts = { obj, members, pool, minArmy: id === this.player ? 1 : AI_MIN_ARMY };
         let targets = strike.length ? this.airTargets(id, [...zone], strike, opts) : [];
-        if (aims.includes('patrol') && !this.aiEscortOnly.has(op.id)) targets = [...targets, ...this.airTargets(id, obj >= 0 ? members.map(a => a.cell) : op.cells, ['patrol'], opts)].sort(airTargetOrder).slice(0, AIR_TARGETS);
+        if (patrol && !before) targets = [...targets, ...this.airTargets(id, obj >= 0 ? members.map(a => a.cell) : op.cells, ['patrol'], opts)].sort(airTargetOrder).slice(0, AIR_TARGETS);
         const eyes = [];
         if (strike.length && this.swarms.size) for (const q of this.swarms.values()) if (free(q) && this.canFlySwarm(q)) eyes.push(q);
         return this.flyTargets(id, pool, targets, eyes);
@@ -5768,10 +5782,17 @@ class GameEngine {
         this.orderVersion++;
         if (op.owner === this.player) this.log(`${op.name}: ${why || 'operación terminada'}. Sus ejércitos quedan sin operación.`);
     }
+    // Una ofensiva del jugador que ha cumplido su objetivo no termina: sus ejércitos se quedan en ella, quietos, hasta que
+    // él la redibuje (a otro país, por otro camino) o la termine. Se avisa una vez.
+    opReached(op, why) {
+        op.done = why; op.waiting = 0;
+        this.orderVersion++;
+        this.log(`${op.name}: ${why}. Sus ejércitos esperan tus órdenes: redibuja la flecha para seguir o termínala cuando quieras.`);
+    }
     // Cuánta ayuda pide una operación: ofensiva, los ejércitos que esperaban ventaja (o 1 si no tiene ninguno);
     // defensa, las casillas de su línea sin tropas.
     opNeed(op) {
-        if (op.paused || op.kind === 'reserva') return 0;
+        if (op.paused || op.kind === 'reserva' || op.done) return 0;
         if (op.kind === 'defensa') return op.cells.filter(c => { const id = this.armyAt[c]; return !id || this.armies.get(id).owner !== op.owner; }).length;
         return this.opMembers(op).length ? op.waiting : 1;
     }
@@ -6035,6 +6056,18 @@ class GameEngine {
         op.go = true;
         this.opLaunch(op, this.opReady(op));
         return true;
+    }
+    // Ofensivas del jugador que se pueden lanzar ya: reuniéndose, sin pausa y con algún ejército, estén listas o no.
+    playerLaunchable() { return this.player === null ? [] : this.opsOf(this.player).filter(op => op.kind === 'ofensiva' && op.phase !== 'avance' && !op.paused && this.opMembers(op).length); }
+    // Lanza a la vez las ofensivas `ids` (p. ej. al declarar la guerra), con lo que tengan reunido. Devuelve cuántas salen.
+    playerLaunchOps(ids) {
+        const go = ids.map(x => this.ops.get(x)).filter(op => op && this.playerLaunchable().includes(op));
+        for (const op of go) this.playerLaunchOp(op);
+        if (go.length > 1) {
+            const still = go.filter(op => op.auto === 'manual').map(op => op.name);
+            this.log(`Lanzas ${go.length} ofensivas a la vez. Avanzan al terminar el turno, o ya con «Ejecutar órdenes»${still.length ? `; ${still.join(', ')} ${still.length === 1 ? 'va' : 'van'} en manual y no se ${still.length === 1 ? 'mueve' : 'mueven'} sola${still.length === 1 ? '' : 's'}` : ''}.`);
+        }
+        return go.length;
     }
     // Primer punto de la flecha aún no alcanzado por los ejércitos de la ofensiva (para las partidas de antes de las fases
     // y al redibujarla): el primero que ninguno tiene a 1 casilla o menos y que queda por delante del más adelantado.
@@ -7063,13 +7096,22 @@ class GameEngine {
             .sort((x, y) => unitPower(y.units, 'atk', rules) - unitPower(x.units, 'atk', rules) || x.id - y.id);
         const tally = { moved: 0, attacked: 0, waiting: 0, fortified: 0, sent: [], sentAir: [], notes: [], air: null };
         const live = a => this.armies.has(a.id) && a.owner === id && this.armyOn(a.cell) === a && this.mp(a) > 0;
-        let done = '';   // una ofensiva que toma su objetivo termina tras dar su parte
+        // Una ofensiva de la IA que toma su objetivo termina tras dar su parte; la del jugador no termina nunca sola: se queda
+        // quieta con sus ejércitos (op.done, el motivo) hasta que él la redibuje o la termine.
+        let done = '';
+        const mine = id === this.player;
         if (op.kind === 'ofensiva') {
             const obj = op.cells[op.cells.length - 1];
             // Con frente amplio, además, sin provincias enemigas con la ciudad en el pasillo (D4).
             const wide = op.doctrine === 'amplio', finished = () => this.owner[obj] === id && (!wide || !this.opWideLeft(op).length);
             const why = () => `objetivo cumplido, ${this.placeName(obj)} es tuya${wide ? ' y no quedan provincias enemigas en el pasillo' : ''}`;
-            if (finished()) { this.endOp(op, why()); return tally; }
+            if (finished()) {
+                if (!mine) { this.endOp(op, why()); return tally; }
+                if (!op.done) this.opReached(op, why());
+                return tally;
+            }
+            op.done = '';   // si le quitan el objetivo, vuelve a por él
+            tally.air = this.opAir(op, 'before');   // la aviación golpea antes del asalto
             // Por fases (A5): se reúne en su zona hasta estar lista y luego avanza por la flecha y asalta junta.
             op.bySea = this.opAxisSea(op);
             if (op.phase !== 'avance') {
@@ -7078,7 +7120,7 @@ class GameEngine {
                 else this.opGather(op, free, tally, live, st);
             }
             if (op.phase === 'avance') this.opAdvance(op, free, tally, live);
-            if (finished()) done = why();
+            if (finished()) { if (mine) this.opReached(op, why()); else done = why(); }
             else if (op.phase === 'avance' && !this.over && this.ops.has(op.id)) {
                 this.opLogistics(op, tally);   // tras moverse (D3)
                 const left = wide && this.owner[obj] === id ? this.opWideLeft(op) : [];
@@ -7090,6 +7132,8 @@ class GameEngine {
                     op.wideIdle = fresh ? 0 : (op.wideIdle ?? 0) + 1;
                     op.wideLast = left.length; op.wideRear = -1;
                     if (op.wideIdle >= OP_WIDE_IDLE) done = `${left.length === 1 ? 'queda 1 ciudad demasiado defendida' : `quedan ${left.length} ciudades demasiado defendidas`} en el pasillo`;
+                    if (done && mine) { this.opSay(op, tally, 'stall', `${done[0].toUpperCase()}${done.slice(1)}. Sigue esperando: redibújala, cambia su postura o termínala tú`); done = ''; }
+                    else if (!op.wideIdle) this.opSay(op, null, 'stall', '');
                 } else if (wide && this.owner[obj] !== id) {
                     // Antes del objetivo, lo mismo con otra cuenta: avanzar es tomar terreno enemigo del pasillo (que baje
                     // la cuenta de sus casillas), que el más atrasado del frente gane media casilla o asediar.
@@ -7098,9 +7142,12 @@ class GameEngine {
                     op.wideIdle = fresh ? 0 : (op.wideIdle ?? 0) + 1;
                     op.wideLast = st.foes; op.wideRear = Math.max(op.wideRear ?? -1, st.rear);
                     if (op.wideIdle >= OP_WIDE_IDLE) done = `el frente lleva ${OP_WIDE_IDLE} turnos sin avanzar ni tomar terreno antes de ${this.placeName(obj)}: lo que tiene delante está demasiado defendido para el frente amplio, que solo ataca con ${decimal(op.ratio + 0.5)} a 1`;
+                    if (done && mine) { this.opSay(op, tally, 'stall', `${done[0].toUpperCase()}${done.slice(1)}. Sigue esperando: redibújala, cambia su postura o termínala tú`); done = ''; }
+                    else if (!op.wideIdle) this.opSay(op, null, 'stall', '');
                 } else { op.wideIdle = 0; op.wideLast = -1; op.wideRear = -1; }
             }
         } else if (op.kind === 'defensa') {
+            tally.air = this.opAir(op, 'before');
             this.defenseStep(op, free, tally, live);
             op.uncovered = this.opNeed(op);
         } else {
@@ -7135,8 +7182,12 @@ class GameEngine {
                 }
             }
         }
-        // La aviación de la operación vuela al final, con lo que ya han hecho sus ejércitos.
-        if (this.ops.has(op.id) && !done) tally.air = this.opAir(op);
+        // La aviación de ataque ya ha golpeado antes del asalto; al final protege donde han acabado sus ejércitos, con las
+        // escoltas de ataque que no han golpeado y lo que siga libre.
+        if (this.ops.has(op.id) && !done) {
+            const a = tally.air, b = this.opAir(op, a ? 'after' : 'all');
+            tally.air = a ? { flown: a.flown + b.flown, hits: a.hits + b.hits, strikes: a.strikes + b.strikes, notes: [...a.notes, ...b.notes] } : b;
+        }
         if (id === this.player) {
             const parts = [];
             if (tally.moved) parts.push(plural(tally.moved, 'ejército se mueve', 'ejércitos se mueven'));
@@ -7180,7 +7231,7 @@ class GameEngine {
     }
     // Cuántos ejércitos más pide una operación: una línea, hasta su mínimo; una ofensiva, OP_MIN_ARMIES o los que esperan ventaja.
     opWant(op) {
-        if (op.paused || op.kind === 'reserva') return 0;
+        if (op.paused || op.kind === 'reserva' || op.done) return 0;
         const n = this.opMembers(op).length;
         return op.kind === 'defensa' ? Math.max(0, this.opMinimum(op) - n) : Math.max(op.waiting ?? 0, OP_MIN_ARMIES - n);
     }
@@ -9092,13 +9143,15 @@ class GameEngine {
     }
     sidePower(set, powers = this.powers()) { let s = 0; for (const x of set) s += powers[x]; return s; }
     // ¿Está `x` vencido por el bando `other`? Capital ocupada, el 40 % de su tierra ocupada o su bando (`own`) con menos
-    // de un tercio de la fuerza del otro.
+    // de un tercio de la fuerza del otro, pero solo si ya ha perdido CRUSH_LOST de su tierra: que entren en la guerra
+    // muchos aliados del otro no basta para rendirse.
     crushedBy(x, own, other, powers) {
         if (other.has(this.owner[this.nations[x].capitalCell])) return true;
         const { occ, legal } = this.warOccupation(), n = this.nations.length;
         let taken = 0;
         for (const o of other) taken += occ[o * n + x];
-        return taken >= legal[x] * 0.4 || this.sidePower(own, powers) * 3 < this.sidePower(other, powers);
+        if (taken >= legal[x] * 0.4) return true;
+        return taken >= legal[x] * CONFIG.CRUSH_LOST && this.sidePower(own, powers) * 3 < this.sidePower(other, powers);
     }
     // ¿Está `ai` claramente vencido en su guerra con `other` (de partida, el jugador)?
     isCrushed(ai, other = this.player) {
@@ -9511,6 +9564,9 @@ class GameEngine {
             this.opRearClean(op);
             const lane = this.opCorridor(op);
             op.pockets = op.pockets.filter(c => lane.has(c));
+            // Con otra flecha, otro objetivo: deja de estar cumplida y la cuenta del frente amplio empieza de nuevo.
+            Object.assign(op, { done: '', wideIdle: 0, wideLast: -1, wideRear: -1 });
+            this.opSay(op, null, 'stall', '');
         }
         op.waiting = 0;
         this.orderVersion++;
@@ -13969,6 +14025,7 @@ class GameUI {
                 break;
             }
             case 'op-launch': { const op = g.ops.get(+d.id); if (op) g.playerLaunchOp(op); break; }
+            case 'op-launch-all': g.playerLaunchOps(String(d.ids).split(',').map(Number)); break;
             case 'op-zone': {   // pide un clic en una casilla propia; en el móvil, la hoja se baja para ver el mapa
                 const op = g.ops.get(+d.id);
                 if (!op || op.kind !== 'ofensiva') return;
@@ -15449,6 +15506,7 @@ class GameUI {
             if (op.state === 'restablece') return ['Vuelve a su línea', 'ok'];
             const k = g.opNeed(op); return k ? [`Faltan ${k}`, 'warn'] : ['Línea cubierta', 'ok'];
         }
+        if (op.done) return ['Objetivo cumplido', 'ok'];
         if (op.phase === 'reunion') return [op.launch === 'orden' ? 'Espera tu orden' : 'Reuniéndose', ''];
         return op.waiting ? ['Espera ventaja', 'warn'] : [op.auto === 'manual' ? 'Manual' : 'Avanzando', 'ok'];
     }
@@ -15588,11 +15646,11 @@ class GameUI {
             if (g.owner[obj] !== op.owner) {
                 // Antes del objetivo: si espera ante un objetivo que un asalto ya atacaría, y la cuenta de turnos sin avanzar.
                 const odds = g.opWideObjOdds(op), idle = op.wideIdle ?? 0;
-                if (odds && odds.ratio >= op.ratio && odds.ratio < odds.need) out.push(`<p class="small warn-text" style="margin-top:6px">El frente espera ante ${esc(g.placeName(obj))}: con todo el frente tendría ${decimal(odds.ratio)} a 1, y el frente amplio solo ataca con ${decimal(odds.need)} a 1 (un asalto ya atacaría). Si pasan ${OP_WIDE_IDLE} turnos sin avanzar ni tomar terreno, termina (lleva ${idle}).</p>`);
-                else if (idle) out.push(`<p class="small warn-text" style="margin-top:6px">Lleva ${plural(idle, 'turno', 'turnos')} sin avanzar ni tomar terreno; a los ${OP_WIDE_IDLE}, termina.</p>`);
+                if (odds && odds.ratio >= op.ratio && odds.ratio < odds.need) out.push(`<p class="small warn-text" style="margin-top:6px">El frente espera ante ${esc(g.placeName(obj))}: con todo el frente tendría ${decimal(odds.ratio)} a 1, y el frente amplio solo ataca con ${decimal(odds.need)} a 1 (un asalto ya atacaría). Lleva ${plural(idle, 'turno', 'turnos')} sin avanzar ni tomar terreno.</p>`);
+                else if (idle) out.push(`<p class="small warn-text" style="margin-top:6px">Lleva ${plural(idle, 'turno', 'turnos')} sin avanzar ni tomar terreno${idle >= OP_WIDE_IDLE ? ': lo que tiene delante puede estar demasiado defendido. Redibújala, cambia su postura o termínala' : ''}.</p>`);
             } else {
                 const left = g.opWideLeft(op);
-                if (left.length) out.push(`<p class="small warn-text" style="margin-top:6px">${esc(g.placeName(obj))} es tuya, pero quedan ${plural(left.length, 'provincia', 'provincias')} en el pasillo (${left.map(c => esc(PROVINCES[CITY_OF[c]].cityName)).join(', ')}). Si pasan ${OP_WIDE_IDLE} turnos sin tomar ni asediar ninguna, termina (lleva ${op.wideIdle ?? 0}).</p>`);
+                if (left.length) out.push(`<p class="small warn-text" style="margin-top:6px">${esc(g.placeName(obj))} es tuya, pero quedan ${plural(left.length, 'provincia', 'provincias')} en el pasillo (${left.map(c => esc(PROVINCES[CITY_OF[c]].cityName)).join(', ')}).${op.wideIdle ? ` Lleva ${plural(op.wideIdle, 'turno', 'turnos')} sin tomar ni asediar ninguna.` : ''}</p>`);
             }
         }
         // Bolsas: solo lo que se ve (con niebla, la casilla fuera de la vista no dice nada de quién hay).
@@ -15649,6 +15707,7 @@ class GameUI {
                 <div class="row"><input type="text" id="op-name" maxlength="60" value="${esc(op.name)}" aria-label="Nombre de la operación" style="flex:1">
                     <button class="btn ghost" data-action="op-close" aria-label="Cerrar" title="Cerrar">✕</button></div>
                 <p class="small" style="margin-top:6px">${OP_KINDS[op.kind].name} desde el turno ${op.since}. ${where}.</p>
+                ${op.done ? `<p class="small ok-text" style="margin-top:6px">${esc(op.done[0].toUpperCase() + op.done.slice(1))}. Sus ejércitos esperan tus órdenes: redibújala para seguir (a otro país o por otro camino) o termínala cuando quieras.</p>` : ''}
                 ${front}
                 ${op.kind === 'ofensiva' ? this.phaseSection(op, members) : ''}
                 ${op.kind === 'ofensiva' ? this.doctrineSection(op, members) : ''}
@@ -15673,9 +15732,12 @@ class GameUI {
         // Operaciones agrupadas por teatro (país enemigo), con su prioridad; y propuestas para los frentes sin ninguna.
         const command = g.nations[p0].command, groups = new Map();
         for (const o of ops) { const f = g.opFront(o); if (!groups.has(f)) groups.set(f, []); groups.get(f).push(o); }
+        // Lanzar a la vez las ofensivas que se reúnen: las de un frente o, si hay en varios, todas.
+        const ready = g.playerLaunchable(), launchBtn = (list, label) => `<button class="btn primary" data-action="op-launch-all" data-ids="${list.map(o => o.id).join(',')}" title="Salen ya con lo que tengan reunido, estén listas o no">${label}</button>`;
+        const launchOf = list => { const l = list.filter(o => ready.includes(o)); return l.length ? `<div class="row" style="margin:6px 8px">${launchBtn(l, l.length === 1 ? 'Lanzar la ofensiva' : `Lanzar las ${l.length} ofensivas`)}</div>` : ''; };
         const theatre = ([f, list]) => `<div class="theatre"><div class="theatre-head"><span>${f >= 0 ? `Frente con ${this.nationChip(f)}` : 'Sin frente'}</span>
             ${f >= 0 ? `<div class="seg small-seg">${Object.keys(PRIORITY).map(k => `<button data-action="cmd" data-key="priority" data-value="${f}:${k}" class="${(command.priority[f] ?? 'media') === k ? 'on' : ''}" title="Prioridad ${k}: los refuerzos y la reserva van antes a los frentes de prioridad alta">${k[0].toUpperCase() + k.slice(1)}</button>`).join('')}</div>` : ''}</div>
-            ${list.map(row).join('')}</div>`;
+            ${list.map(row).join('')}${launchOf(list)}</div>`;
         const sug = g.frontSuggestions(p0).map(sg => `<div class="suggest"><p class="small">Frente con <b>${g.nm(sg.enemy)}</b> sin operaciones.</p><div class="row">
             <button class="btn" data-action="op-suggest" data-enemy="${sg.enemy}" data-kind="defensa" data-preview="${sg.enemy}" ${ops.length >= cap ? 'disabled' : ''}>Línea propuesta</button>
             ${sg.attack ? `<button class="btn" data-action="op-suggest" data-enemy="${sg.enemy}" data-kind="ofensiva" ${ops.length >= cap ? 'disabled' : ''}>Ofensiva sobre ${esc(sg.target)}</button>` : ''}</div>
@@ -15685,6 +15747,7 @@ class GameUI {
             <p class="group-title">Operaciones · ${ops.length} de ${cap}</p>
             <div class="row">${Object.entries(OP_KINDS).map(([k, v]) => `<button class="btn" data-action="op-new" data-kind="${k}" ${ops.length >= cap ? 'disabled' : ''}>${v.icon.replace('<svg ', '<svg width="15" height="15" aria-hidden="true" ')}${v.name}</button>`).join('')}</div>
             ${sug}
+            ${groups.size > 1 && new Set(ready.map(o => g.opFront(o))).size > 1 ? `<div class="row" style="margin-top:6px">${launchBtn(ready, `Lanzar todas las ofensivas (${ready.length})`)}</div>` : ''}
             <div class="op-list">${[...groups].map(theatre).join('') || '<p class="note" style="margin:8px">Sin operaciones. Dibuja una flecha de ofensiva, una línea de defensa o una zona de reserva (tecla 5) y asígnale ejércitos: se moverán solos turno a turno.</p>'}</div>
             ${detail}
             <p class="note" style="margin-top:10px">Tu estado mayor lleva ${cap} operaciones a la vez: ${rules.commandOps} por Doctrina y una más por cada 20 provincias.</p>
@@ -15990,7 +16053,7 @@ class GameUI {
                 ${opt('annex', 'Anexionar lo ocupado', 'Cada bando se queda lo que ocupa: deja de estar en disputa y pasa a ser territorio propio, con toda su renta.')}
                 ${opt('satellite', `Convertir a ${g.nm(t)} en tu satélite`, crushed
                     ? `Conserva su país, te paga el ${CONFIG.TRIBUTE * 100} % de sus ingresos, entra en tus guerras y nunca te ataca. Lo que te ocupó vuelve a ti.`
-                    : 'Solo si su bando está vencido: el tuyo (tú, tus satélites y tus aliados en esta guerra) ocupa su capital o el 40 % de su territorio, o el suyo no llega a un tercio de la fuerza del tuyo.', crushed)}
+                    : `Solo si su bando está vencido: el tuyo (tú, tus satélites y tus aliados en esta guerra) ocupa su capital o el 40 % de su territorio, o le ocupa el ${Math.round(CONFIG.CRUSH_LOST * 100)} % y el suyo no llega a un tercio de la fuerza del tuyo.`, crushed)}
                 ${opt('white', 'Paz blanca', 'Cada uno recupera lo suyo; las casillas ocupadas vuelven a su dueño.')}
             </div>
             ${extra}
@@ -16049,7 +16112,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.26-222033';
+const APP_VERSION = '2026.10.27-102707';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
