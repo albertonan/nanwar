@@ -1563,6 +1563,7 @@ class GameEngine {
             ops: [...this.ops.values()].map(o => ({ id: o.id, owner: o.owner, kind: o.kind, name: o.name, cells: o.cells, ratio: o.ratio, auto: o.auto,
                 paused: o.paused, fortify: o.fortify, since: o.since, waiting: o.waiting, front: o.front ?? -1, drawn: o.drawn, state: o.state, rel: o.rel, gold: o.gold, extra: o.extra ?? 0, poolTurn: o.poolTurn ?? 0, template: o.template, pool: o.pool, formed: o.formed, aims: o.aims,
                 form: o.form ? { name: o.form.name, units: o.form.units, zone: o.form.zone, recruited: o.form.recruited, pending: o.form.pending } : null,
+                fill: o.fill?.pending.length ? { pending: o.fill.pending } : null,
                 ...(o.kind === 'ofensiva' ? { phase: o.phase, launch: o.launch, go: o.go, wp: o.wp, zone: o.zone, gatherSince: o.gatherSince, body: o.body,
                     doctrine: o.doctrine, width: o.width, logistics: o.logistics, echelon: Object.entries(o.echelon ?? {}).filter(([x]) => this.armies.get(+x)?.op === o.id).map(([x, e]) => [+x, e]),
                     manual: (o.manual ?? []).filter(x => this.armies.get(x)?.op === o.id),
@@ -1858,6 +1859,10 @@ class GameEngine {
             const zone = int(f?.zone, -1, G.N - 1, -1);
             if (f && zone >= 0 && isLand(zone)) op.form = { name: str(f.name, 40), units: units(f.units, TPL_MAX), zone, recruited: units(f.recruited, 1e7),
                 pending: list(f.pending).slice(0, 200).map(x => [int(x?.[0], -1, G.N - 1, -1), units(x?.[1], TPL_MAX)]).filter(([c]) => c >= 0 && CITY_OF[c] >= 0) };
+            // Lo reclutado para completar a un miembro, que espera en una ciudad: [ciudad, unidades, id del miembro].
+            const fill = list(o.fill?.pending).slice(0, 400).map(x => [int(x?.[0], -1, G.N - 1, -1), units(x?.[1], TPL_MAX), int(x?.[2], 0, 1e9, 0)])
+                .filter(([c, p, to]) => c >= 0 && CITY_OF[c] >= 0 && countUnits(p) && to);
+            op.fill = fill.length ? { pending: fill } : null;
         }
         g.nextOpId = Math.max(int(data.nextOpId, 1, 1e6, 1), ...[...g.ops.keys()].map(x => x + 1), 1);
         for (const x of list(data.armyForms)) {
@@ -1907,7 +1912,8 @@ class GameEngine {
             if (a && t) a.seaWait = t;
         }
         for (const x of list(data.reinMarks)) {
-            const a = g.armies.get(int(x?.[0], 1, 1e9, 0)), k = str(x?.[1], 12), m = /^([ag])([1-9]\d{0,9})$/.exec(k);
+            const a = g.armies.get(int(x?.[0], 1, 1e9, 0)), k = str(x?.[1], 12), m = /^([ago])([1-9]\d{0,9})$/.exec(k);
+            if (m?.[1] === 'o') { if (a && g.ops.get(+m[2])?.owner === a.owner) a.rein = k; continue; }   // los que completan a una operación
             const ref = m && (m[1] === 'a' ? { army: +m[2] } : { group: +m[2] });
             if (a && ref && !(ref.army === a.id) && g.rfOf(a.owner, ref)) a.rein = k;
         }
@@ -5738,7 +5744,7 @@ class GameEngine {
         for (let i = 2; !opts.name && taken.has(name); i++) name = `${base} ${i}`;
         const op = { id: this.nextOpId++, owner, kind, name, cells: kind === 'ofensiva' ? cells : [...new Set(cells)],
             ratio: opts.ratio ?? (kind === 'defensa' ? 1.8 : POSTURES[this.nations[owner].command.posture].ratio), auto: opts.auto ?? 'auto', paused: false, fortify: !!opts.fortify,
-            since: this.turn, waiting: 0, uncovered: 0, drawn: kind === 'defensa' ? [...new Set(cells)] : null, state: 'aguanta', rel: null, gold: OP_GOLD.includes(opts.gold) ? opts.gold : 0, template: opts.template ?? 'auto', pool: 0, formed: 0, form: null,
+            since: this.turn, waiting: 0, uncovered: 0, drawn: kind === 'defensa' ? [...new Set(cells)] : null, state: 'aguanta', rel: null, gold: OP_GOLD.includes(opts.gold) ? opts.gold : 0, template: opts.template ?? 'auto', pool: 0, formed: 0, form: null, fill: null,
             aims: Array.isArray(opts.aims) ? [...new Set(opts.aims.filter(k => Object.hasOwn(OP_AIMS, k)))] : [...OP_AIM_DEFAULT[kind]] };   // solo fines que existen
         if (kind === 'ofensiva') {   // empieza reuniéndose en la salida de la flecha (A5)
             Object.assign(op, { phase: 'reunion', launch: opts.launch === 'orden' ? 'orden' : 'lista', go: false, wp: 1, zone: cells[0], gatherSince: this.turn, body: null });
@@ -5806,7 +5812,7 @@ class GameEngine {
     }
     endOp(op, why = '') {
         if (!this.ops.has(op.id)) return;
-        for (const a of this.armies.values()) { if (a.op === op.id) a.op = 0; if (a.form === op.id) a.form = 0; if (a.from === op.id) a.from = 0; }
+        for (const a of this.armies.values()) { if (a.op === op.id) a.op = 0; if (a.form === op.id) a.form = 0; if (a.from === op.id) a.from = 0; if (a.rein === `o${op.id}`) a.rein = 0; }
         for (const m of [this.squadrons, this.swarms]) for (const q of m.values()) if (q.op === op.id) { q.op = 0; if (q.task?.kind === 'escort') q.task = null; }
         this.ops.delete(op.id);
         this.orderVersion++;
@@ -7493,7 +7499,8 @@ class GameEngine {
     // op.gold: oro por turno para refuerzos, que se va guardando en op.pool. op.template: 'auto', una plantilla de serie
     // o 'c<n>', una propia. op.form: la formación en curso { name, units, zone, recruited, pending: [[ciudad, unidades]] }.
     // Se recluta en las ciudades más cercanas a la zona de reunión; al turno siguiente los reclutas marchan hasta ella y
-    // se juntan (army.form = id de la operación); cuando está completa, el ejército entra en la operación.
+    // se juntan (army.form = id de la operación); cuando está completa, el ejército entra en la operación. Con una
+    // plantilla elegida, antes se completa a los ejércitos que ya tiene (op.fill, opFillNeed).
     templateOf(id, key) {
         if (/^c\d+$/.test(key)) { const t = this.nations[id].templates[+key.slice(1)]; return t ? { key, name: t.name, units: t.units, why: 'Plantilla propia.' } : null; }
         const t = Object.hasOwn(TEMPLATES, key) ? TEMPLATES[key] : null;
@@ -7536,24 +7543,33 @@ class GameEngine {
         return best >= 0 ? best : anchor;
     }
     // Refuerzos de todas las operaciones de `id`: reclutan por rondas, una unidad cada una y las más prioritarias primero,
-    // para que ninguna acapare el oro ni el cupo de las ciudades mientras las demás esperan.
+    // para que ninguna acapare el oro ni el cupo de las ciudades mientras las demás esperan. Con una plantilla elegida,
+    // cada una completa antes a los ejércitos que ya tiene (opFillNeed) y solo después forma otros nuevos.
     stepReinforcements(id) {
+        // Reclutas de una operación que ya no existe: quedan sueltos, con la orden que lleven.
+        const marked = new Set();
+        for (const a of this.armies.values()) if (a.owner === id && a.rein && a.rein[0] === 'o') {
+            if (this.ops.get(+a.rein.slice(1))?.owner === id) marked.add(a.rein); else a.rein = 0;
+        }
+        for (const op of this.opsOf(id)) if (op.fill || marked.has(`o${op.id}`)) this.fillMarch(op);
         const ctx = new Map();
-        for (const op of this.opsOf(id)) if (!op.paused && (op.gold || op.form || op.extra)) { const c = this.reinforceBegin(op); if (c) ctx.set(op, c); }
+        for (const op of this.opsOf(id)) if (!op.paused && (op.gold || op.form || op.extra)) { const c = this.reinforceBegin(op, false); if (c) ctx.set(op, c); }
         const order = [...ctx.keys()].sort((x, y) => this.priorityOf(y) * (1 + this.opNeed(y)) - this.priorityOf(x) * (1 + this.opNeed(x)) || x.id - y.id);
         for (let busy = true, guard = 0; busy && guard < 400; guard++) { busy = false; for (const op of order) if (this.recruitOne(op, ctx.get(op))) busy = true; }
-        for (const op of ctx.keys()) this.reinforceEnd(op);
+        for (const [op, c] of ctx) this.reinforceEnd(op, c);
     }
     reinforce(op) {
         const c = this.reinforceBegin(op);
         if (!c) return;
         while (this.recruitOne(op, c));
-        this.reinforceEnd(op);
+        this.reinforceEnd(op, c);
     }
-    // Fondo del turno, formación nueva si toca y marcha de lo reclutado el turno anterior. Devuelve con qué reclutar, o null.
+    // Fondo del turno, marcha de lo reclutado el turno anterior y con qué reclutar: lo que falta a sus ejércitos (con
+    // plantilla elegida) o la formación nueva, que se crea si toca. Devuelve { fill, form, done } o null. Con `march`,
+    // también sale lo reclutado para completar (stepReinforcements lo hace antes, para todas).
     // La parte de logística del oro de una ofensiva (op.logistics %, D3) va a su fondo de obras (op.workPool, hasta 6
     // turnos) y el resto, a refuerzos.
-    reinforceBegin(op) {
+    reinforceBegin(op, march = true) {
         const id = op.owner;
         if (op.poolTurn !== this.turn) {   // una vez por turno
             op.poolTurn = this.turn;
@@ -7562,13 +7578,30 @@ class GameEngine {
             op.pool = Math.min((op.pool ?? 0) + gold, Math.max(gold * 6, this.templateCost(id, tpl.units) * 3)) + (op.extra ?? 0);
             op.extra = 0;
         }
+        if (march) this.fillMarch(op);
+        if (op.form) this.formMarch(op);
+        // Primero, los que ya están; la formación, solo si a ninguno le falta nada (recruitOne la empieza después).
+        const fill = this.fillBegin(op), form = fill ? null : this.formCtx(op);
+        return fill || form ? { fill, form, done: false, filled: 0 } : null;
+    }
+    // La formación de la operación (nueva si no hay y hay oro para empezarla) y las ciudades donde reclutarla, de la más
+    // cercana a su zona de reunión a la más lejana. null si no toca formar.
+    formCtx(op) {
+        const id = op.owner;
         let f = op.form;
         if (!f) {
-            if (!op.gold && op.pool < this.templateCost(id, this.opTemplate(op).units) / 4) return null;
             const tpl = this.opTemplate(op);
+            if (!op.gold && op.pool < this.templateCost(id, tpl.units) / 4) return null;
             f = op.form = { name: tpl.name, units: copyUnits(tpl.units), zone: this.formZone(op), recruited: emptyUnits(), pending: [] };
         }
-        // Lo reclutado el turno anterior sale de su ciudad hacia la zona de reunión.
+        const zx = G.cx[f.zone], zy = G.cy[f.zone];
+        const cities = PROVINCES.filter(p => this.owner[p.city] === id && this.legal[p.city] === id)
+            .sort((x, y) => (G.cx[x.city] - zx) ** 2 + (G.cy[x.city] - zy) ** 2 - (G.cx[y.city] - zx) ** 2 - (G.cy[y.city] - zy) ** 2);
+        return { cities, path: this.orderField(id, f.zone) };
+    }
+    // Lo reclutado el turno anterior para la formación sale de su ciudad hacia la zona de reunión.
+    formMarch(op) {
+        const id = op.owner, f = op.form;
         f.pending = f.pending.filter(([city, units]) => {
             const g = this.armyOn(city);
             if (!g || g.owner !== id) return false;
@@ -7583,31 +7616,145 @@ class GameEngine {
             if (mover !== g && this.armies.has(mover.id) && mover.cell === city && this.armyAt[city] !== mover.id) { this.settle(mover); return true; }   // no ha podido salir: otra vez el turno que viene
             return false;
         });
-        // Se recluta en la ciudad con cupo más cercana a la zona.
-        const zx = G.cx[f.zone], zy = G.cy[f.zone];
-        const cities = PROVINCES.filter(p => this.owner[p.city] === id && this.legal[p.city] === id)
-            .sort((x, y) => (G.cx[x.city] - zx) ** 2 + (G.cy[x.city] - zy) ** 2 - (G.cx[y.city] - zx) ** 2 - (G.cy[y.city] - zy) ** 2);
-        return { cities, path: this.orderField(id, f.zone), done: false };
     }
-    // Recluta una unidad de lo que falta a la formación, del tipo más atrasado. true si ha reclutado.
+    // Recluta una unidad: para completar a un miembro mientras a alguno le falte algo; si no, de lo que falta a la
+    // formación, del tipo más atrasado. true si ha reclutado.
     recruitOne(op, ctx) {
-        const id = op.owner, n = this.nations[id], f = op.form;
-        if (!f || !ctx || ctx.done) return false;
+        if (!ctx || ctx.done) return false;
+        if (ctx.fill) {
+            if (this.fillRecruitOne(op, ctx.fill)) { ctx.filled++; return true; }
+            // Mientras a alguno le falte algo (contando lo que va de camino), nada de formaciones nuevas.
+            if ([...ctx.fill.need.values()].some(u => countUnits(u) > 0)) { ctx.done = true; return false; }
+            ctx.fill = null;
+            ctx.form = this.formCtx(op);
+        }
+        const id = op.owner, n = this.nations[id], f = op.form, c = ctx.form;
+        if (!f || !c) { ctx.done = true; return false; }
         const missing = UNIT_KEYS.filter(k => (f.recruited[k] || 0) < (f.units[k] || 0)).sort((x, y) => (f.recruited[x] || 0) / f.units[x] - (f.recruited[y] || 0) / f.units[y]);
-        const p = missing.length ? ctx.cities.find(c => c.city !== f.zone && this.canRecruitAt(id, c) && ctx.path.to(c.city) < Infinity) : null;
+        // Se recluta en la ciudad con cupo más cercana a la zona.
+        const p = missing.length ? c.cities.find(q => q.city !== f.zone && this.canRecruitAt(id, q) && c.path.to(q.city) < Infinity) : null;
         // El tipo más atrasado que se pueda pagar (si la artillería no llega, una infantería).
-        const type = p && missing.find(k => { const c = this.unitCost(id, k, p.id); return op.pool >= c && n.gold - this.armsHeld(id) >= c; });   // sin tocar lo apartado para el arsenal
+        const type = p && missing.find(k => { const cost = this.unitCost(id, k, p.id); return op.pool >= cost && n.gold - this.armsHeld(id) >= cost; });   // sin tocar lo apartado para el arsenal
         if (!type || !this.recruit(id, p, type)) { ctx.done = true; return false; }
         const cost = this.unitCost(id, type, p.id);
         op.pool -= cost;
         f.recruited[type] = (f.recruited[type] || 0) + 1;
-        const entry = f.pending.find(([c]) => c === p.city);
+        const entry = f.pending.find(([x]) => x === p.city);
         if (entry) entry[1][type] = (entry[1][type] || 0) + 1; else { const u = emptyUnits(); u[type] = 1; f.pending.push([p.city, u]); }
         return true;
     }
-    // Quien perdió su marcha deja la formación; la formación completa entra en la operación.
-    reinforceEnd(op) {
+
+    // --- La plantilla elegida de una operación vale para todos sus ejércitos (anexo de Teatros) ---
+    // Con una plantilla elegida (op.template distinta de 'auto'), el oro de la operación completa primero a cada miembro
+    // hasta ella, por rondas y empezando por el que más falta, y solo después forma ejércitos nuevos. Con la automática
+    // no se completa a nadie. A nadie se le quita lo que tenga de más.
+    // op.fill = { pending: [[ciudad, unidades, id del miembro]] }: lo reclutado este turno para un miembro, que sale al
+    // siguiente con { kind: 'join', target } y lleva army.rein = 'o<id de la operación>' hasta fundirse con él (como los
+    // refuerzos de A7). null si no espera nada. Si el miembro está en la ciudad, el recluta se funde con él al momento.
+    // Lo que va de camino a cada miembro: Map(id → unidades), lo que espera en una ciudad y los que marchan hacia él.
+    fillComing(op) {
+        const key = `o${op.id}`, out = new Map();
+        const add = (to, u) => { let x = out.get(to); if (!x) out.set(to, x = emptyUnits()); for (const k of UNIT_KEYS) x[k] = (x[k] || 0) + (u[k] || 0); };
+        for (const [, u, to] of op.fill?.pending ?? []) add(to, u);
+        for (const a of this.armies.values()) if (a.rein === key && a.owner === op.owner && a.order?.kind === 'join') add(a.order.target, a.units);
+        return out;
+    }
+    // Lo que falta a cada miembro para igualar la plantilla elegida, contando lo que va de camino: Map(id → unidades),
+    // solo con los que les falta algo. Vacío con la plantilla automática.
+    opFillNeed(op, members = this.opMembers(op)) {
+        const out = new Map();
+        if (op.template === 'auto') return out;
+        const tpl = this.opTemplate(op);
+        if (tpl.auto) return out;
+        const types = this.recruitTypes(op.owner), coming = this.fillComing(op);
+        for (const m of members) {
+            const c = coming.get(m.id), need = emptyUnits();
+            for (const k of types) need[k] = Math.max(0, (tpl.units[k] || 0) - (m.units[k] || 0) - (c?.[k] || 0));
+            if (countUnits(need)) out.set(m.id, need);
+        }
+        return out;
+    }
+    // Lo reclutado el turno anterior sale de su ciudad a juntarse con su miembro. Los reclutas en marcha cuyo miembro ya
+    // no está en la operación (o ha desaparecido) van al miembro más cercano; sin ninguno, quedan sueltos con la orden
+    // que lleven. Si el jugador les ha dado otra orden, dejan de ser refuerzos.
+    fillMarch(op) {
+        const id = op.owner, key = `o${op.id}`, ref = { op: op.id }, members = this.opMembers(op);
+        const go = (x, t) => {   // a juntarse con él, y este turno ya echa a andar
+            if (!t || !this.setOrder(x, { kind: 'join', target: t.id })) return false;
+            x.rein = key;
+            if (x.direct !== this.turn) this.stepOrder(x);
+            return true;
+        };
+        if (op.fill) {
+            op.fill.pending = op.fill.pending.filter(e => {
+                const [city, units, to] = e, g = this.armyOn(city);
+                if (!g || g.owner !== id) return false;
+                const t = members.find(m => m.id === to) ?? null;
+                if (g === t) return false;   // ya está con él
+                const take = emptyUnits();
+                for (const k of UNIT_KEYS) take[k] = Math.min(units[k] || 0, g.units[k] || 0);
+                if (!countUnits(take) || (members.includes(g) && sameUnits(take, g.units))) return false;   // a otro miembro no se lo lleva entero
+                const mover = sameUnits(take, g.units) ? g : this.split(g, take, true);
+                if (mover !== g) { mover.op = 0; mover.group = 0; }
+                mover.form = 0;
+                const dest = t ?? this.rfJoinTarget(id, ref, mover);
+                if (!go(mover, dest)) { mover.rein = 0; if (mover !== g) this.settle(mover); return false; }
+                if (mover !== g && this.armies.has(mover.id) && mover.cell === city && this.armyAt[city] !== mover.id) { mover.rein = 0; this.settle(mover); e[2] = dest.id; return true; }   // no ha podido salir
+                return false;
+            });
+            if (!op.fill.pending.length) op.fill = null;
+        }
+        for (const a of [...this.armies.values()]) {
+            if (a.rein !== key || a.owner !== id || this.armyOn(a.cell) !== a) continue;
+            if (a.order?.kind === 'join' && members.some(m => m.id === a.order.target)) continue;
+            if (a.order && a.order.kind !== 'join') { a.rein = 0; continue; }
+            if (!go(a, this.rfJoinTarget(id, ref, a))) a.rein = 0;
+        }
+    }
+    // Con qué completar este turno: lo que falta a cada miembro y las ciudades propias. null si a ninguno le falta nada.
+    fillBegin(op) {
+        if (op.template === 'auto') return null;
+        const members = this.opMembers(op), need = this.opFillNeed(op, members);
+        if (!need.size) return null;
+        const id = op.owner;
+        return { tpl: this.opTemplate(op).units, members: new Map(members.map(m => [m.id, m])), need, near: new Map(), blocked: new Set(), done: false,
+            cities: PROVINCES.filter(p => this.owner[p.city] === id && this.legal[p.city] === id) };
+    }
+    // Una unidad para el miembro al que más le falta: del tipo más atrasado que se pueda pagar con el fondo de la
+    // operación (sin tocar lo apartado para el arsenal), en la ciudad con cupo más cercana a él que tenga camino hasta
+    // él. Al que no se puede reclutar nada, se le deja este turno. true si ha reclutado.
+    fillRecruitOne(op, c) {
+        const id = op.owner, n = this.nations[id];
+        while (!c.done) {
+            let m = null, most = 0;
+            for (const [mid, u] of c.need) { const k = countUnits(u); if (k > most && !c.blocked.has(mid)) { most = k; m = c.members.get(mid); } }
+            if (!m) { c.done = true; return false; }
+            const need = c.need.get(m.id);
+            let near = c.near.get(m.id);
+            if (!near) {
+                const x = G.cx[m.cell], y = G.cy[m.cell], d = p => (G.cx[p.city] - x) ** 2 + (G.cy[p.city] - y) ** 2;
+                c.near.set(m.id, near = [...c.cities].sort((p, q) => d(p) - d(q) || p.id - q.id));
+            }
+            const p = near.find(q => this.canRecruitAt(id, q) && (this.armyOn(q.city) === m || this.orderField(id, m.cell).to(q.city) < Infinity));
+            const type = p && UNIT_KEYS.filter(k => need[k] > 0).sort((x, y) => need[y] / (c.tpl[y] || 1) - need[x] / (c.tpl[x] || 1))
+                .find(k => { const cost = this.unitCost(id, k, p.id); return op.pool >= cost && n.gold - this.armsHeld(id) >= cost; });
+            const cost = type ? this.unitCost(id, type, p.id) : 0;
+            if (!type || !this.recruit(id, p, type)) { c.blocked.add(m.id); continue; }
+            op.pool -= cost;
+            need[type]--;
+            if (this.armyOn(p.city) !== m) {   // en su misma ciudad, ya ha llegado
+                const pending = (op.fill ??= { pending: [] }).pending, entry = pending.find(([x, , to]) => x === p.city && to === m.id);
+                if (entry) entry[1][type] = (entry[1][type] || 0) + 1; else { const u = emptyUnits(); u[type] = 1; pending.push([p.city, u, m.id]); }
+            }
+            return true;
+        }
+        return false;
+    }
+    // Quien perdió su marcha deja la formación; la formación completa entra en la operación. El parte cuenta lo
+    // reclutado este turno para completar a sus ejércitos (ctx.filled).
+    reinforceEnd(op, ctx = null) {
         const id = op.owner, f = op.form;
+        if (ctx?.filled && id === this.player) this.log(`${op.name}: ${plural(ctx.filled, 'unidad reclutada', 'unidades reclutadas')} para completar sus ejércitos hasta ${this.opTemplate(op).name}.`);
         if (!f) return;
         // Quien perdió su marcha (sin paso tres turnos) deja la formación.
         for (const a of this.armies.values()) if (a.form === op.id && a.owner === id && !a.order && a.cell !== f.zone) a.form = 0;
@@ -7652,9 +7799,11 @@ class GameEngine {
         return ref?.group ? this.groupById(owner, ref.group) : null;
     }
     rfOf(owner, ref) { return this.rfHolder(owner, ref)?.reinforce ?? null; }
-    // Adónde llegan los reclutas: el ejército, o los miembros de la agrupación.
+    // Adónde llegan los reclutas: el ejército, o los miembros de la agrupación (o de la operación, con { op: id }: los
+    // que completan a sus ejércitos, opFillNeed).
     rfTargets(owner, ref) {
         if (ref.army) { const a = this.rfHolder(owner, ref); return a ? [a] : []; }
+        if (ref.op) { const op = this.ops.get(ref.op); return op && op.owner === owner ? this.opMembers(op) : []; }
         return this.groupMembers(owner, ref.group);
     }
     rfIsTarget(owner, ref, x) { return !!x && x.owner === owner && (ref.army ? x.id === ref.army : x.group === ref.group); }
@@ -7725,9 +7874,10 @@ class GameEngine {
         const refs = [];
         for (const a of this.armies.values()) if (a.owner === id && a.reinforce) refs.push({ army: a.id });
         for (const gr of this.nations[id].groups) if (gr.reinforce) refs.push({ group: gr.id });
-        // Reclutas de un refuerzo que ya no existe: quedan sueltos, con la orden que lleven.
+        // Reclutas de un refuerzo que ya no existe: quedan sueltos, con la orden que lleven. Los de las operaciones
+        // ('o<id>') los lleva stepReinforcements.
         const live = new Set(refs.map(r => this.rfKey(r)));
-        for (const a of this.armies.values()) if (a.owner === id && a.rein && !live.has(a.rein)) a.rein = 0;
+        for (const a of this.armies.values()) if (a.owner === id && a.rein && a.rein[0] !== 'o' && !live.has(a.rein)) a.rein = 0;
         if (!refs.length) return;
         const ctx = new Map();
         for (const ref of refs) { const c = this.rfBegin(id, ref); if (c) ctx.set(ref, c); }
@@ -16410,14 +16560,18 @@ class GameUI {
         const g = this.game, tpl = g.opTemplate(op), n = g.nations[g.player], pr = g.formProgress(op), cost = g.templateCost(g.player, tpl.units);
         const opts = [['auto', `Automática: ${tpl.auto ? tpl.name : g.templateOf(g.player, g.suggestTemplate(op).key).name}`],
             ...Object.entries(TEMPLATES).map(([k, t]) => [k, t.name]), ...n.templates.map((t, i) => [`c${i}`, `${t.name} (propia)`])];
+        // Con una plantilla elegida, antes de formar se completa a los que ya están (lo que falta y lo que va de camino).
+        const need = g.opFillNeed(op), coming = [...g.fillComing(op).values()].reduce((s, u) => s + countUnits(u), 0);
+        const fill = need.size ? `Completando ${plural(need.size, 'ejército', 'ejércitos')} hasta ${esc(tpl.name)}: faltan ${plural([...need.values()].reduce((s, u) => s + countUnits(u), 0), 'unidad', 'unidades')} (${coming} en camino). `
+            : coming ? `${plural(coming, 'unidad', 'unidades')} en camino para completar a sus ejércitos. ` : '';
         const status = pr ? `Formando ${esc(op.form.name.toLowerCase())} en ${esc(g.placeName(op.form.zone))}: ${pr.done} de ${pr.total} reclutadas${pr.waiting ? `, ${pr.waiting} salen el turno que viene` : ''}${pr.moving ? `, ${pr.moving} en camino` : ''}${pr.ready ? `, ${pr.ready} en la zona` : ''}.`
-            : op.gold ? 'La primera formación empieza al terminar el turno.' : 'Sin oro para refuerzos.';
+            : !op.gold ? 'Sin oro para refuerzos.' : need.size ? 'Cuando estén todos completos, empezará a formar otros nuevos.' : 'La primera formación empieza al terminar el turno.';
         return `<p class="group-title">Refuerzos</p>
             <div class="seg">${OP_GOLD.map(v => `<button data-action="op-set" data-id="${op.id}" data-key="gold" data-value="${v}" class="${op.gold === v ? 'on' : ''}">${v ? `${v}` : 'Nada'}</button>`).join('')}</div>
             <p class="note">Oro por turno, de tus ${g.income(g.player)} de renta${op.gold > g.income(g.player) ? ' (más de lo que ingresas: tirará del tesoro)' : ''}. ${op.gold ? `Una ${esc(tpl.name.toLowerCase())} (${cost} de oro) cada unos ${Math.ceil(cost / op.gold)} turnos.` : ''}</p>
             <select data-op-template="${op.id}" style="width:100%;margin-top:6px" aria-label="Plantilla de refuerzo">${opts.map(([v, l]) => `<option value="${v}" ${op.template === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
-            <p class="note">${esc(tpl.why)} Se recluta en las ciudades más cercanas a la zona de reunión y las tropas marchan hasta ella; completa, entra en la operación.</p>
-            <p class="small" style="margin-top:4px">${status}${op.formed ? ` Formadas: ${op.formed}.` : ''}${op.pool ? ` Guardado: ${op.pool} de oro.` : ''}</p>`;
+            <p class="note">${tpl.auto ? '' : 'Primero completa a sus ejércitos hasta esta plantilla, con reclutas de las ciudades más cercanas a cada uno; después forma otros nuevos. '}${esc(tpl.why)} Se recluta en las ciudades más cercanas a la zona de reunión y las tropas marchan hasta ella; completa, entra en la operación.</p>
+            <p class="small" style="margin-top:4px">${fill}${status}${op.formed ? ` Formadas: ${op.formed}.` : ''}${op.pool ? ` Guardado: ${op.pool} de oro.` : ''}</p>`;
     }
     // Plantillas de serie y propias, con su fuerza, y un editor para crear la tuya.
     // Cifras de una plantilla: tamaño, escalón, fuerza, velocidad y coste.
