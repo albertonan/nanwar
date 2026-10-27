@@ -240,23 +240,28 @@ const CHECKS = [
         const small = T.army(g, es, C, 2), big = T.army(g, es, D, 40);
         T.ok(g.isGarrison(small) && !g.isGarrison(big), 'una guarnición y un ejército grande');
         const at = (calls, c) => calls.filter(t => t.wx === G.cx[c] && t.wy === G.cy[c]).length;
-        const calls = [], draw = ui.view.drawCounter;
+        const calls = [], draw = ui.view.drawCounter, ctx = ui.view.ctx, arc = ctx.arc, dots = [];
         ui.view.drawCounter = function (t, ...rest) { calls.push(t); return draw.call(this, t, ...rest); };
+        ctx.arc = function (x, y, r, ...rest) { if (r === 3) dots.push([x, y]); return arc.call(this, x, y, r, ...rest); };   // el punto de la guarnición
+        const dotAt = c => { const [x, y] = ui.view.toScreen(G.cx[c], G.cy[c]); return dots.filter(([a, b]) => Math.abs(a - x) < 0.5 && Math.abs(b - y) < 0.5).length; };
         try {
             ui.view.scale = 3 / G.S; ui.view.centerOn(C, 3); ui.view.draw();
             T.ok(G.S * ui.view.scale < FAR_HEX, 'de lejos');
             T.eq(at(calls, C), 0, 'sin ficha de la guarnición');
+            T.eq(dotAt(C), 1, 'un punto en su ciudad');
             T.ok(at(calls, D) > 0, 'el ejército grande se ve');
+            T.eq(dotAt(D), 0, 'y sin punto');
             ui.setLayer('garrisons', true);
             T.eq(readPrefs().garrisons, true, 'la casilla se recuerda');
-            calls.length = 0; ui.view.draw();
+            calls.length = 0; dots.length = 0; ui.view.draw();
             T.ok(at(calls, C) > 0, 'con la casilla, ficha');
+            T.eq(dotAt(C), 0, 'y sin punto');
             ui.setLayer('garrisons', false);
             const dest = T.farCell(g, es, C, 3);
             T.ok(g.setOrder(small, { kind: 'march', dest }), 'orden de marcha');
             calls.length = 0; ui.view.draw();
             T.ok(at(calls, C) > 0, 'con una orden de marcha vuelve la ficha');
-        } finally { ui.view.drawCounter = draw; ui.setLayer('garrisons', false); }
+        } finally { ui.view.drawCounter = draw; ctx.arc = arc; ui.setLayer('garrisons', false); }
         ui.mapMenu = true; ui.render();
         T.ok($('#map-menu').querySelector('[data-action="layer-garrisons"]') && $('#map-menu').textContent.includes('Guarniciones de lejos'), 'la casilla está en el panel Mapa');
         ui.mapMenu = false; ui.render();
@@ -270,7 +275,7 @@ const CHECKS = [
         T.ok(gars.every(a => g.isGarrison(a)) && bigs.every(a => !g.isGarrison(a)), 'tres guarniciones y dos grandes');
         ui.tab = 'batalla'; ui.drawerOpen = true; ui.obGarrisonsOpen = false; ui.render();
         const body = $('#drawer-body'), row = body.querySelector('[data-ob-garrisons]');
-        T.ok(row && row.textContent.includes('3 ejércitos') && row.textContent.includes('Guarniciones'), 'la fila dice «Guarniciones · 3 ejércitos»: ' + row?.textContent.replace(/s+/g, ' '));
+        T.ok(row && row.textContent.includes('3 ejércitos') && row.textContent.includes('Guarniciones'), 'la fila dice «Guarniciones · 3 ejércitos»: ' + row?.textContent.replace(/\s+/g, ' '));
         T.ok(row.textContent.includes('9 unidades'), 'y sus 9 unidades');
         T.eq(row.querySelectorAll('[data-ob-army]').length, 0, 'plegada: sin filas de ejército');
         T.ok(body.textContent.includes('Sin agrupar · 2'), 'Sin agrupar cuenta solo los grandes');
@@ -508,6 +513,40 @@ const CHECKS = [
         T.ok(p.pieces.every((x, i) => !i || order.indexOf(p.pieces[i - 1].kind) <= order.indexOf(x.kind)), 'la lista, en el orden de la spec');
         return true;
     }],
+    ['6 · propuesta: una cadena larga da varias agrupaciones, cada una a 4 casillas o menos de su semilla', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        for (const a of [...g.armies.values()]) g.removeArmy(a);
+        // Una fila recta de 21 casillas españolas y un suelto cada 2: 11 ejércitos a lo largo de 20 casillas.
+        let run = null;
+        for (const c0 of G.land) {
+            if (g.owner[c0] !== es) continue;
+            for (let d = 0; d < 6 && !run; d++) {
+                const cells = [c0];
+                for (let c = c0; cells.length < 21;) { c = G.nb[c * 6 + d]; if (c < 0 || !isLand(c) || g.owner[c] !== es) break; cells.push(c); }
+                if (cells.length === 21) run = cells;
+            }
+            if (run) break;
+        }
+        T.ok(run, 'una fila de 21 casillas en España');
+        const chain = run.filter((_, i) => i % 2 === 0).map((c, i) => T.army(g, es, c, 6 + (i * 3) % 5));
+        T.ok(chain.every((a, i) => !i || hexDist(chain[i - 1].cell, a.cell) === 2), 'a 2 casillas unos de otros');
+        T.ok(hexDist(chain[0].cell, chain[chain.length - 1].cell) >= 16, 'a lo largo de unas 20 casillas');
+        const metro = g.theatres(es).find(t => t.capital).idx, p = g.proposeOrganization(es, metro);
+        T.eq(p.pieces.filter(x => x.kind === 'line').length, 0, 'sin líneas que se lleven a nadie');
+        const groups = p.pieces.filter(x => x.kind === 'group');
+        T.ok(groups.length >= 2, 'varias agrupaciones, no una enorme: ' + JSON.stringify(groups.map(x => x.text)));
+        for (const x of groups) {
+            const seed = g.armies.get(x.armies[0]), near = g.nearCells(seed.cell, 4);
+            T.ok(x.armies.length >= 3, 'de 3 o más: ' + x.text);
+            T.ok(x.armies.every(id => near.has(g.armies.get(id).cell)), 'todos a 4 casillas o menos de la semilla: ' + x.text);
+            T.ok(x.armies.every(id => countUnits(g.armies.get(id).units) <= countUnits(seed.units)), 'la semilla es la más fuerte: ' + x.text);
+        }
+        const all = groups.flatMap(x => x.armies);
+        T.eq(all.length, new Set(all).size, 'sin ejércitos repetidos');
+        T.ok(groups.length <= 6, 'como mucho 6');
+        return true;
+    }],
     ['6 · aceptar: exactamente sus ejércitos, sin tocar las operaciones del jugador', () => {
         // Línea, con una reserva del jugador de 2 ejércitos lejos de la frontera.
         let { g, es, mine, metro } = T.lineScene();
@@ -647,6 +686,33 @@ const CHECKS = [
         T.eq(g.opsOf(es).length, n0, 'Aceptar todo no crea operaciones');
         T.ok(g.armyGroups(es).length > gr0, 'pero sí la agrupación');
         T.ok(!ui.draft.decided.has(L.key), 'la línea sigue pendiente');
+        return true;
+    }],
+    ['7 · el borrador va con su teatro; si se pierde, queda bajo Teatros solo con Cerrar y no se dibuja', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        const block = T.twoBlocks(g, es, fr);
+        for (const a of [...g.armies.values()]) g.removeArmy(a);
+        const c = block.flatMap(pid => PROVINCES[pid].cells).find(x => T.free(g, x) && [0, 1, 2, 3, 4, 5].filter(d => { const j = G.nb[x * 6 + d]; return j >= 0 && block.includes(G.prov[j]) && T.free(g, j); }).length >= 2);
+        T.ok(c !== undefined, 'sitio para tres juntos');
+        const nbs = [0, 1, 2, 3, 4, 5].map(d => G.nb[c * 6 + d]).filter(j => j >= 0 && block.includes(G.prov[j]) && T.free(g, j)).slice(0, 2);
+        for (const x of [c, ...nbs]) T.army(g, es, x, 8);
+        for (const d of document.querySelectorAll('dialog[open]')) d.close();
+        ui.draft = null; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        const far = g.theatres(es).findIndex(t => !t.capital);
+        $('#drawer-body').querySelector(`[data-theatre="${far}"] [data-action="th-propose"]`).click();
+        T.eq(ui.draftTheatre(), far, 'el borrador es del teatro francés');
+        T.ok($('#drawer-body').querySelector(`[data-theatre="${far}"] [data-draft]`), 'en su tarjeta');
+        T.ok(ui.draft.pieces.some(x => x.kind === 'group') && ui.view.draftShapes().length > 0, 'con una agrupación dibujada');
+        T.give(g, fr, block);   // el teatro se pierde
+        ui.render();
+        T.eq(g.theatres(es).length, 1, 'queda la metrópoli');
+        T.eq(ui.draftTheatre(), -1, 'el borrador ya no tiene teatro');
+        const body = $('#drawer-body'), lost = body.querySelector('[data-draft]');
+        T.ok(lost && !lost.closest('[data-theatre]') && lost.textContent.includes('ya no es tuyo') && !lost.querySelector('[data-action="th-accept"]'), 'bajo Teatros, sin piezas: ' + lost?.textContent.replace(/\s+/g, ' '));
+        T.ok(body.textContent.indexOf('Teatros') < body.textContent.indexOf('Propuesta de organización'), 'bajo el título');
+        T.eq(ui.view.draftShapes().length, 0, 'y no se dibuja');
+        lost.querySelector('[data-action="th-close"]').click();
+        T.eq(ui.draft, null, 'Cerrar lo quita');
         return true;
     }]
 ];

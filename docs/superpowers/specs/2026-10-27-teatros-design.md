@@ -189,6 +189,7 @@ Si hay al menos uno de cada, la sección dice, por ejemplo: «Reparto descompens
    - **La retaguardia:** si la casilla «Retaguardia» de la directiva está apagada, la frase lo dice («enciende Retaguardia para que mande aquí lo que sobra en las ciudades sin peligro»). No se enciende sola.
 3. **Agrupaciones.**
    - **Qué junta:** ejércitos sin encargo (no guarniciones) que están a 2 casillas o menos unos de otros, en racimos de 3 o más.
+   - **Hasta dónde llega un racimo** *(decisión de la revisión final)*: crece desde una semilla, el suelto libre más fuerte, y solo toma los que están a 4 casillas o menos de ella; así abarca unas 8 casillas como mucho y una cadena larga de fuertes da varias agrupaciones, no una que tape el frente.
    - **Cuántas:** como mucho 6 por teatro, las de más unidades primero.
    - **Aceptar:** `playerCreateGroup(ids)`, con su nombre automático.
 4. **Marchas entre teatros.**

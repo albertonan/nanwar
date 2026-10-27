@@ -7623,8 +7623,9 @@ class GameEngine {
         if (!ctx || ctx.done) return false;
         if (ctx.fill) {
             if (this.fillRecruitOne(op, ctx.fill)) { ctx.filled++; return true; }
-            // Mientras a alguno le falte algo (contando lo que va de camino), nada de formaciones nuevas.
-            if ([...ctx.fill.need.values()].some(u => countUnits(u) > 0)) { ctx.done = true; return false; }
+            // Mientras a alguno le falte algo (contando lo que va de camino), nada de formaciones nuevas; el que no tiene
+            // ninguna ciudad propia que llegue hasta él (aislado, sin paso) no las para.
+            if ([...ctx.fill.need].some(([mid, u]) => countUnits(u) > 0 && !ctx.fill.unreachable.has(mid))) { ctx.done = true; return false; }
             ctx.fill = null;
             ctx.form = this.formCtx(op);
         }
@@ -7660,7 +7661,8 @@ class GameEngine {
         return out;
     }
     // Lo que falta a cada miembro para igualar la plantilla elegida, contando lo que va de camino: Map(id → unidades),
-    // solo con los que les falta algo. Vacío con la plantilla automática.
+    // solo con los que les falta algo. Vacío con la plantilla automática. El que tiene su propio «Reforzar» (o está en una
+    // agrupación que lo tiene) no cuenta: lo completa ese refuerzo, no la operación.
     opFillNeed(op, members = this.opMembers(op)) {
         const out = new Map();
         if (op.template === 'auto') return out;
@@ -7668,6 +7670,7 @@ class GameEngine {
         if (tpl.auto) return out;
         const types = this.recruitTypes(op.owner), coming = this.fillComing(op);
         for (const m of members) {
+            if (m.reinforce || (m.group && this.groupById(op.owner, m.group)?.reinforce)) continue;
             const c = coming.get(m.id), need = emptyUnits();
             for (const k of types) need[k] = Math.max(0, (tpl.units[k] || 0) - (m.units[k] || 0) - (c?.[k] || 0));
             if (countUnits(need)) out.set(m.id, need);
@@ -7712,17 +7715,36 @@ class GameEngine {
         }
     }
     // Con qué completar este turno: lo que falta a cada miembro y las ciudades propias. null si a ninguno le falta nada.
+    // `blocked`: a los que este turno no se les puede reclutar nada; `unreachable`: de ellos, los que no tienen ninguna
+    // ciudad propia con camino hasta ellos, haya cupo o no (no paran las formaciones nuevas).
     fillBegin(op) {
         if (op.template === 'auto') return null;
         const members = this.opMembers(op), need = this.opFillNeed(op, members);
         if (!need.size) return null;
         const id = op.owner;
-        return { tpl: this.opTemplate(op).units, members: new Map(members.map(m => [m.id, m])), need, near: new Map(), blocked: new Set(), done: false,
-            cities: PROVINCES.filter(p => this.owner[p.city] === id && this.legal[p.city] === id) };
+        return { tpl: this.opTemplate(op).units, members: new Map(members.map(m => [m.id, m])), need, near: new Map(), blocked: new Set(), unreachable: new Set(), done: false,
+            cities: this.fillCities(id) };
+    }
+    // Ciudades propias (y legítimas) donde se recluta para completar a los miembros.
+    fillCities(id) { return PROVINCES.filter(p => this.owner[p.city] === id && this.legal[p.city] === id); }
+    // ¿Llega a `m` alguna de las ciudades `cities` (la suya, o con camino hasta él), sin mirar el cupo?
+    fillReaches(id, m, cities) { return cities.some(q => this.armyOn(q.city) === m || this.orderField(id, m.cell).to(q.city) < Infinity); }
+    // Miembros a los que falta algo (de `need`, opFillNeed) y a los que no llega ninguna ciudad propia: Set de ids.
+    fillUnreachable(op, need = this.opFillNeed(op)) {
+        const out = new Set();
+        if (!need.size) return out;
+        const cities = this.fillCities(op.owner);
+        for (const m of this.opMembers(op)) {
+            if (!need.has(m.id)) continue;
+            const x = G.cx[m.cell], y = G.cy[m.cell], d = p => (G.cx[p.city] - x) ** 2 + (G.cy[p.city] - y) ** 2;   // de la más cercana: el camino se calcula hasta ella
+            if (!this.fillReaches(op.owner, m, [...cities].sort((p, q) => d(p) - d(q)))) out.add(m.id);
+        }
+        return out;
     }
     // Una unidad para el miembro al que más le falta: del tipo más atrasado que se pueda pagar con el fondo de la
     // operación (sin tocar lo apartado para el arsenal), en la ciudad con cupo más cercana a él que tenga camino hasta
-    // él. Al que no se puede reclutar nada, se le deja este turno. true si ha reclutado.
+    // él. Al que no se puede reclutar nada, se le deja este turno (y se apunta si no le llega ninguna ciudad, ni con
+    // cupo). true si ha reclutado.
     fillRecruitOne(op, c) {
         const id = op.owner, n = this.nations[id];
         while (!c.done) {
@@ -7739,7 +7761,11 @@ class GameEngine {
             const type = p && UNIT_KEYS.filter(k => need[k] > 0).sort((x, y) => need[y] / (c.tpl[y] || 1) - need[x] / (c.tpl[x] || 1))
                 .find(k => { const cost = this.unitCost(id, k, p.id); return op.pool >= cost && n.gold - this.armsHeld(id) >= cost; });
             const cost = type ? this.unitCost(id, type, p.id) : 0;
-            if (!type || !this.recruit(id, p, type)) { c.blocked.add(m.id); continue; }
+            if (!type || !this.recruit(id, p, type)) {
+                c.blocked.add(m.id);
+                if (!p && !this.fillReaches(id, m, near)) c.unreachable.add(m.id);
+                continue;
+            }
             op.pool -= cost;
             need[type]--;
             if (this.armyOn(p.city) !== m) {   // en su misma ciudad, ya ha llegado
@@ -8232,7 +8258,8 @@ class GameEngine {
     // Índice del teatro de una casilla: la propia, el suyo; una ajena o del mar, el más cercano; sin teatros, −1.
     theatreOf(id, cell) { return this.theatreData(id).of(cell); }
     theatreData(id) {
-        const key = `${id}:${this.turn}:${this.version}:${this.armyVersion}:${this.orderVersion}:${this.blocVersion}:${this.warVersion}`;
+        // Con las versiones de lo que se ve (sees: espías, técnicas, reconocimiento aéreo), por el peso 2.
+        const key = `${id}:${this.turn}:${this.version}:${this.armyVersion}:${this.orderVersion}:${this.blocVersion}:${this.warVersion}:${this.spyVersion}:${this.techVersion}:${this.airVersion}`;
         if (this._theatres?.key === key) return this._theatres;
         // Bloques conectados, en el orden de G.land.
         const at = new Int32Array(G.N).fill(-1), comps = [];
@@ -8348,7 +8375,9 @@ class GameEngine {
     // más grandes), pero la lista sale en el orden de abajo.
     // - Líneas (theatreLines): con los sueltos más cercanos (en pasos), tantos como casillas; `short`, los que faltan.
     // - Una reserva, si el teatro no tiene ya una (reserveSpot), sin ejércitos: los recibe luego.
-    // - Agrupaciones: racimos de 3 o más sueltos a 2 casillas o menos unos de otros, los 6 de más unidades.
+    // - Agrupaciones: racimos de 3 o más sueltos a 2 casillas o menos unos de otros y a 4 o menos del más fuerte del
+    //   racimo (su semilla, el primero de la pieza), los 6 de más unidades.
+    // Libres: los sin encargo del teatro (t.idle) sin «Reforzar» propio, como pide pieceWhy, y que no tomó otra pieza.
     // - Marchas, si el teatro está muy defendido (troopBalance): sus sueltos de mayor a menor, cada uno al teatro poco
     //   defendido con más diferencia entre su parte de peligro y la de tropa (contando lo ya propuesto), a su reserva (la
     //   que tiene o la que se le propondría) o a su ciudad más cercana a su frontera peligrosa. Para cuando ninguno sigue
@@ -8360,7 +8389,7 @@ class GameEngine {
         const d = this.theatreData(id), t = d.list[th], stamp = d.key, pieces = [];
         if (!t) return { th, stamp, pieces };
         const taken = new Set(), size = a => countUnits(a.units), sum = xs => xs.reduce((s, a) => s + size(a), 0), unitsText = n => `${thousands(n)} ${n === 1 ? 'unidad' : 'unidades'}`;
-        const free = () => t.idle.filter(a => !taken.has(a.id));
+        const free = () => t.idle.filter(a => !taken.has(a.id) && !a.reinforce);
         const piece = p => pieces.push({ dest: -1, enemy: -1, makesOp: false, turns: null, short: 0, ...p });
         const lineMemo = new Map(), linesOf = x => { if (!lineMemo.has(x.idx)) lineMemo.set(x.idx, this.theatreLines(id, x)); return lineMemo.get(x.idx); };
         // 1. Líneas de defensa.
@@ -8371,7 +8400,7 @@ class GameEngine {
             for (const a of near) taken.add(a.id);
             const short = L.cells.length - near.length;
             piece({ key: `line:${L.enemy}`, kind: 'line', armies: near.map(a => a.id), cells: L.cells, enemy: L.enemy, makesOp: true, short,
-                text: `Línea en ${L.label} frente a ${this.nm(L.enemy)} (${L.war ? 'en guerra' : 'con ejércitos cerca de la frontera'}): ${plural(L.cells.length, 'casilla', 'casillas')}, ${plural(near.length, 'ejército', 'ejércitos')} y ${unitsText(sum(near))}${short ? `; ${short === 1 ? 'falta' : 'faltan'} ${plural(short, 'ejército', 'ejércitos')} para cubrirla` : ''}` });
+                text: `Línea en ${L.label} frente a ${this.nm(L.enemy)}, ${L.war ? 'en guerra' : 'con ejércitos cerca de la frontera'}: ${plural(L.cells.length, 'casilla', 'casillas')}, ${plural(near.length, 'ejército', 'ejércitos')} y ${unitsText(sum(near))}${short ? `; ${short === 1 ? 'falta' : 'faltan'} ${plural(short, 'ejército', 'ejércitos')} para cubrirla` : ''}` });
         }
         // 2. Reserva.
         if (!t.ops.some(op => op.kind === 'reserva')) {
@@ -8413,18 +8442,29 @@ class GameEngine {
                     text: `Mandar ${unitsText(size(a))} de ${this.placeName(a.cell)} a ${this.placeName(dest)} (${d.list[j].name}): ${plural(turns, 'turno', 'turnos')}, ${path.some(afloat) ? 'por mar' : 'por tierra'}` });
             }
         }
-        // Agrupaciones, con lo que queda libre: racimos por cercanía (unión de los que están a 2 casillas o menos).
-        const pool = free(), at = new Map(pool.map((a, i) => [a.cell, i])), parent = pool.map((_, i) => i);
-        const root = i => { while (parent[i] !== i) i = parent[i] = parent[parent[i]]; return i; };
-        pool.forEach((a, i) => { for (const x of this.nearCells(a.cell, 2).keys()) { const j = at.get(x); if (j !== undefined && j !== i) parent[root(i)] = root(j); } });
-        const clusters = new Map();
-        pool.forEach((a, i) => { const r = root(i); if (!clusters.has(r)) clusters.set(r, []); clusters.get(r).push(a); });
-        const groups = [...clusters.values()].filter(c => c.length >= 3).sort((x, y) => sum(y) - sum(x) || x[0].id - y[0].id).slice(0, 6);
-        for (const c of groups) {
+        // Agrupaciones, con lo que queda libre: racimos acotados. Cada uno crece desde una semilla (el suelto libre más
+        // fuerte que queda) con los libres a 4 casillas o menos de ella, encadenados a 2 casillas o menos unos de otros:
+        // así un racimo abarca unas 8 casillas como mucho y una cadena larga (fuertes en fila) da varios, no uno enorme.
+        // Sin 3 ejércitos, esa semilla no forma racimo (pero puede entrar en el de otra).
+        const pool = free().sort((x, y) => size(y) - size(x) || x.id - y.id), byCell = new Map(pool.map(a => [a.cell, a])), used = new Set(), clusters = [];
+        for (const seed of pool) {
+            if (used.has(seed.id)) continue;
+            const cand = new Map();
+            for (const x of this.nearCells(seed.cell, 4).keys()) { const a = byCell.get(x); if (a && !used.has(a.id)) cand.set(x, a); }
+            const c = [seed], inC = new Set([seed.cell]);
+            for (let i = 0; i < c.length; i++) for (const x of this.nearCells(c[i].cell, 2).keys()) {
+                const a = cand.get(x);
+                if (a && !inC.has(x)) { inC.add(x); c.push(a); }
+            }
+            if (c.length < 3) continue;
+            for (const a of c) used.add(a.id);
+            clusters.push(c);
+        }
+        const groups = clusters.sort((x, y) => sum(y) - sum(x) || x[0].id - y[0].id).slice(0, 6);
+        for (const c of groups) {   // c[0], la semilla: los demás están a 4 casillas o menos de ella
             for (const a of c) taken.add(a.id);
-            const head = c.reduce((m, a) => (size(a) > size(m) ? a : m));
             piece({ key: `group:${Math.min(...c.map(a => a.id))}`, kind: 'group', armies: c.map(a => a.id), cells: c.map(a => a.cell),
-                text: `Agrupar ${plural(c.length, 'ejército', 'ejércitos')} (${unitsText(sum(c))}) junto a ${this.placeName(head.cell)}` });
+                text: `Agrupar ${plural(c.length, 'ejército', 'ejércitos')} (${unitsText(sum(c))}) junto a ${this.placeName(c[0].cell)}` });
         }
         // En la lista, el orden de la spec: líneas, reserva, agrupaciones y marchas.
         const order = ['line', 'reserve', 'group', 'march'];
@@ -8465,8 +8505,9 @@ class GameEngine {
         }
         return { city, dist: miss === sample.length ? Infinity : dist };
     }
-    // Por qué no se puede aceptar ya una pieza de la propuesta ('' si se puede).
-    pieceWhy(id, piece) {
+    // Por qué no se puede aceptar ya una pieza de la propuesta ('' si se puede). Con `paths` falso no mira si una marcha
+    // sigue teniendo camino (acceptPiece siempre lo mira).
+    pieceWhy(id, piece, { paths = true } = {}) {
         if (this.over) return 'La partida ha terminado';
         if (piece.makesOp && this.opsOf(id).length >= this.commandCap(id)) return 'No caben más operaciones en tu estado mayor';
         const busy = piece.armies.filter(x => { const a = this.armies.get(x); return !a || a.owner !== id || this.armyOn(a.cell) !== a || a.op || a.group || a.form || a.order || a.reinforce; }).length;
@@ -8476,7 +8517,8 @@ class GameEngine {
             if (this.opsOf(id).some(op => op.kind === kind && op.cells.join() === piece.cells.join())) return 'Ya está aceptada';
             if (!piece.cells.every(c => this.owner[c] === id)) return 'Ya no es tu territorio';
         }
-        if (piece.kind === 'march' && piece.armies.some(x => this.orderField(id, piece.dest).to(this.armies.get(x).cell) === Infinity)) return 'Ya no hay camino';
+        // El camino de una marcha puede costar un recorrido grande del mapa: sin `paths` (al dibujar la tarjeta) no se mira.
+        if (paths && piece.kind === 'march' && piece.armies.some(x => this.orderField(id, piece.dest).to(this.armies.get(x).cell) === Infinity)) return 'Ya no hay camino';
         return '';
     }
     // Acepta una pieza de la propuesta: asigna exactamente sus ejércitos y no toca nada más (ni barre los cercanos ni
@@ -12182,7 +12224,7 @@ class MapView {
                 }
                 ctx.strokeStyle = 'rgba(21,26,18,0.85)'; ctx.lineWidth = 4; ctx.stroke(); ctx.strokeStyle = it.color; ctx.lineWidth = 2; ctx.stroke();
                 const m = pts[Math.floor(pts.length / 2)];
-                labels.push({ x: m[0], y: m[1] - Math.max(16, hexPx * 1.4), text: it.name, color: it.color });
+                labels.push({ x: m[0], y: m[1] - Math.max(16, hexPx * 1.4), text: it.name, color: it.color, draft: it.draft });
             } else if (it.kind === 'repliegue') {
                 // La línea de la que sale, discontinua y tenue (o la que tomaría, si es una sugerencia), y la flecha de
                 // repliegue de APP-6: eje discontinuo hacia atrás con la letra W.
@@ -12208,7 +12250,7 @@ class MapView {
                 ctx.beginPath(); ctx.ellipse(x, y, rr * 1.2, rr * 0.9, 0, 0, Math.PI * 2);
                 ctx.fillStyle = it.color; ctx.globalAlpha *= 0.1; ctx.fill(); ctx.globalAlpha = it.dim ? 0.45 : 1;
                 ctx.setLineDash([7, 5]); ctx.strokeStyle = 'rgba(21,26,18,0.8)'; ctx.lineWidth = it.focus ? 7 : 4; ctx.stroke(); ctx.strokeStyle = it.color; ctx.lineWidth = it.focus ? 4 : 2; ctx.stroke(); ctx.setLineDash([]);
-                labels.push({ x, y: y - rr * 0.9 - 9, text: `ZR · ${it.name}`, color: it.color });
+                labels.push({ x, y: y - rr * 0.9 - 9, text: `ZR · ${it.name}`, color: it.color, draft: it.draft });
             }
             // Anillo bajo los ejércitos de la operación. En una punta de lanza o un frente amplio en marcha, la marca de su
             // escalón: la punta (o el frente), anillo entero con un triángulo encima; el seguimiento, anillo a trazos.
@@ -12284,7 +12326,12 @@ class MapView {
             ctx.fillStyle = color; ctx.fill(); ctx.lineWidth = 1.2; ctx.strokeStyle = INK; ctx.stroke();
         }
         ctx.font = font(12, 700); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        // Un rótulo de borrador (propuesto, a trazos) que pisaría a otro ya puesto no se escribe; los demás, siempre.
+        const boxes = [];
         for (const l of labels) {
+            const w = ctx.measureText(l.text).width + 6, box = { x: l.x - w / 2, y: l.y - 9, w, h: 18 };
+            if (l.draft && boxes.some(b => box.x < b.x + b.w && b.x < box.x + box.w && box.y < b.y + b.h && b.y < box.y + box.h)) continue;
+            boxes.push(box);
             ctx.lineWidth = 3.5; ctx.strokeStyle = 'rgba(21,26,18,0.9)'; ctx.strokeText(l.text, l.x, l.y);
             ctx.fillStyle = l.color; ctx.fillText(l.text, l.x, l.y);
         }
@@ -12374,7 +12421,7 @@ class MapView {
     // bajo el ratón (GameUI.draftFocus).
     draftShapes() {
         const dr = this.ui?.draft;
-        if (!dr || this.game.player === null) return [];
+        if (!dr || this.game.player === null || this.ui.draftTheatre() < 0) return [];   // sin su teatro, sin tarjeta: no se dibuja
         return dr.pieces.filter(pc => !dr.decided.has(pc.key)).map(pc => ({ piece: pc, focus: this.ui.draftFocus === pc.key }));
     }
     groupHull(gid) {
@@ -12986,7 +13033,7 @@ class GameUI {
         this.replaying = false;
 
         this.opPreview = null;       // casillas de la línea propuesta bajo el ratón, para verla en el mapa
-        this.draft = null;           // «Proponer organización»: { th, stamp, pieces, decided: Map(clave → 'aceptada'|'descartada') }; no se guarda
+        this.draft = null;           // «Proponer organización»: { th, anchors, stamp, pieces, decided: Map(clave → 'aceptada'|'descartada'), noPath: Set(clave) }; no se guarda
         this.draftFocus = null;      // clave de la pieza del borrador bajo el ratón, más gruesa en el mapa
         document.body.dataset.sheet = ['mini', 'media', 'grande'].includes(this.prefs?.sheet) ? this.prefs.sheet : 'media';
         // Asa de la hoja inferior (móvil): tocarla pasa de mínima a media, a grande y otra vez a mínima; arrastrarla
@@ -13065,6 +13112,7 @@ class GameUI {
             <li><i class="line" style="border-top:3px solid #e3d9c0"></i>Fortificación: sacos terreros; con la rama Fortificación, hormigón (gris), búnkeres (con búnker) y casamatas (muro doble). Rayada: no sabes su nivel</li>
             <li>${galones(2)} Galones bajo la ficha: nivel investigado en la rama de su tipo de tropa. Ficha vacía con II, III, X o XX: ejército sin identificar y su tamaño (batallón 1–3, regimiento 4–9, brigada 10–24, división 25 o más)</li>
             <li>★ capital &nbsp; ● ciudad &nbsp; A rayas: territorio en disputa (ocupado en guerra)</li>
+            <li data-legend-garrison><svg class="nato" viewBox="0 0 26 16" aria-hidden="true"><circle cx="13" cy="8" r="3" fill="#9aa57a" stroke="#151a12" stroke-width="1"/></svg> Punto del color de tu país en una ciudad: una guarnición (casilla Guarniciones de lejos del panel Mapa)</li>
             <li>Terreno (coste de mover, defensa): <span data-legend="terrain"></span></li>
             <li><i class="line" style="border-top:3px solid #4a86a0"></i>Río: <span data-legend="river"></span>; quien defiende tras él, ×${String(CONFIG.RIVER_DEFENSE).replace('.', ',')}</li>
             <li>Ficha con borde rojo: ejército rodeado por 3 o más lados (más débil y más lento)</li>
@@ -13638,6 +13686,24 @@ class GameUI {
                 <p class="note">Listas en ${g.rules(g.player).fortTurns} turnos. No cuentan las que ya están fortificadas o en obras${canFort < forts.length ? '; no te llega el oro para todas' : ''}.</p></section>` : ''}`;
     }
 
+    // Borrador de «Proponer organización» del teatro `th`. Va anclado a casillas, no al índice (los teatros se reordenan por
+    // tamaño): la capital, si es la metrópoli, y las ciudades propias del teatro.
+    newDraft(th) {
+        const g = this.game, p0 = g.player, t = g.theatres(p0)[th];
+        if (!t) return null;
+        const cities = t.provinces.map(pid => PROVINCES[pid].city).filter(c => g.owner[c] === p0);
+        const anchors = [...(t.capital ? [g.nations[p0].capitalCell] : []), ...cities];
+        if (!anchors.length) anchors.push(t.cells.values().next().value);
+        return { ...g.proposeOrganization(p0, th), anchors, decided: new Map(), noPath: new Set() };
+    }
+    // Índice del teatro del borrador ahora: el de su primera casilla de anclaje que siga siendo tuya; −1 sin borrador o si
+    // ya no tienes ninguna (su teatro se perdió).
+    draftTheatre() {
+        const g = this.game, dr = this.draft;
+        if (!dr || g.player === null) return -1;
+        const c = dr.anchors.find(x => g.owner[x] === g.player);
+        return c === undefined ? -1 : g.theatreOf(g.player, c);
+    }
     // Doctrina recomendada para la ofensiva que se está dibujando (D1): la de draftDoctrine con sus puntos, guardada mientras
     // no cambien los puntos, el turno ni los ejércitos.
     draftRec() {
@@ -14703,21 +14769,26 @@ class GameUI {
             case 'th-propose':
             case 'th-refresh':
                 if (g.over || g.player === null || !g.theatres(g.player)[+d.th]) return;
-                this.draft = { ...g.proposeOrganization(g.player, +d.th), decided: new Map() };
+                this.draft = this.newDraft(+d.th);
                 this.draftFocus = null;
                 break;
+            // Al aceptar se miran también los caminos de las marchas (la tarjeta no los recalcula en cada dibujo); la que
+            // ya no tiene camino queda apuntada en noPath y la fila lo dice.
             case 'th-accept':
             case 'th-accept-all': {
                 const dr = this.draft;
-                if (!dr) return;
+                if (!dr || this.draftTheatre() < 0) return;
                 const fresh = dr.stamp === g.theatreData(g.player).key;
-                let n = 0;
+                let n = 0, why = '';
                 for (const pc of dr.pieces) {
-                    if (dr.decided.has(pc.key) || (d.action === 'th-accept' && pc.key !== d.key) || g.pieceWhy(g.player, pc)) continue;
+                    if (dr.decided.has(pc.key) || (d.action === 'th-accept' && pc.key !== d.key)) continue;
+                    const w = g.pieceWhy(g.player, pc);
+                    if (pc.kind === 'march') { if (w === 'Ya no hay camino') dr.noPath.add(pc.key); else dr.noPath.delete(pc.key); }
+                    if (w) { why = w; continue; }
                     if (g.acceptPiece(g.player, pc)) { dr.decided.set(pc.key, 'aceptada'); n++; }
                 }
                 if (n && fresh) dr.stamp = g.theatreData(g.player).key;
-                if (!n && d.action === 'th-accept') this.flash('No se pudo aceptar esa pieza.');
+                if (!n && d.action === 'th-accept') this.flash(why ? `No se pudo aceptar: ${why[0].toLowerCase() + why.slice(1)}.` : 'No se pudo aceptar esa pieza.');
                 break;
             }
             case 'th-discard': if (this.draft?.pieces.some(pc => pc.key === d.key)) this.draft.decided.set(d.key, 'descartada'); break;
@@ -16346,10 +16417,14 @@ class GameUI {
             ${this.templatesSection()}`;
     }
     // Sección «Teatros» de la pestaña Mando: el aviso de reparto (si hay a la vez un teatro muy defendido y uno poco
-    // defendido) y una tarjeta por teatro. Sin teatros, nada.
+    // defendido) y una tarjeta por teatro. Sin teatros, nada. El borrador de «Proponer organización» va en la tarjeta de su
+    // teatro (draftTheatre); si ya no tiene, bajo el título, solo con «Cerrar».
     theatreSection() {
-        const g = this.game, p0 = g.player, th = g.theatres(p0);
-        if (!th.length) return '';
+        const g = this.game, p0 = g.player, th = g.theatres(p0), dth = this.draftTheatre();
+        const lost = this.draft && dth < 0 ? `<div class="th-draft" data-draft><b class="small">Propuesta de organización</b>
+            <p class="small warn-text">Su teatro ya no es tuyo: la propuesta ya no vale.</p>
+            <div class="row"><button class="btn ghost" data-action="th-close">Cerrar</button></div></div>` : '';
+        if (!th.length) return lost ? `<p class="group-title">Teatros</p>${lost}` : '';
         const bal = g.troopBalance(p0), pct = x => `${Math.round(100 * x)} %`;
         let warn = '';
         if (bal.over.length && bal.under.length) {
@@ -16365,17 +16440,17 @@ class GameUI {
                 : 'Sin frontera con países que no sean aliados.';
             return `<div class="bloc th-card" data-theatre="${t.idx}">
                 <b>${esc(t.name)}</b>
-                <p class="small">${plural(t.provinces.length, 'provincia', 'provincias')} · ${plural(t.armies.length, 'ejército', 'ejércitos')} · ${plural(t.units, 'unidad', 'unidades')} · ${plural(t.garrisons.length, 'guarnición', 'guarniciones')}</p>
+                <p class="small">${plural(t.provinces.length, 'provincia', 'provincias')} · ${plural(t.armies.length, 'ejército', 'ejércitos')} · ${thousands(t.units)} ${t.units === 1 ? 'unidad' : 'unidades'} · ${plural(t.garrisons.length, 'guarnición', 'guarniciones')}</p>
                 <p class="small">${t.ops.length ? `Operaciones: ${t.ops.map(op => `«${esc(op.name)}»`).join(', ')}` : '<span class="muted">Sin operaciones.</span>'}</p>
                 <p class="small">${border}</p>
                 <div class="row"><span class="small">Sin encargo: ${t.idle.length}</span>
                     <button class="btn" data-action="th-pick" data-th="${t.idx}" ${t.idle.length ? '' : 'disabled'} title="Los pone en la selección y centra el mapa en ellos">Elegirlos</button>
                     <button class="btn" data-action="th-goto" data-th="${t.idx}">Ver</button>
                     <button class="btn" data-action="th-propose" data-th="${t.idx}">Proponer organización</button></div>
-                ${this.draft?.th === t.idx ? this.draftBlock(t) : ''}
+                ${dth === t.idx ? this.draftBlock(t) : ''}
             </div>`;
         };
-        return `<p class="group-title">Teatros</p>${warn}${th.map(card).join('')}`;
+        return `<p class="group-title">Teatros</p>${lost}${warn}${th.map(card).join('')}`;
     }
     // Borrador de «Proponer organización» en la tarjeta de su teatro: una fila por pieza (icono, frase y Aceptar/Descartar,
     // o su estado si ya está decidida; Aceptar desactivado con el motivo si no se puede), los vecinos tranquilos que quedan a
@@ -16393,7 +16468,7 @@ class GameUI {
             return `<span class="ob-sym"><small>${echelonOf(countUnits(u)).mark}</small>${unitIcon(dominantType(u), color)}</span>`;
         };
         const rows = dr.pieces.map(pc => {
-            const done = dr.decided.get(pc.key), why = done ? '' : g.pieceWhy(p0, pc);
+            const done = dr.decided.get(pc.key), why = done ? '' : g.pieceWhy(p0, pc, { paths: false }) || (dr.noPath.has(pc.key) ? 'Ya no hay camino' : '');
             return `<div class="th-piece ${done ? 'done' : ''}" data-piece="${esc(pc.key)}">
                 <span class="th-ico" title="${{ line: 'Línea de defensa', reserve: 'Reserva', group: 'Agrupación', march: 'Marcha' }[pc.kind]}">${icon(pc)}</span>
                 <span class="small">${esc(pc.text)}.${why ? ` <span class="warn-text">${esc(why)}.</span>` : ''}</span>
@@ -16561,11 +16636,12 @@ class GameUI {
         const opts = [['auto', `Automática: ${tpl.auto ? tpl.name : g.templateOf(g.player, g.suggestTemplate(op).key).name}`],
             ...Object.entries(TEMPLATES).map(([k, t]) => [k, t.name]), ...n.templates.map((t, i) => [`c${i}`, `${t.name} (propia)`])];
         // Con una plantilla elegida, antes de formar se completa a los que ya están (lo que falta y lo que va de camino).
-        const need = g.opFillNeed(op), coming = [...g.fillComing(op).values()].reduce((s, u) => s + countUnits(u), 0);
-        const fill = need.size ? `Completando ${plural(need.size, 'ejército', 'ejércitos')} hasta ${esc(tpl.name)}: faltan ${plural([...need.values()].reduce((s, u) => s + countUnits(u), 0), 'unidad', 'unidades')} (${coming} en camino). `
+        // Los que no tienen ninguna ciudad propia que llegue hasta ellos no paran las formaciones nuevas.
+        const need = g.opFillNeed(op), coming = [...g.fillComing(op).values()].reduce((s, u) => s + countUnits(u), 0), cut = g.fillUnreachable(op, need).size;
+        const fill = need.size ? `Completando ${plural(need.size, 'ejército', 'ejércitos')} hasta ${esc(tpl.name)}: faltan ${plural([...need.values()].reduce((s, u) => s + countUnits(u), 0), 'unidad', 'unidades')}${coming ? ` (${coming} en camino)` : ''}${cut ? `; ${cut} sin ciudad que llegue hasta ${cut === 1 ? 'él' : 'ellos'}` : ''}. `
             : coming ? `${plural(coming, 'unidad', 'unidades')} en camino para completar a sus ejércitos. ` : '';
         const status = pr ? `Formando ${esc(op.form.name.toLowerCase())} en ${esc(g.placeName(op.form.zone))}: ${pr.done} de ${pr.total} reclutadas${pr.waiting ? `, ${pr.waiting} salen el turno que viene` : ''}${pr.moving ? `, ${pr.moving} en camino` : ''}${pr.ready ? `, ${pr.ready} en la zona` : ''}.`
-            : !op.gold ? 'Sin oro para refuerzos.' : need.size ? 'Cuando estén todos completos, empezará a formar otros nuevos.' : 'La primera formación empieza al terminar el turno.';
+            : !op.gold ? 'Sin oro para refuerzos.' : need.size > cut ? 'Cuando estén todos completos, empezará a formar otros nuevos.' : 'La primera formación empieza al terminar el turno.';
         return `<p class="group-title">Refuerzos</p>
             <div class="seg">${OP_GOLD.map(v => `<button data-action="op-set" data-id="${op.id}" data-key="gold" data-value="${v}" class="${op.gold === v ? 'on' : ''}">${v ? `${v}` : 'Nada'}</button>`).join('')}</div>
             <p class="note">Oro por turno, de tus ${g.income(g.player)} de renta${op.gold > g.income(g.player) ? ' (más de lo que ingresas: tirará del tesoro)' : ''}. ${op.gold ? `Una ${esc(tpl.name.toLowerCase())} (${cost} de oro) cada unos ${Math.ceil(cost / op.gold)} turnos.` : ''}</p>
