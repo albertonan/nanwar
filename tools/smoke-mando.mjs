@@ -519,6 +519,204 @@ const CHECKS = [
         T.ok([...document.querySelectorAll(`[data-op-template="${op.id}"] option`)].some(o => o.value === 'c0'), 'y elegible en la operación');
         return true;
     }],
+    // Anexo de Teatros: con una plantilla elegida, la operación completa primero a los ejércitos que ya tiene.
+    ['Plantillas · la plantilla elegida de una línea completa a los ejércitos que ya tiene', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        g.nations[es].gold = 20000;
+        const [nb, from] = T.plainPair(g, es);
+        T.ok(g.playerSaveTemplate('DefensaTotal', { infantry: 4, tank: 0, artillery: 2 }), 'plantilla propia');
+        const op = g.createOp(es, 'defensa', [nb, from]);
+        const ms = [T.army(g, es, nb, 1), T.army(g, es, from, 1)];
+        for (const a of ms) g.assignArmy(a, op.id);
+        g.playerOpSet(op, 'template', 'c0');
+        op.gold = 3200;
+        const full = () => ms.every(a => g.armies.has(a.id) && a.units.infantry >= 4 && a.units.artillery >= 2);
+        let n = 0;
+        while (!full() && n < 40) {
+            g.beginNationTurn(es); T.turns(g, es, 1); n++;
+            if (g.opFillNeed(op).size) T.ok(!op.form && !op.formed, `turno ${n}: ninguna formación mientras a alguno le falte algo`);
+        }
+        T.ok(full(), `los dos completos en ${n} turnos: ${ms.map(a => unitText(a.units)).join(' / ')}`);
+        T.eq(g.opFillNeed(op).size, 0, 'ya no falta nada');
+        return true;
+    }],
+    ['Plantillas · con poco oro, primero los miembros; la formación espera', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        g.nations[es].gold = 20000;
+        const [nb, from] = T.plainPair(g, es);
+        T.ok(g.playerSaveTemplate('DefensaTotal', { infantry: 4, tank: 0, artillery: 2 }), 'plantilla propia');
+        const op = g.createOp(es, 'defensa', [nb, from]);
+        const ms = [T.army(g, es, nb, 1), T.army(g, es, from, 1)];
+        for (const a of ms) g.assignArmy(a, op.id);
+        g.playerOpSet(op, 'template', 'c0');
+        op.gold = 100;
+        const missing = () => [...g.opFillNeed(op).values()].reduce((s, u) => s + countUnits(u), 0);
+        T.eq(missing(), 10, 'faltan 3 infanterías y 2 artillerías a cada uno');
+        for (let n = 1; n <= 3; n++) {
+            g.beginNationTurn(es); T.turns(g, es, 1);
+            T.ok(missing() > 0 && missing() < 10, `turno ${n}: va completando (faltan ${missing()})`);
+            T.ok(!op.form && !op.formed, `turno ${n}: sin formación mientras falta algo`);
+        }
+        const coming = [...g.fillComing(op).entries()];
+        T.ok(coming.length === 2 && coming.every(([, u]) => countUnits(u) > 0), 'reclutas para los dos, por turnos');
+        return true;
+    }],
+    ['Plantillas · con la plantilla automática no se completa a nadie', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        g.nations[es].gold = 20000;
+        const [nb, from] = T.plainPair(g, es);
+        const op = g.createOp(es, 'defensa', [nb, from]);
+        const ms = [T.army(g, es, nb, 1), T.army(g, es, from, 1)];
+        for (const a of ms) g.assignArmy(a, op.id);
+        op.template = 'auto'; op.gold = 3200;
+        T.eq(g.opFillNeed(op).size, 0, 'nada que completar');
+        g.beginNationTurn(es); T.turns(g, es, 1);
+        T.eq(ms.map(a => countUnits(a.units)), [1, 1], 'siguen con una infantería');
+        T.ok(op.form && countUnits(op.form.recruited) > 0, 'lo reclutado es una formación');
+        T.ok(![...g.armies.values()].some(a => a.rein === `o${op.id}`), 'sin reclutas para los miembros');
+        return true;
+    }],
+    ['Plantillas · completos los miembros, lo que sobra va a formaciones', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        g.nations[es].gold = 20000;
+        const [nb, from] = T.plainPair(g, es);
+        T.ok(g.playerSaveTemplate('DefensaTotal', { infantry: 4, tank: 0, artillery: 2 }), 'plantilla propia');
+        const op = g.createOp(es, 'defensa', [nb, from]);
+        const ms = [T.army(g, es, nb, 5, 0, 2), T.army(g, es, from, 4, 1, 2)];
+        for (const a of ms) g.assignArmy(a, op.id);
+        g.playerOpSet(op, 'template', 'c0');
+        op.gold = 3200;
+        T.eq(g.opFillNeed(op).size, 0, 'nada que completar (lo de más no cuenta)');
+        g.beginNationTurn(es); T.turns(g, es, 1);
+        T.ok(op.form && op.form.name === 'DefensaTotal' && countUnits(op.form.recruited) > 0, 'forma una nueva, como hasta ahora');
+        T.eq(ms.map(a => unitText(a.units)), [unitText({ infantry: 5, tank: 0, artillery: 2 }), unitText({ infantry: 4, tank: 1, artillery: 2 })], 'a nadie se le quita nada');
+        T.eq(op.fill ?? null, null, 'sin nada pendiente');
+        return true;
+    }],
+    ['Plantillas · se guarda lo que va de camino', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        g.nations[es].gold = 20000;
+        // Una casilla lejos de sus ciudades, para que los reclutas tarden en llegar.
+        const steps = g.field(es, PROVINCES.filter(p => g.owner[p.city] === es).map(p => p.city));
+        const cell = G.land.find(c => g.owner[c] === es && T.free(g, c) && steps[c] >= 4 && steps[c] < 1e9
+            && [0, 1, 2, 3, 4, 5].some(d => { const j = G.nb[c * 6 + d]; return j >= 0 && T.free(g, j) && g.owner[j] === es; }));
+        T.ok(cell !== undefined, 'casilla lejos de las ciudades');
+        const nb = [0, 1, 2, 3, 4, 5].map(d => G.nb[cell * 6 + d]).find(j => j >= 0 && T.free(g, j) && g.owner[j] === es);
+        T.ok(g.playerSaveTemplate('DefensaTotal', { infantry: 4, tank: 0, artillery: 2 }), 'plantilla propia');
+        const op = g.createOp(es, 'defensa', [nb, cell]);
+        for (const c of [nb, cell]) g.assignArmy(T.army(g, es, c, 1), op.id);
+        g.playerOpSet(op, 'template', 'c0');
+        op.gold = 3200;
+        const marks = x => [...x.armies.values()].filter(a => a.rein === `o${op.id}`).map(a => a.id).sort((p, q) => p - q);
+        g.beginNationTurn(es); T.turns(g, es, 1);
+        T.ok(op.fill?.pending.length > 0, 'reclutas esperando en sus ciudades');
+        let h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+        T.eq(h.ops.get(op.id).fill?.pending, op.fill.pending, 'lo que espera se guarda');
+        g.beginNationTurn(es); T.turns(g, es, 1);
+        T.ok(marks(g).length > 0, 'reclutas en marcha hacia los miembros');
+        h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+        T.eq(marks(h), marks(g), 'los que marchan siguen siendo refuerzos de la operación');
+        T.eq(h.ops.get(op.id).fill?.pending ?? null, op.fill?.pending ?? null, 'y lo que espera');
+        T.eq(h.opFillNeed(h.ops.get(op.id)).size, g.opFillNeed(op).size, 'la cuenta de lo que falta es la misma');
+        return true;
+    }],
+    ['Plantillas · si un miembro deja la operación, sus reclutas van a otro; sin operación, quedan sueltos', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        g.nations[es].gold = 20000;
+        const steps = g.field(es, PROVINCES.filter(p => g.owner[p.city] === es).map(p => p.city));
+        const cell = G.land.find(c => g.owner[c] === es && T.free(g, c) && steps[c] >= 4 && steps[c] < 1e9
+            && [0, 1, 2, 3, 4, 5].some(d => { const j = G.nb[c * 6 + d]; return j >= 0 && T.free(g, j) && g.owner[j] === es; }));
+        const nb = [0, 1, 2, 3, 4, 5].map(d => G.nb[cell * 6 + d]).find(j => j >= 0 && T.free(g, j) && g.owner[j] === es);
+        T.ok(g.playerSaveTemplate('DefensaTotal', { infantry: 4, tank: 0, artillery: 2 }), 'plantilla propia');
+        const op = g.createOp(es, 'defensa', [nb, cell]);
+        const [m1, m2] = [nb, cell].map(c => T.army(g, es, c, 1));
+        for (const a of [m1, m2]) g.assignArmy(a, op.id);
+        g.playerOpSet(op, 'template', 'c0');
+        op.gold = 3200;
+        g.beginNationTurn(es); T.turns(g, es, 1);
+        g.beginNationTurn(es); T.turns(g, es, 1);
+        const rein = () => [...g.armies.values()].filter(a => a.rein === `o${op.id}`);
+        T.ok(rein().some(a => a.order?.target === m2.id), 'reclutas en marcha hacia el segundo');
+        g.assignArmy(m2, 0);
+        g.beginNationTurn(es); T.turns(g, es, 1);
+        T.ok(rein().length && rein().every(a => a.order?.kind === 'join' && a.order.target === m1.id), 'ahora van al que queda');
+        T.ok(![...(op.fill?.pending ?? [])].some(([, , to]) => to === m2.id), 'y lo que esperaba, también');
+        const loose = rein();
+        g.endOp(op);
+        T.ok(loose.every(a => !a.rein && (!g.armies.has(a.id) || a.order?.kind === 'join')), 'sin operación, sueltos con su orden');
+        return true;
+    }],
+    ['Plantillas · la ficha de la operación dice a cuántos completa', () => {
+        const g = T.uiStart('es'), es = g.player;
+        g.nations[es].gold = 20000;
+        const [nb, from] = T.plainPair(g, es);
+        T.ok(g.playerSaveTemplate('DefensaTotal', { infantry: 4, tank: 0, artillery: 2 }), 'plantilla propia');
+        const op = g.playerCreateOp('defensa', [nb, from]);
+        for (const c of [nb, from]) g.assignArmy(T.army(g, es, c, 1), op.id);
+        g.playerOpSet(op, 'template', 'c0');
+        g.playerOpSet(op, 'gold', 3200);
+        ui.focusOp = op.id; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        const text = document.querySelector('#drawer-body').textContent;
+        T.ok(text.includes('Completando 2 ejércitos hasta DefensaTotal: faltan 10 unidades'), `lo dice: ${text.slice(text.indexOf('Refuerzos'), text.indexOf('Refuerzos') + 400)}`);
+        return true;
+    }],
+    ['Plantillas · un miembro al que no llega ninguna ciudad no para las formaciones', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+        g.start(es);
+        g.nations[es].gold = 20000;
+        T.ok(g.playerSaveTemplate('DefensaTotal', { infantry: 4, tank: 0, artillery: 2 }), 'plantilla propia');
+        // Uno completo y otro aislado: sus seis vecinas pasan a Francia, en paz, así que no hay paso hasta él.
+        const [, walled] = T.plainPair(g, es);
+        let k = 1, nb, from;
+        do [nb, from] = T.plainPair(g, es, k++); while (hexDist(from, walled) < 4 || hexDist(nb, walled) < 4);
+        const op = g.createOp(es, 'defensa', [nb, from]);
+        const cut = T.army(g, es, walled, 1), full = T.army(g, es, from, 4, 0, 2);
+        for (const a of [cut, full]) g.assignArmy(a, op.id);
+        for (let d = 0; d < 6; d++) { const j = G.nb[walled * 6 + d]; g.owner[j] = fr; g.legal[j] = fr; }
+        g.version++;
+        g.playerOpSet(op, 'template', 'c0');
+        op.gold = 3200;
+        T.eq([...g.opFillNeed(op).keys()], [cut.id], 'al aislado le falta');
+        T.eq([...g.fillUnreachable(op)], [cut.id], 'y no le llega ninguna ciudad');
+        g.beginNationTurn(es); T.turns(g, es, 1);
+        T.ok(op.form && countUnits(op.form.recruited) > 0, 'la formación empieza igual');
+        T.eq(countUnits(cut.units), 1, 'el aislado sigue igual');
+        T.eq(op.fill ?? null, null, 'sin reclutas para él');
+        return true;
+    }],
+    ['Plantillas · el que tiene su propio Reforzar, o lo tiene su agrupación, no se completa dos veces', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        g.nations[es].gold = 20000;
+        T.ok(g.playerSaveTemplate('DefensaTotal', { infantry: 4, tank: 0, artillery: 2 }), 'plantilla propia');
+        const [nb, from] = T.plainPair(g, es);
+        let k = 1, nb2, from2;
+        do [nb2, from2] = T.plainPair(g, es, k++); while (hexDist(from2, from) < 4);
+        const op = g.createOp(es, 'defensa', [nb, from]);
+        const own = T.army(g, es, nb, 1), plain = T.army(g, es, from, 1), gs = [nb2, from2].map(c => T.army(g, es, c, 1));
+        for (const a of [own, plain, ...gs]) g.assignArmy(a, op.id);
+        const gr = g.createGroup(es, gs.map(a => a.id));
+        T.ok(gr, 'la agrupación');
+        T.ok(g.setReinforce(es, { army: own.id }, { mode: 'tpl', tpl: 'c0', gold: 400 }), 'Reforzar del ejército');
+        T.ok(g.setReinforce(es, { group: gr.id }, { mode: 'tpl', tpl: 'c0', gold: 400 }), 'Reforzar de la agrupación');
+        g.playerOpSet(op, 'template', 'c0');
+        op.gold = 3200;
+        T.eq([...g.opFillNeed(op).keys()], [plain.id], 'solo cuenta el que no tiene su propio refuerzo');
+        const skip = new Set([own.id, ...gs.map(a => a.id)]);
+        for (let n = 1; n <= 3; n++) {
+            g.beginNationTurn(es); T.turns(g, es, 1);
+            T.ok(![...(op.fill?.pending ?? [])].some(([, , to]) => skip.has(to)), `turno ${n}: la operación no recluta para ellos`);
+            T.ok(![...g.armies.values()].some(a => a.rein === `o${op.id}` && skip.has(a.order?.target)), `turno ${n}: ni marchan reclutas suyos hacia ellos`);
+        }
+        T.ok(g.fillComing(op).has(plain.id) || countUnits(plain.units) > 1, 'al otro sí lo completa');
+        return true;
+    }],
     ['F4 · la postura fija la ventaja de las ofensivas nuevas y el reparto del presupuesto', () => {
         const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
         g.start(es);

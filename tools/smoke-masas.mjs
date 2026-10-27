@@ -822,7 +822,7 @@ const CHECKS = [
         const body = $('#drawer-body');
         T.ok(body.querySelector(`[data-ob-group="${gr.id}"]`), 'la agrupación sale');
         T.ok(body.textContent.includes('3 ejércitos') && body.textContent.includes('Sin agrupar'), `texto: ${body.textContent.slice(0, 200)}`);
-        const own = [...g.armies.values()].filter(a => a.owner === es).length;
+        const own = [...g.armies.values()].filter(a => a.owner === es && !g.isGarrison(a)).length;   // las guarniciones van en su fila plegada
         T.eq(body.querySelectorAll('[data-ob-army]').length, own - 3, 'sin desplegar: solo los sueltos');
         body.querySelector('[data-action="ob-toggle"]').click();
         T.eq($('#drawer-body').querySelectorAll('[data-ob-army]').length, own, 'desplegada: sus tres ejércitos también');
