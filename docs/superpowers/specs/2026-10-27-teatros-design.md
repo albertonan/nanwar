@@ -254,3 +254,26 @@ Un archivo nuevo, `tools/smoke-teatros.mjs`, con el mismo arnés que `smoke-mand
 - La estructura del borrador en el mapa: puede ampliar `ui.opPreview` a una lista de piezas o reutilizar el dibujo de `ui.proposal.ghost` para las marchas.
 - Cómo se generaliza `frontPlan`/`lineDir` para la paz sin cambiar sus resultados en guerra; las pruebas de `smoke-mando` y `smoke-masas` siguen pasando.
 - Las rutas exactas del README: una sección «Teatros» en «Mando estratégico» y una línea en «Mando de masas» sobre las guarniciones.
+
+## Anexo: la plantilla de una operación vale para todos sus ejércitos
+
+### Por qué
+
+El jugador, el mismo día: «cuando hago una línea defensiva … coge ejércitos de alrededor, pero no me los rellena según yo le he dicho … le he dicho que quiero DefensaTotal como ejército. Y solo los nuevos me los hace así. Tienen que cumplir todos esto.»
+
+Hoy, una operación con oro y plantilla solo recluta formaciones nuevas completas de esa plantilla (`reinforceBegin`, `recruitOne`, `reinforceEnd`) y las manda a su zona de reunión. Los ejércitos que ya están en la operación no se completan nunca.
+
+### Qué cambia
+
+- **Cuándo se aplica:** a una operación del jugador con una plantilla **elegida** (`op.template !== 'auto'`) y oro por turno (o un refuerzo de una vez, `op.extra`). Con la plantilla automática, todo sigue como hoy *(mi decisión: la sugerida cambia con el terreno, y completar con ella sería decidir por el jugador)*.
+- **Primero, los que ya están.**
+  - Cada miembro (`opMembers`) al que le falte algo de la plantilla se completa: por tipo, `max(0, plantilla[k] − tiene[k] − lo que ya va de camino a él)`.
+  - Se recluta por rondas, una unidad cada vez, empezando por el miembro al que más le falta, con el fondo de la operación (`op.pool`) y sin tocar lo apartado para el arsenal.
+  - Cada recluta sale en la ciudad con cupo más cercana a ese miembro que tenga camino hasta él. Al turno siguiente va a unirse a él con una orden `join`, como los refuerzos de un ejército («Reforzar», A7).
+  - Si el miembro está en esa misma ciudad, el recluta se funde con él al momento.
+- **Después, formaciones nuevas.** Solo cuando a ningún miembro le falta nada (contando lo que va de camino), lo que sobra del fondo va a formaciones nuevas, como hoy.
+- **Lo que sobra:** a nadie se le quita nada que tenga de más.
+- **Cuando un miembro deja de serlo:** si sale de la operación o desaparece, los reclutas que iban hacia él se unen al miembro más cercano. Si no queda ninguno, quedan sueltos, con la orden que lleven.
+- **La IA:** sus operaciones usan la plantilla automática, así que no cambia.
+- **El parte y la ficha:** la sección de refuerzos de la operación dice «Completando N ejércitos hasta <plantilla>: faltan X unidades (Y en camino)» antes del estado de la formación. El parte del turno cuenta lo reclutado para completar.
+- **Guardar y cargar:** lo que espera en una ciudad y los reclutas en marcha se guardan, como los refuerzos de A7.
