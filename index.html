@@ -1353,6 +1353,8 @@ const echelonMid = n => ECHELON_MID[ECHELONS.indexOf(echelonOf(n))];
 // distintos de los de las operaciones y de los de los países). Esperan 3 turnos a un miembro que no llega al ataque.
 const GROUP_COLORS = ['#6fb7a6', '#7f97bd', '#8c7bb5', '#d496a7', '#c27d5a', '#c9a46a', '#a8ad5e', '#86ab8c'];
 const GROUP_MAX = 99, GROUP_WAIT = 3;
+// Guarnición: ejército de este tamaño o menos, quieto en su ciudad. De lejos no se dibuja como ficha (Teatros).
+const GARRISON_MAX = 5;
 // Nombre de cada escalón para una agrupación, con su género: «1.ª División», «1.er Cuerpo de ejército».
 const GROUP_NOUNS = [['Batallón', 'm'], ['Regimiento', 'm'], ['Brigada', 'f'], ['División', 'f'], ['Cuerpo de ejército', 'm'], ['Ejército', 'm'], ['Grupo de ejércitos', 'm']];
 // Ordinal abreviado: femenino «3.ª»; masculino «2.º», y apocopado «1.er», «3.er», «21.er» (pero «11.º», undécimo).
@@ -5521,6 +5523,23 @@ class GameEngine {
             if (id && this.atWar(owner, this.armies.get(id).owner)) t += 4;
         }
         return t;
+    }
+    // ¿Hay un ejército de un país en guerra con `owner` a `k` casillas o menos de `cell` (en tierra o en el mar)?
+    foeArmyNear(owner, cell, k) {
+        for (const c of this.nearCells(cell, k).keys()) {
+            const id = this.armyAt[c];
+            if (id && this.atWar(owner, this.armies.get(id).owner)) return true;
+        }
+        return false;
+    }
+    // Guarnición (solo del jugador): ejército pequeño y quieto en una ciudad suya, sin operación, agrupación, formación, refuerzo ni
+    // otra orden que «Mantener», y sin ejército enemigo a 2 casillas. Se calcula cada vez, nunca se guarda.
+    isGarrison(a) {
+        if (!a || a.owner !== this.player || a.op || a.group || a.form || a.reinforce) return false;
+        if (a.order && a.order.kind !== 'hold') return false;
+        if (CITY_OF[a.cell] < 0 || afloat(a.cell) || this.owner[a.cell] !== a.owner) return false;
+        if (countUnits(a.units) > GARRISON_MAX) return false;
+        return !this.foeArmyNear(a.owner, a.cell, 2);
     }
     // --- Franja de una línea de defensa: de qué lado está el enemigo, quién aprieta y si la han roto ---
     // Defensa que da una casilla a su dueño: terreno, ciudad, capital y fortificación propia, con el tope del combate.
