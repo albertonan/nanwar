@@ -1474,6 +1474,26 @@ const CHECKS = [
         T.ok(!document.querySelector('#drawer-body [data-action="op-launch-all"]'), 'y el botón desaparece');
         return true;
     }],
+    ['Mando · un cambio en la pestaña no devuelve el panel arriba; cambiar de pestaña, sí', () => {
+        T.uiStart('es');
+        document.head.insertAdjacentHTML('beforeend', '<style id="t-short">#drawer-body { max-height: 200px; }</style>');   // que haya scroll
+        ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+        const body = () => document.querySelector('#drawer-body');
+        const max = body().scrollHeight - body().clientHeight;
+        T.ok(max > 40, `el panel tiene scroll (${max})`);
+        body().scrollTop = max;
+        const at = body().scrollTop;
+        document.querySelector('#drawer-body [data-action="cmd"][data-key="posture"]:not(.on)').click();
+        T.eq(body().scrollTop, at, 'tras cambiar la postura sigue donde estaba');
+        ui.render();
+        T.eq(body().scrollTop, at, 'y tras otro redibujo');
+        document.querySelector('#drawer [data-action="tab"][data-tab="batalla"]').click();
+        T.eq(body().scrollTop, 0, 'otra pestaña empieza arriba');
+        document.querySelector('#drawer [data-action="tab"][data-tab="mando"]').click();
+        T.eq(body().scrollTop, 0, 'y al volver, también');
+        document.querySelector('#t-short').remove();
+        return true;
+    }],
     ['Mapa · vista y capas en un solo panel, recordadas en el dispositivo', () => {
         const g = T.uiStart('es');
         const key = k => document.dispatchEvent(new KeyboardEvent('keydown', { key: k }));
