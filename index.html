@@ -5570,15 +5570,16 @@ class GameEngine {
         return e ? ECHELONS[e - 1].max + 1 : 1;
     }
     // Hacia dónde queda el enemigo de una línea: del centro de sus casillas al de la tierra enemiga a 6 casillas o menos.
-    // null si no hay enemigo cerca. Se guarda por trazado y turno.
-    lineDir(owner, cells) {
-        const key = `${this.turn}:${this.version}:${owner}:${cells.length}:${cells[0]}:${cells[cells.length - 1]}`;
+    // null si no hay enemigo cerca. Se guarda por trazado y turno. Con `toward` (un vecino en paz, para «Proponer
+    // organización»), apunta a la tierra de ese país a 6 casillas o menos en vez de a la de los países en guerra.
+    lineDir(owner, cells, toward = -1) {
+        const key = `${this.turn}:${this.version}:${owner}:${cells.length}:${cells[0]}:${cells[cells.length - 1]}${toward >= 0 ? `:p${toward}` : ''}`;
         if ((this._dirs ??= new Map()).has(key)) return this._dirs.get(key);
         let lx = 0, ly = 0, ex = 0, ey = 0, n = 0;
-        const seen = new Set();
+        const seen = new Set(), foe = toward >= 0 ? o => o === toward : o => this.atWar(owner, o);
         for (const c of cells) {
             lx += G.cx[c]; ly += G.cy[c];
-            for (const x of this.nearCells(c, 6).keys()) if (!seen.has(x) && isLand(x)) { seen.add(x); if (this.atWar(owner, this.owner[x])) { ex += G.cx[x]; ey += G.cy[x]; n++; } }
+            for (const x of this.nearCells(c, 6).keys()) if (!seen.has(x) && isLand(x)) { seen.add(x); if (foe(this.owner[x])) { ex += G.cx[x]; ey += G.cy[x]; n++; } }
         }
         let dir = null;
         if (n) {
@@ -7994,11 +7995,15 @@ class GameEngine {
     // Plan para el frente con `e`: una línea de defensa sobre el tramo de frontera por donde aprieta (sus ejércitos a 3
     // casillas o menos, con 2 de margen a cada lado; si no hay ninguno, frente a su ciudad más cercana), llevada al mejor
     // terreno a 3 casillas o menos, y una ofensiva sobre esa ciudad. El resto del frente queda a las guarniciones.
-    frontPlan(id, e) {
-        const key = `${this.turn}:${this.version}:${this.armyVersion}:${id}:${e}`;
+    // Para «Proponer organización»: con `peace`, `e` es un vecino en paz (la línea mira a su tierra y el tramo se busca con
+    // sus ejércitos visibles, sin las guarniciones de sus ciudades); con `th` (índice de teatro), solo la frontera de ese
+    // teatro. Sin ellos, el plan de siempre.
+    frontPlan(id, e, { peace = false, th = -1 } = {}) {
+        const key = `${this.turn}:${this.version}:${this.armyVersion}:${id}:${e}${peace ? ':paz' : ''}${th >= 0 ? `:t${th}` : ''}`;
         if ((this._plans ??= new Map()).has(key)) return this._plans.get(key);
         if (this._plans.size > 200) this._plans.clear();
-        const border = G.land.filter(c => this.owner[c] === id && [0, 1, 2, 3, 4, 5].some(d => { const j = G.nb[c * 6 + d]; return j >= 0 && isLand(j) && this.owner[j] === e; }));
+        const cells = th >= 0 ? this.theatres(id)[th]?.cells : null;
+        const border = G.land.filter(c => this.owner[c] === id && (!cells || cells.has(c)) && [0, 1, 2, 3, 4, 5].some(d => { const j = G.nb[c * 6 + d]; return j >= 0 && isLand(j) && this.owner[j] === e; }));
         if (!border.length) { this._plans.set(key, null); return null; }
         // Encadena las casillas de la frontera de vecina en vecina, empezando por un extremo.
         const left = new Set(border), chain = [];
@@ -8018,7 +8023,8 @@ class GameEngine {
         }
         const start = city ? border.reduce((m, c) => (d2(c, city.city) < d2(m, city.city) ? c : m), border[0]) : border[0];
         // Tramo amenazado: los trozos de la cadena con ejércitos enemigos cerca (huecos de 2 casillas o menos), el de más ataque.
-        const foesNear = c => { const out = []; for (const x of this.nearCells(c, 3).keys()) { const a = this.armyOn(x); if (a && a.owner === e && this.sees(id, x)) out.push(a); } return out; };
+        const quiet = a => peace && CITY_OF[a.cell] >= 0 && this.owner[a.cell] === e && countUnits(a.units) <= GARRISON_MAX;
+        const foesNear = c => { const out = []; for (const x of this.nearCells(c, 3).keys()) { const a = this.armyOn(x); if (a && a.owner === e && this.sees(id, x) && !quiet(a)) out.push(a); } return out; };
         const power = chain.map(c => foesNear(c).reduce((t, a) => t + this.seenPower(id, a, 'atk', 'linea'), 0));
         let i0 = -1, i1 = -1;
         if (power.some(x => x > 0)) {
@@ -8049,7 +8055,7 @@ class GameEngine {
         const foes = new Set();
         for (const c of ref) for (const a of foesNear(c)) foes.add(a);
         const enemy = [...foes].reduce((t, a) => t + this.seenPower(id, a, 'atk', 'linea'), 0), cap = this.nations[id].capitalCell;
-        const res = this.bestLine(id, { ref, forces, enemy, dir: this.lineDir(id, ref), limit: 3, steps: true, keep: this.owner[cap] === id ? cap : -1 });
+        const res = this.bestLine(id, { ref, forces, enemy, dir: this.lineDir(id, ref, peace ? e : -1), limit: 3, steps: true, keep: this.owner[cap] === id ? cap : -1 });
         const line = res ? res.cells : ref;
         const plan = { enemy: e, line, attack: city ? [start, city.city] : null, target: city?.cityName,
             lineInfo: { label: this.lineLabel(id, line), rel: res?.rel ?? null, front: (res?.front ?? []).map(c => this.placeName(c)), forces: forces.length } };
@@ -8176,6 +8182,164 @@ class GameEngine {
                 if (s.danger > 2 * s.troops && s.danger > 0.2) under.push(i);
             });
         return (d.balance = { over, under, share });
+    }
+
+    // --- Proponer organización ---
+    // Borrador para el teatro `th` de `id`, que el jugador acepta pieza a pieza (acceptPiece). Calcularlo no cambia nada.
+    // Las piezas van por este orden y no comparten ejércitos: cada una toma solo los sin encargo del teatro que no tomó
+    // una anterior.
+    // - Líneas (theatreLines): con los sueltos más cercanos (en pasos), tantos como casillas; `short`, los que faltan.
+    // - Una reserva, si el teatro no tiene ya una (reserveSpot), sin ejércitos: los recibe luego.
+    // - Agrupaciones: racimos de 3 o más sueltos a 2 casillas o menos unos de otros, los 6 de más unidades.
+    // - Marchas, si el teatro está muy defendido (troopBalance): sus sueltos de mayor a menor, cada uno al teatro poco
+    //   defendido con más diferencia entre su parte de peligro y la de tropa (contando lo ya propuesto), a su reserva (la
+    //   que tiene o la que se le propondría) o a su ciudad más cercana a su frontera peligrosa. Para cuando ninguno sigue
+    //   poco defendido (su tropa llega a la mitad de su peligro) o este baja a 1,5 veces su peligro; como mucho 6. Sin
+    //   camino, ese ejército se salta.
+    // Devuelve { th, stamp: la clave de versiones de los teatros, pieces: [{ key, kind, text, armies (ids), cells, dest,
+    // enemy, makesOp, turns, short }] }.
+    proposeOrganization(id, th) {
+        const d = this.theatreData(id), t = d.list[th], stamp = d.key, pieces = [];
+        if (!t) return { th, stamp, pieces };
+        const taken = new Set(), size = a => countUnits(a.units), sum = xs => xs.reduce((s, a) => s + size(a), 0), unitsText = n => `${thousands(n)} ${n === 1 ? 'unidad' : 'unidades'}`;
+        const free = () => t.idle.filter(a => !taken.has(a.id));
+        const piece = p => pieces.push({ dest: -1, enemy: -1, makesOp: false, turns: null, short: 0, ...p });
+        const lineMemo = new Map(), linesOf = x => { if (!lineMemo.has(x.idx)) lineMemo.set(x.idx, this.theatreLines(id, x)); return lineMemo.get(x.idx); };
+        // 1. Líneas de defensa.
+        const lines = linesOf(t);
+        for (const L of lines) {
+            const steps = this.field(id, L.cells);
+            const near = free().filter(a => steps[a.cell] < 1e9).sort((x, y) => steps[x.cell] - steps[y.cell] || x.id - y.id).slice(0, L.cells.length);
+            for (const a of near) taken.add(a.id);
+            const short = L.cells.length - near.length;
+            piece({ key: `line:${L.enemy}`, kind: 'line', armies: near.map(a => a.id), cells: L.cells, enemy: L.enemy, makesOp: true, short,
+                text: `Línea en ${L.label} frente a ${this.nm(L.enemy)} (${L.war ? 'en guerra' : 'con ejércitos cerca de la frontera'}): ${plural(L.cells.length, 'casilla', 'casillas')}, ${plural(near.length, 'ejército', 'ejércitos')} y ${unitsText(sum(near))}${short ? `; ${short === 1 ? 'falta' : 'faltan'} ${plural(short, 'ejército', 'ejércitos')} para cubrirla` : ''}` });
+        }
+        // 2. Reserva.
+        if (!t.ops.some(op => op.kind === 'reserva')) {
+            const spot = this.reserveSpot(id, t, lines.length ? lines.flatMap(L => L.cells) : t.border.flatMap(b => b.cells));
+            if (spot.city >= 0) {
+                const per = speedOf({ infantry: 1 }, this.rules(id)) * MOVE, turns = Number.isFinite(spot.dist) ? Math.max(1, Math.ceil(spot.dist / per)) : 0;
+                piece({ key: `reserve:${spot.city}`, kind: 'reserve', armies: [], cells: [spot.city], dest: spot.city, makesOp: true,
+                    text: `Reserva en ${this.placeName(spot.city)}: la ciudad que llega antes a ${lines.length ? 'las líneas' : 'toda la frontera'}${turns ? ` (lo más lejano, a unos ${plural(turns, 'turno', 'turnos')} de marcha)` : ''}`
+                        + (this.nations[id].command.rear ? '' : '; enciende Retaguardia para que mande aquí lo que sobra en las ciudades sin peligro') });
+            }
+        }
+        // 3. Agrupaciones: racimos por cercanía (unión de los que están a 2 casillas o menos).
+        const pool = free(), at = new Map(pool.map((a, i) => [a.cell, i])), parent = pool.map((_, i) => i);
+        const root = i => { while (parent[i] !== i) i = parent[i] = parent[parent[i]]; return i; };
+        pool.forEach((a, i) => { for (const x of this.nearCells(a.cell, 2).keys()) { const j = at.get(x); if (j !== undefined && j !== i) parent[root(i)] = root(j); } });
+        const clusters = new Map();
+        pool.forEach((a, i) => { const r = root(i); if (!clusters.has(r)) clusters.set(r, []); clusters.get(r).push(a); });
+        const groups = [...clusters.values()].filter(c => c.length >= 3).sort((x, y) => sum(y) - sum(x) || x[0].id - y[0].id).slice(0, 6);
+        for (const c of groups) {
+            for (const a of c) taken.add(a.id);
+            const head = c.reduce((m, a) => (size(a) > size(m) ? a : m));
+            piece({ key: `group:${Math.min(...c.map(a => a.id))}`, kind: 'group', armies: c.map(a => a.id), cells: c.map(a => a.cell),
+                text: `Agrupar ${plural(c.length, 'ejército', 'ejércitos')} (${unitsText(sum(c))}) junto a ${this.placeName(head.cell)}` });
+        }
+        // 4. Marchas a los teatros poco defendidos.
+        const bal = this.troopBalance(id);
+        if (bal.over.includes(th) && bal.under.length) {
+            const U = d.list.map(x => x.units), total = U.reduce((s, x) => s + x, 0), D = bal.share.map(s => s.danger), part = i => U[i] / total;
+            const dests = new Map(), destOf = j => {
+                if (dests.has(j)) return dests.get(j);
+                const x = d.list[j], res = x.ops.find(op => op.kind === 'reserva');
+                let dest = res ? res.cells[0] : this.reserveSpot(id, x, linesOf(x).length ? linesOf(x).flatMap(L => L.cells) : x.border.flatMap(b => b.cells)).city;
+                if (dest < 0 && x.border.length) {   // la ciudad más cercana a su frontera peligrosa
+                    const b = x.border[0].cells, cities = x.provinces.map(pid => PROVINCES[pid].city).filter(c => this.owner[c] === id);
+                    dest = cities.reduce((m, c) => (m < 0 || hexDist(c, b[0]) < hexDist(m, b[0]) ? c : m), -1);
+                }
+                dests.set(j, dest);
+                return dest;
+            };
+            let n = 0;
+            for (const a of free().sort((x, y) => size(y) - size(x) || x.id - y.id)) {
+                if (n >= 6 || part(th) <= 1.5 * D[th]) break;
+                const open = bal.under.filter(j => part(j) < D[j] / 2);
+                if (!open.length) break;
+                const j = open.reduce((m, k) => (D[k] - part(k) > D[m] - part(m) ? k : m)), dest = destOf(j);
+                if (dest < 0) continue;
+                const f = this.orderField(id, dest), path = this.fieldPath(f, a.cell);
+                if (path.length < 2) continue;   // sin camino, esta masa se salta
+                const turns = this.pathTurns(id, a.units, path, f.dist);
+                taken.add(a.id); U[th] -= size(a); U[j] += size(a); n++;
+                piece({ key: `march:${a.id}`, kind: 'march', armies: [a.id], cells: path, dest, turns,
+                    text: `Mandar ${unitsText(size(a))} de ${this.placeName(a.cell)} a ${this.placeName(dest)} (${d.list[j].name}): ${plural(turns, 'turno', 'turnos')}, ${path.some(afloat) ? 'por mar' : 'por tierra'}` });
+            }
+        }
+        return { th, stamp, pieces };
+    }
+    // Líneas que propondría el teatro `t`: contra los vecinos de su frontera peligrosa de peso 2 o 3 (en guerra o con
+    // ejércitos cerca), los 3 de más peligro, con el trazado de frontPlan sobre la frontera del teatro. Los de peso 1
+    // quedan a las guarniciones. Se salta la que caería a 2 casillas o menos de una línea que el teatro ya tiene.
+    theatreLines(id, t) {
+        const have = new Set();
+        for (const op of t.ops) if (op.kind === 'defensa') for (const c of op.cells) for (const x of this.nearCells(c, 2).keys()) have.add(x);
+        const out = [];
+        for (const b of t.border) {
+            if (out.length >= 3) break;
+            if (b.weight < 2) continue;
+            const plan = this.frontPlan(id, b.nation, { peace: !b.war, th: t.idx });
+            if (!plan?.line.length || plan.line.some(c => have.has(c))) continue;
+            out.push({ enemy: b.nation, war: b.war, cells: plan.line, label: plan.lineInfo.label });
+        }
+        return out;
+    }
+    // Ciudad propia del teatro desde la que se llega antes a todas las casillas de `targets`: la que deja más cerca (coste
+    // de marcha de orderField) la más lejana de una muestra de 32. Solo se miden las 6 mejores en línea recta, para no
+    // recorrer el mapa del mundo desde cada ciudad. Devuelve { city (−1 sin ciudades ni casillas), dist }.
+    reserveSpot(id, t, targets) {
+        const cities = t.provinces.map(pid => PROVINCES[pid].city).filter(c => this.owner[c] === id && !afloat(c));
+        if (!targets.length || !cities.length) return { city: -1, dist: Infinity };
+        const step = Math.max(1, Math.ceil(targets.length / 32)), sample = targets.filter((_, i) => i % step === 0);
+        const short = cities.map(c => [c, sample.reduce((m, x) => Math.max(m, hexDist(c, x)), 0)]).sort((x, y) => x[1] - y[1] || x[0] - y[0]).slice(0, 6);
+        // Primero, a cuántas no llega (un enclave sin paso no debe decidirlo todo); luego, la más lejana a la que llega.
+        let city = short[0][0], dist = Infinity, miss = Infinity;
+        for (const [c] of short) {
+            const f = this.orderField(id, c);
+            let m = 0, k = 0;
+            for (const x of sample) { const v = f.to(x); if (v === Infinity) k++; else m = Math.max(m, v); }
+            if (k < miss || (k === miss && m < dist)) { miss = k; dist = m; city = c; }
+        }
+        return { city, dist: miss === sample.length ? Infinity : dist };
+    }
+    // Por qué no se puede aceptar ya una pieza de la propuesta ('' si se puede).
+    pieceWhy(id, piece) {
+        if (this.over) return 'La partida ha terminado';
+        if (piece.makesOp && this.opsOf(id).length >= this.commandCap(id)) return 'No caben más operaciones en tu estado mayor';
+        const busy = piece.armies.filter(x => { const a = this.armies.get(x); return !a || a.owner !== id || this.armyOn(a.cell) !== a || a.op || a.group || a.form || a.order || a.reinforce; }).length;
+        if (busy) return busy === 1 ? '1 de sus ejércitos ya tiene otro encargo' : `${busy} de sus ejércitos ya tienen otro encargo`;
+        if (piece.makesOp) {
+            const kind = piece.kind === 'line' ? 'defensa' : 'reserva';
+            if (this.opsOf(id).some(op => op.kind === kind && op.cells.join() === piece.cells.join())) return 'Ya está aceptada';
+            if (!piece.cells.every(c => this.owner[c] === id)) return 'Ya no es tu territorio';
+        }
+        if (piece.kind === 'march' && piece.armies.some(x => this.orderField(id, piece.dest).to(this.armies.get(x).cell) === Infinity)) return 'Ya no hay camino';
+        return '';
+    }
+    // Acepta una pieza de la propuesta: asigna exactamente sus ejércitos y no toca nada más (ni barre los cercanos ni
+    // reparte fuerzas). Línea: operación de defensa con sus ejércitos (y su frente, en guerra); reserva: operación de
+    // reserva vacía; agrupación: la crea; marcha: cada ejército a una casilla alrededor del destino, como groupMarch.
+    acceptPiece(id, piece) {
+        if (this.pieceWhy(id, piece)) return false;
+        const list = piece.armies.map(x => this.armies.get(x));
+        if (piece.kind === 'line') {
+            const op = this.createOp(id, 'defensa', piece.cells);
+            if (!op) return false;
+            for (const a of list) this.assignArmy(a, op.id);
+            if (piece.enemy >= 0 && this.atWar(id, piece.enemy)) op.front = piece.enemy;
+        } else if (piece.kind === 'reserve') {
+            if (!this.createOp(id, 'reserva', [piece.cells[0]])) return false;
+        } else if (piece.kind === 'group') {
+            if (!this.createGroup(id, piece.armies)) return false;
+        } else if (piece.kind === 'march') {
+            const cells = this.spreadCells(id, piece.dest, list.length, new Set(piece.armies));
+            if (!cells.length) return false;
+            list.forEach((a, i) => this.setOrder(a, { kind: 'march', dest: cells[i % cells.length] }));
+        } else return false;
+        this.log(`Aceptas: ${piece.text}.`);
+        return true;
     }
 
     // Movimientos, ataques y misiones aéreas que haría una operación asistida, sin hacerlos: se juegan en una copia.
@@ -10992,6 +11156,8 @@ const isMobile = () => matchMedia('(max-width: 760px)').matches;
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+// Número entero con los millares separados por un espacio fijo: 7623 → «7 623».
+const thousands = n => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
 
 // Preferencias de visualización (en este dispositivo, no en la partida).
 const PREFS_KEY = 'nanwar.prefs';

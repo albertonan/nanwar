@@ -134,6 +134,46 @@ const setup = () => {
             for (const pid of pids) for (const c of PROVINCES[pid].cells) if (T.free(g, c) && skip-- <= 0) return c;
             throw new Error('no hay casilla libre');
         },
+        // Ejército grande de `b` a 2 casillas de la frontera con `a`, fuera de ciudad.
+        armedNear(g, a, b, units = 20) {
+            const [c0] = T.border(g, a, b);
+            const two = [...g.nearCells(c0, 2)].find(([x, k]) => k === 2 && isLand(x) && g.owner[x] === b && CITY_OF[x] < 0 && !g.armyAt[x])[0];
+            return T.army(g, b, two, units);
+        },
+        // España sin más ejércitos que seis sueltos junto a Portugal y uno portugués grande cerca de la frontera (en paz).
+        lineScene(g = T.game()) {
+            const es = T.nation('es'), pt = T.nation('pt');
+            if (g.player === null) g.start(es);
+            for (const a of [...g.armies.values()]) g.removeArmy(a);
+            const mine = [0, 1, 2, 3, 4, 5].map(() => T.army(g, es, T.border(g, es, pt)[0], 6));
+            const big = T.armedNear(g, es, pt);
+            return { g, es, pt, mine, big, metro: g.theatres(es).find(t => t.capital).idx };
+        },
+        // España sin más ejércitos que cuatro sueltos juntos (a una casilla unos de otros) en el llano; sin vecinos armados.
+        clusterScene(g = T.game()) {
+            const es = T.nation('es');
+            if (g.player === null) g.start(es);
+            for (const a of [...g.armies.values()]) g.removeArmy(a);
+            const [n, c] = T.plainPair(g, es);
+            const cells = [c, ...[0, 1, 2, 3, 4, 5].map(d => G.nb[c * 6 + d]).filter(j => j !== n).slice(0, 3)];
+            return { g, es, four: cells.map((x, i) => T.army(g, es, x, 4 + i)), metro: g.theatres(es).find(t => t.capital).idx };
+        },
+        // Dos teatros (tarea 4) con toda la tropa en el francés, Francia aliada (el camino) y guerra con Portugal.
+        marchScene(g = T.game()) {
+            const es = T.nation('es'), pt = T.nation('pt'), fr = T.nation('fr');
+            if (g.player === null) g.start(es);
+            const block = T.twoBlocks(g, es, fr);
+            for (const a of [...g.armies.values()]) g.removeArmy(a);
+            const spots = [];   // separados (a más de 2 casillas), para que no hagan un racimo de agrupación
+            for (const pid of block) for (const c of PROVINCES[pid].cells) if (spots.length < 3 && T.free(g, c) && spots.every(x => hexDist(x, c) > 2)) spots.push(c);
+            T.ok(spots.length === 3, 'tres casillas separadas en el bloque');
+            const mine = spots.map(c => T.army(g, es, c, 10));
+            T.bloc(g, es, fr);
+            g.declareWar(es, pt);
+            const th = g.theatres(es);
+            return { g, es, pt, fr, mine, block, far: th.findIndex(t => !t.capital), metro: th.findIndex(t => t.capital) };
+        },
+        ids: xs => xs.map(a => (typeof a === 'number' ? a : a.id)).sort((x, y) => x - y),
         // Empieza una partida en la interfaz con el país dado y devuelve su motor.
         uiStart(key, fog = false) {
             for (const d of document.querySelectorAll('dialog[open]')) d.close();
@@ -367,6 +407,128 @@ const CHECKS = [
         for (let i = 0; i < 20; i++) ui.render();
         const ms = (performance.now() - t0) / 20;
         T.ok(ms < 100, 'la pestaña Mando tarda ' + ms.toFixed(1) + ' ms');
+        return true;
+    }],
+    ['6 · propuesta: línea contra un vecino armado en paz, ninguna contra uno tranquilo', () => {
+        const { g, es, pt, mine, big, metro } = T.lineScene();
+        const lines = () => g.proposeOrganization(es, metro).pieces.filter(p => p.kind === 'line');
+        let ls = lines();
+        T.ok(ls.length === 1 && ls[0].enemy === pt, 'una línea contra Portugal: ' + JSON.stringify(ls));
+        const L = ls[0];
+        T.ok(L.cells.length > 0 && L.cells.every(c => g.owner[c] === es), 'en tierra propia');
+        T.ok(L.armies.length > 0 && L.armies.length <= L.cells.length && L.armies.every(id => mine.some(a => a.id === id)), 'con sus ejércitos sueltos, no más que casillas: ' + JSON.stringify(L));
+        T.eq(L.short, Math.max(0, L.cells.length - L.armies.length), 'los que faltan');
+        T.ok(L.makesOp && L.dest === -1 && L.turns === null, 'crea una operación; sin destino ni turnos');
+        T.ok(L.text.includes(g.nm(pt)), 'la frase nombra a Portugal: ' + L.text);
+        g.removeArmy(big);
+        T.eq(lines().length, 0, 'sin el ejército portugués, ninguna línea');
+        g.declareWar(es, pt);
+        T.armedNear(g, es, pt);
+        const want = g.frontPlan(es, pt).line;
+        ls = lines();
+        T.ok(ls.length === 1 && ls[0].enemy === pt, 'en guerra, una línea contra Portugal');
+        T.eq(ls[0].cells, want, 'en guerra, la de frontPlan');
+        return true;
+    }],
+    ['6 · propuesta: reserva, agrupaciones y nada cambia sin aceptar', () => {
+        const { g, es, four, metro } = T.clusterScene();
+        const snap = () => JSON.stringify([...g.armies.values()].map(a => [a.id, a.cell, a.op, a.group, a.order?.kind ?? null]));
+        const before = snap(), ops0 = g.opsOf(es).length, groups0 = g.armyGroups(es).length;
+        const p = g.proposeOrganization(es, metro);
+        T.eq(snap(), before, 'proponer no cambia ningún ejército');
+        T.eq([g.opsOf(es).length, g.armyGroups(es).length], [ops0, groups0], 'ni crea operaciones ni agrupaciones');
+        T.eq(p.th, metro, 'el teatro');
+        T.eq(p.stamp, g.theatreData(es).key, 'la clave de versiones de los teatros');
+        T.eq(p.pieces.filter(x => x.kind === 'line').length, 0, 'sin vecinos armados, sin líneas');
+        const grp = p.pieces.filter(x => x.kind === 'group');
+        T.eq(grp.length, 1, 'una agrupación');
+        T.eq(T.ids(grp[0].armies), T.ids(four), 'con los cuatro');
+        T.ok(!grp[0].makesOp && grp[0].text.includes('4 ejércitos'), 'no crea operación y dice cuántos: ' + grp[0].text);
+        const res = p.pieces.filter(x => x.kind === 'reserve');
+        T.eq(res.length, 1, 'una reserva');
+        const R = res[0], city = R.cells[0];
+        T.ok(CITY_OF[city] >= 0 && g.owner[city] === es && g.theatreOf(es, city) === metro, 'en una ciudad propia del teatro');
+        T.ok(R.dest === city && R.armies.length === 0 && R.makesOp, 'sin ejércitos y crea una operación');
+        T.ok(R.text.includes('Retaguardia'), 'con Retaguardia apagada, la frase lo dice: ' + R.text);
+        const order = ['line', 'reserve', 'group', 'march'];
+        T.ok(p.pieces.every((x, i) => !i || order.indexOf(p.pieces[i - 1].kind) <= order.indexOf(x.kind)), 'en el orden de la spec');
+        T.eq(new Set(p.pieces.map(x => x.key)).size, p.pieces.length, 'claves distintas');
+        g.nations[es].command.rear = true;
+        T.ok(!g.proposeOrganization(es, metro).pieces.find(x => x.kind === 'reserve').text.includes('Retaguardia'), 'con Retaguardia encendida, no');
+        g.createOp(es, 'reserva', [city]);
+        T.eq(g.proposeOrganization(es, metro).pieces.filter(x => x.kind === 'reserve').length, 0, 'con una reserva en el teatro, ninguna más');
+        return true;
+    }],
+    ['6 · propuesta: marcha entre teatros con camino y turnos', () => {
+        const { g, es, far, metro, mine } = T.marchScene();
+        T.ok(g.troopBalance(es).over.includes(far), 'el teatro francés, muy defendido');
+        const p = g.proposeOrganization(es, far), ms = p.pieces.filter(x => x.kind === 'march');
+        T.ok(ms.length >= 1 && ms.length <= 6, 'marchas: ' + JSON.stringify(p.pieces.map(x => x.text)));
+        for (const m of ms) {
+            T.eq(g.theatreOf(es, m.dest), metro, 'destino en la metrópoli');
+            T.ok(m.turns > 0 && m.text.includes('turnos'), 'con sus turnos: ' + m.text);
+            T.ok(m.armies.length === 1 && mine.some(a => a.id === m.armies[0]) && !m.makesOp, 'un ejército y sin operación');
+            T.eq([m.cells[0], m.cells[m.cells.length - 1]], [g.armies.get(m.armies[0]).cell, m.dest], 'el camino va del ejército al destino');
+        }
+        T.eq(g.proposeOrganization(es, metro).pieces.filter(x => x.kind === 'march').length, 0, 'la metrópoli no manda nada');
+        return true;
+    }],
+    ['6 · aceptar: exactamente sus ejércitos, sin tocar las operaciones del jugador', () => {
+        // Línea, con una reserva del jugador de 2 ejércitos lejos de la frontera.
+        let { g, es, mine, metro } = T.lineScene();
+        const city = PROVINCES.map(p => p.city).find(c => g.owner[c] === es && CAPITAL_OF[c] < 0 && ![...g.nearCells(c, 4).keys()].some(x => g.armyAt[x]));
+        const res = g.createOp(es, 'reserva', [city]), two = [1, 2].map(() => T.army(g, es, T.ringCell(g, city, 1), 8));
+        for (const a of two) g.assignArmy(a, res.id);
+        const L = g.proposeOrganization(es, metro).pieces.find(x => x.kind === 'line');
+        T.ok(L && !L.armies.some(id => two.some(a => a.id === id)), 'la línea no toma los de la reserva');
+        const ops0 = g.opsOf(es).length, logs0 = g.logs.length;
+        T.ok(g.acceptPiece(es, L), 'acepta la línea');
+        T.eq(g.opsOf(es).length, ops0 + 1, 'una operación más');
+        const op = g.opsOf(es).find(o => o.kind === 'defensa');
+        T.eq(op.cells, L.cells, 'con el trazado de la pieza');
+        T.eq(T.ids(g.opMembers(op)), T.ids(L.armies), 'y exactamente sus ejércitos');
+        T.eq(T.ids(g.opMembers(res)), T.ids(two), 'la reserva sigue con sus 2');
+        T.ok(g.logs.slice(logs0).some(l => l.msg.startsWith('Aceptas: ')), 'lo apunta en el registro');
+        T.ok(mine.filter(a => !L.armies.includes(a.id)).every(a => !a.op), 'los demás sueltos siguen sueltos');
+        T.ok(g.pieceWhy(es, L).includes('otro encargo') && !g.acceptPiece(es, L), 'aceptarla otra vez no se puede');
+        T.eq(g.opsOf(es).length, ops0 + 1, 'ni crea otra');
+        // Agrupación.
+        ({ g, es, metro } = T.clusterScene());
+        const Gp = g.proposeOrganization(es, metro).pieces.find(x => x.kind === 'group');
+        T.eq(g.pieceWhy(es, Gp), '', 'la agrupación se puede aceptar');
+        T.ok(g.acceptPiece(es, Gp), 'acepta la agrupación');
+        const grs = g.armyGroups(es);
+        T.eq(grs.length, 1, 'una agrupación nueva');
+        T.eq(T.ids(g.groupMembers(es, grs[0].id)), T.ids(Gp.armies), 'con esos ejércitos');
+        // Marchas.
+        ({ g, es } = T.marchScene());
+        const sc = g.theatres(es), far = sc.findIndex(t => !t.capital), metro2 = sc.findIndex(t => t.capital);
+        const ms = g.proposeOrganization(es, far).pieces.filter(x => x.kind === 'march');
+        T.ok(ms.length, 'hay marchas');
+        for (const m of ms) T.ok(g.acceptPiece(es, m), 'acepta la marcha');
+        for (const m of ms) for (const id of m.armies) {
+            const a = g.armies.get(id);
+            T.ok(a.order?.kind === 'march' && g.theatreOf(es, a.order.dest) === metro2, 'con orden de marcha a la metrópoli');
+        }
+        return true;
+    }],
+    ['6 · aceptar: tope y ejércitos que ya no están libres', () => {
+        const { g, es, metro } = T.lineScene();
+        const L = g.proposeOrganization(es, metro).pieces.find(x => x.kind === 'line');
+        T.eq(g.pieceWhy(es, L), '', 'con sitio, se puede');
+        const cities = PROVINCES.filter(q => g.owner[q.city] === es).map(q => q.city);
+        for (let i = 0; g.opsOf(es).length < g.commandCap(es); i++) T.ok(g.createOp(es, 'reserva', [cities[i % cities.length]]), 'reserva de relleno');
+        T.ok(g.pieceWhy(es, L).includes('No caben más operaciones'), 'el estado mayor lleno: ' + g.pieceWhy(es, L));
+        const n0 = g.opsOf(es).length;
+        T.eq(g.acceptPiece(es, L), false, 'no se acepta');
+        T.eq(g.opsOf(es).length, n0, 'ni crea la operación');
+        T.ok(L.armies.every(id => !g.armies.get(id).op), 'ni asigna a nadie');
+        const c = T.clusterScene();
+        const Gp = c.g.proposeOrganization(c.es, c.metro).pieces.find(x => x.kind === 'group');
+        c.g.setOrder(c.g.armies.get(Gp.armies[0]), { kind: 'hold' });
+        T.ok(c.g.pieceWhy(c.es, Gp).includes('1 de sus ejércitos ya tiene otro encargo'), 'uno con una orden a mano: ' + c.g.pieceWhy(c.es, Gp));
+        T.eq(c.g.acceptPiece(c.es, Gp), false, 'no se acepta');
+        T.eq(c.g.armyGroups(c.es).length, 0, 'ni se crea la agrupación');
         return true;
     }]
 ];
