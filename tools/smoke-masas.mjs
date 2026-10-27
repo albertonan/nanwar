@@ -1160,7 +1160,7 @@ const CHECKS = [
         for (const a of xs) g.assignArmy(a, op.id);
         const ids = new Set(xs.map(a => a.id)), seen = new Set(g.motion);
         let atM = -1, nearO = -1, wps = [];
-        for (let t = 0; t < 40 && g.ops.has(op.id); t++) {
+        for (let t = 0; t < 40 && !op.done; t++) {
             T.turns(g, es, 1);
             wps.push(op.wp);
             const mine = [...g.armies.values()].filter(a => a.owner === es && (ids.has(a.id) || a.op === op.id));
@@ -1172,7 +1172,7 @@ const CHECKS = [
         T.ok(atM >= 0, 'pasa por el punto intermedio');
         T.ok(nearO < 0 || atM <= nearO, `antes de acercarse al objetivo (${atM} / ${nearO})`);
         T.ok(wps.every((w, i) => !i || w >= wps[i - 1]), 'los puntos, en orden');
-        T.eq([g.owner[O], g.ops.has(op.id)], [es, false], 'toma el objetivo');
+        T.eq([g.owner[O], g.ops.has(op.id), !!op.done], [es, true, true], 'toma el objetivo y espera órdenes');
         return true;
     }],
     ['A5 · los rápidos esperan a los lentos', () => {

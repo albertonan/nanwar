@@ -136,7 +136,8 @@ const CHECKS = [
         g.turn = since + CONFIG.WAR_MIN_TURNS;
         T.eq(g.peaceWish(es, pt).wants, true, 'a los 8 turnos, España (inferior y perdiendo) sí');
         g.turn = since + 2;
-        T.power(g, pt, 20);   // menos de un tercio de España: vencido
+        T.power(g, pt, 20);   // menos de un tercio de España y ya ha perdido el 15 % de su tierra: vencido
+        T.occupy(g, es, pt, Math.ceil(G.land.filter(c => g.legal[c] === pt).length * CONFIG.CRUSH_LOST));
         T.eq(g.peaceWish(pt, es), { ...g.peaceWish(pt, es), wants: true, why: 'vencido' }, 'el vencido la pide');
         T.eq(g.peaceWish(es, pt).wants, false, 'el otro aún no');
         g.player = null;
@@ -356,6 +357,21 @@ const CHECKS = [
         T.ok(/en todo caso, dentro de \d+ turnos/.test(g.peaceWish(es, pt).blocker), `el bloqueo dice cuándo, en todo caso: ${g.peaceWish(es, pt).blocker}`);
         return true;
     }],
+    ['E3 · los aliados que entran en la guerra no bastan para rendirse: hace falta perder tierra', () => {
+        const g = T.game(), es = T.nation('es'), fr = T.nation('fr'), it = T.nation('it'), de = T.nation('de');
+        g.start(es);
+        T.power(g, es, 100); T.power(g, fr, 90); T.power(g, it, 200); T.power(g, de, 200);
+        T.bloc(g, es, it, de);
+        g.declareWar(es, fr);
+        for (const x of [it, de]) if (!g.atWar(x, fr)) g.declareWar(x, fr);
+        const { A } = g.warSides(es, fr);
+        T.ok(A.has(it) && A.has(de) && g.sidePower(A) > 3 * g.sidePower(new Set([fr])), 'su bando no llega a un tercio del tuyo');
+        T.ok(!g.isCrushed(fr) && g.peaceWish(fr, es).why !== 'vencido', 'sin perder tierra no está vencido');
+        T.ok(!g.acceptsPeace(fr, { mode: 'satellite' }, false), 'ni acepta ser tu satélite');
+        T.occupy(g, es, fr, Math.ceil(G.land.filter(c => g.legal[c] === fr).length * CONFIG.CRUSH_LOST));
+        T.ok(g.isCrushed(fr) && g.peaceWish(fr, es).why === 'vencido', 'con el 15 % perdido, sí');
+        return true;
+    }],
     ['I1 · con el objetivo cumplido la IA no acepta una paz blanca, solo quedarse lo ocupado', () => {
         const setup = () => {
             const g = T.game(), es = T.nation('es'), pt = T.nation('pt');
@@ -386,6 +402,7 @@ const CHECKS = [
         // El vencido sí acepta la blanca.
         ({ g, es, pt } = setup());
         T.power(g, es, 10);
+        T.occupy(g, pt, es, Math.ceil(G.land.filter(c => g.legal[c] === es).length * CONFIG.CRUSH_LOST));
         T.eq(g.acceptsPeace(es, { mode: 'white' }, false), true, 'vencido: acepta la blanca');
         return true;
     }],
