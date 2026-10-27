@@ -174,6 +174,21 @@ const setup = () => {
             return { g, es, pt, fr, mine, block, far: th.findIndex(t => !t.capital), metro: th.findIndex(t => t.capital) };
         },
         ids: xs => xs.map(a => (typeof a === 'number' ? a : a.id)).sort((x, y) => x - y),
+        // En la interfaz: la escena de la línea (tarea 6) y, lejos de Portugal, cuatro sueltos juntos; la pestaña Mando abierta.
+        uiScene() {
+            const g = T.uiStart('es'), s = T.lineScene(g);
+            for (let i = 0; i < 14; i++) s.mine.push(T.army(g, s.es, T.border(g, s.es, s.pt)[0], 6));   // de sobra para cubrir la línea
+            let k = 0, c, n;
+            do [n, c] = T.plainPair(g, s.es, k++); while (hexDist(c, s.big.cell) < 14);
+            const cells = [c, ...[0, 1, 2, 3, 4, 5].map(d => G.nb[c * 6 + d]).filter(j => j !== n).slice(0, 3)];
+            s.four = cells.map((x, i) => T.army(g, s.es, x, 4 + i));
+            s.metro = g.theatres(s.es).find(t => t.capital).idx;
+            for (const d of document.querySelectorAll('dialog[open]')) d.close();
+            ui.draft = null; ui.tab = 'mando'; ui.drawerOpen = true; ui.render();
+            s.card = () => $('#drawer-body').querySelector(`[data-theatre="${s.metro}"]`);
+            s.click = (action, key) => s.card().querySelector(`[data-action="${action}"]${key ? `[data-key="${key}"]` : ''}`).click();
+            return s;
+        },
         // Empieza una partida en la interfaz con el país dado y devuelve su motor.
         uiStart(key, fog = false) {
             for (const d of document.querySelectorAll('dialog[open]')) d.close();
@@ -529,6 +544,89 @@ const CHECKS = [
         T.ok(c.g.pieceWhy(c.es, Gp).includes('1 de sus ejércitos ya tiene otro encargo'), 'uno con una orden a mano: ' + c.g.pieceWhy(c.es, Gp));
         T.eq(c.g.acceptPiece(c.es, Gp), false, 'no se acepta');
         T.eq(c.g.armyGroups(c.es).length, 0, 'ni se crea la agrupación');
+        return true;
+    }],
+    ['7 · la propuesta en la tarjeta: aceptar, descartar y el mapa', () => {
+        const s = T.uiScene(), g = s.g, es = s.es;
+        s.click('th-propose');
+        const dr = ui.draft;
+        T.ok(dr && dr.th === s.metro && dr.decided.size === 0, 'el borrador del teatro');
+        const L = dr.pieces.find(p => p.kind === 'line'), R = dr.pieces.find(p => p.kind === 'reserve'), Gp = dr.pieces.find(p => p.kind === 'group');
+        T.ok(L && R && Gp, 'línea, reserva y agrupación: ' + JSON.stringify(dr.pieces.map(p => p.text)));
+        const rows = s.card().querySelectorAll('[data-piece]');
+        T.eq(rows.length, dr.pieces.length, 'una fila por pieza');
+        T.ok(dr.pieces.every((p, i) => rows[i].textContent.includes(p.text)), 'con su frase');
+        T.ok(s.card().textContent.includes('Caben') && s.card().querySelector('[data-action="th-accept-all"]') && s.card().querySelector('[data-action="th-close"]'), 'el pie: cuántas caben, Aceptar todo y Cerrar');
+        T.ok(s.card().textContent.includes(g.nm(T.nation('fr'))), 'nombra a los vecinos tranquilos');
+        const shapes = () => ui.view.draftShapes().map(x => x.piece.key);
+        T.eq(shapes(), dr.pieces.map(p => p.key), 'el mapa dibuja las pendientes');
+        ui.view.draw();
+        rows[1].dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        T.eq(ui.draftFocus, dr.pieces[1].key, 'al pasar el ratón, la pieza se resalta');
+        T.ok(ui.view.draftShapes().find(x => x.piece.key === dr.pieces[1].key).focus, 'y se dibuja resaltada');
+        const snap = () => JSON.stringify([...g.armies.values()].map(a => [a.id, a.cell, a.op, a.group, a.order?.kind ?? null]));
+        const before = snap(), ops0 = g.opsOf(es).length;
+        s.click('th-discard', R.key);
+        T.eq(ui.draft.decided.get(R.key), 'descartada', 'descartada');
+        T.eq([snap(), g.opsOf(es).length], [before, ops0], 'descartar no toca nada');
+        T.ok(s.card().querySelector(`[data-piece="${R.key}"]`).textContent.includes('Descartada') && !s.card().querySelector(`[data-action="th-accept"][data-key="${R.key}"]`), 'la fila dice Descartada, sin botones');
+        T.ok(!shapes().includes(R.key), 'y ya no se dibuja');
+        s.click('th-accept', L.key);
+        T.eq(ui.draft.decided.get(L.key), 'aceptada', 'la línea, aceptada');
+        const op = g.opsOf(es).find(o => o.kind === 'defensa');
+        T.ok(op && T.ids(g.opMembers(op)).join() === T.ids(L.armies).join(), 'la operación existe con sus ejércitos');
+        T.ok(!ui.draft.decided.has(Gp.key) && !s.card().querySelector(`[data-action="th-accept"][data-key="${Gp.key}"]`).disabled, 'la agrupación sigue pendiente');
+        T.ok(!s.card().textContent.includes('La propuesta ha cambiado'), 'sin el aviso de cambio');
+        s.click('th-close');
+        T.eq(ui.draft, null, 'Cerrar quita el borrador');
+        T.eq(ui.view.draftShapes().length, 0, 'y su dibujo');
+        return true;
+    }],
+    ['7 · Aceptar todo dos veces no duplica', () => {
+        const s = T.uiScene(), g = s.g, es = s.es;
+        s.click('th-propose');
+        const ops0 = g.opsOf(es).length, groups0 = g.armyGroups(es).length;
+        s.click('th-accept-all');
+        s.click('th-accept-all');
+        const dr = ui.draft, ok = p => dr.decided.get(p.key) === 'aceptada';
+        const made = dr.pieces.filter(p => p.makesOp && ok(p)).length;
+        T.ok(made >= 2, 'acepta la línea y la reserva');
+        T.eq(g.opsOf(es).length - ops0, made, 'tantas operaciones nuevas como piezas que las crean');
+        T.eq(g.armyGroups(es).length - groups0, dr.pieces.filter(p => p.kind === 'group' && ok(p)).length, 'y tantas agrupaciones');
+        T.ok(dr.pieces.every(ok), 'todas aceptadas');
+        T.ok(!s.card().textContent.includes('La propuesta ha cambiado'), 'sin el aviso de cambio');
+        return true;
+    }],
+    ['7 · la propuesta se marca vieja tras un turno y no se guarda', () => {
+        const s = T.uiScene(), g = s.g, es = s.es;
+        s.click('th-propose');
+        T.ok(!s.card().textContent.includes('La propuesta ha cambiado'), 'recién hecha, al día');
+        T.turns(g, es, 1);
+        ui.render();
+        T.ok(s.card().textContent.includes('La propuesta ha cambiado'), 'tras un turno, ha cambiado');
+        const json = JSON.stringify(g.serialize());
+        T.ok(!json.includes('"draft"') && !json.includes('decided'), 'el borrador no se guarda');
+        T.ok(GameEngine.load(JSON.parse(json)), 'y la partida se carga');
+        s.click('th-refresh');
+        T.ok(ui.draft && !s.card().textContent.includes('La propuesta ha cambiado'), 'Volver a proponer la pone al día');
+        ui.setGame(T.game());
+        T.eq(ui.draft, null, 'al cargar otra partida se borra');
+        return true;
+    }],
+    ['7 · tope: Aceptar desactivado con el estado mayor lleno', () => {
+        const s = T.uiScene(), g = s.g, es = s.es;
+        const cities = PROVINCES.filter(q => g.owner[q.city] === es).map(q => q.city);
+        for (let i = 0; g.opsOf(es).length < g.commandCap(es); i++) g.createOp(es, 'reserva', [cities[i % cities.length]]);
+        ui.render();
+        s.click('th-propose');
+        const L = ui.draft.pieces.find(p => p.kind === 'line'), b = s.card().querySelector(`[data-action="th-accept"][data-key="${L.key}"]`);
+        T.ok(b.disabled && b.title.includes('No caben más operaciones'), 'Aceptar de la línea, desactivado con el motivo: ' + b.title);
+        T.ok(s.card().textContent.includes('No caben más operaciones'), 'el pie lo dice');
+        const n0 = g.opsOf(es).length, gr0 = g.armyGroups(es).length;
+        s.click('th-accept-all');
+        T.eq(g.opsOf(es).length, n0, 'Aceptar todo no crea operaciones');
+        T.ok(g.armyGroups(es).length > gr0, 'pero sí la agrupación');
+        T.ok(!ui.draft.decided.has(L.key), 'la línea sigue pendiente');
         return true;
     }]
 ];

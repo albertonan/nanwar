@@ -359,6 +359,13 @@
         .th-card { display: grid; gap: 4px; }
         .th-card .chip { margin-right: 2px; }
         .th-warn { margin: 4px 0 8px; padding: 8px 10px; border-radius: 8px; background: rgba(240, 196, 25, 0.12); font-size: 13px; line-height: 1.4; }
+        .th-draft { display: grid; gap: 6px; margin-top: 6px; padding: 8px 10px; border-radius: 10px; border: 1px dashed var(--line); }
+        .th-piece { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 4px 8px; align-items: center; padding: 6px; border-radius: 8px; }
+        .th-piece:hover { background: var(--raised); }
+        .th-piece.done { opacity: 0.6; }
+        .th-piece > .th-ico { display: grid; place-items: center; color: var(--text); }
+        .th-piece > .th-ico svg:not(.nato) { width: 18px; height: 18px; }
+        .th-piece .row { grid-column: 2; }
         .goal { display: grid; gap: 2px; padding: 2px 8px; font-size: 13px; }
         .goal .meter { margin: 0; }
         .budget { display: grid; gap: 4px; padding: 6px 8px; }
@@ -11886,6 +11893,13 @@ class MapView {
             else if (op.drawn && op.drawn.join() !== op.cells.join()) list.push({ kind: 'repliegue', from: op.drawn, cells: op.cells, color: opColor(op) });
         }
         if (ui?.opPreview?.length) list.push({ kind: 'defensa', cells: ui.opPreview, color: '#ffffff', name: 'Línea propuesta', draft: true });
+        // Borrador de «Proponer organización»: las líneas y la reserva pendientes, a trazos blancos (las agrupaciones y las
+        // marchas, más abajo). La que está bajo el ratón, más gruesa.
+        const shapes = this.draftShapes();
+        for (const { piece: pc, focus } of shapes) {
+            if (pc.kind === 'line') list.push({ kind: 'defensa', cells: pc.cells, color: '#ffffff', name: 'Línea propuesta', draft: true, focus });
+            else if (pc.kind === 'reserve') list.push({ kind: 'reserva', cells: pc.cells, color: '#ffffff', name: 'Reserva propuesta', draft: true, focus });
+        }
         const d = ui?.opDraft;
         if (d?.cells.length) list.push({ kind: d.kind, cells: d.cells, color: '#ffffff', name: d.redraw ? 'Nuevo trazado' : 'Nueva operación', draft: true,
             doctrine: d.kind !== 'ofensiva' ? null : d.redraw ? g.ops.get(d.redraw)?.doctrine : d.doctrine ?? ui.draftRec().key });
@@ -11994,8 +12008,8 @@ class MapView {
             } else if (it.kind === 'defensa') {
                 ctx.beginPath(); pts.forEach(([x, y], i) => (i && G.dirTo(it.cells[i - 1], it.cells[i]) >= 0 ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
                 if (pts.length === 1) { ctx.arc(pts[0][0], pts[0][1], 3, 0, Math.PI * 2); }
-                ctx.strokeStyle = 'rgba(21,26,18,0.85)'; ctx.lineWidth = 5; ctx.stroke();
-                ctx.strokeStyle = it.color; ctx.lineWidth = 2.4; if (it.draft) ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
+                ctx.strokeStyle = 'rgba(21,26,18,0.85)'; ctx.lineWidth = it.focus ? 8 : 5; ctx.stroke();
+                ctx.strokeStyle = it.color; ctx.lineWidth = it.focus ? 4.5 : 2.4; if (it.draft) ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
                 // Almenas hacia el lado del enemigo (o de fuera de tu territorio)
                 const step = Math.max(5, Math.min(12, hexPx * 0.55)), h = step * 0.8;
                 ctx.beginPath();
@@ -12039,7 +12053,7 @@ class MapView {
                 const [x, y] = pts[0], rr = Math.max(18, hexPx * 3.2);
                 ctx.beginPath(); ctx.ellipse(x, y, rr * 1.2, rr * 0.9, 0, 0, Math.PI * 2);
                 ctx.fillStyle = it.color; ctx.globalAlpha *= 0.1; ctx.fill(); ctx.globalAlpha = it.dim ? 0.45 : 1;
-                ctx.setLineDash([7, 5]); ctx.strokeStyle = 'rgba(21,26,18,0.8)'; ctx.lineWidth = 4; ctx.stroke(); ctx.strokeStyle = it.color; ctx.lineWidth = 2; ctx.stroke(); ctx.setLineDash([]);
+                ctx.setLineDash([7, 5]); ctx.strokeStyle = 'rgba(21,26,18,0.8)'; ctx.lineWidth = it.focus ? 7 : 4; ctx.stroke(); ctx.strokeStyle = it.color; ctx.lineWidth = it.focus ? 4 : 2; ctx.stroke(); ctx.setLineDash([]);
                 labels.push({ x, y: y - rr * 0.9 - 9, text: `ZR · ${it.name}`, color: it.color });
             }
             // Anillo bajo los ejércitos de la operación. En una punta de lanza o un frente amplio en marcha, la marca de su
@@ -12078,6 +12092,28 @@ class MapView {
             this.drawCounter({ owner: g.player, type: dominantType(units), n, echelon: echelonOf(n).mark, level: 0, mine: true, alpha: 1 }, x, y, 12, font);
             ctx.strokeStyle = it.color; ctx.lineWidth = 2.5; ctx.strokeRect(x - 15, y - 11, 30, 19);
             labels.push({ x, y: y + 20, text: it.name, color: it.color });
+        }
+        // Borrador de organización: cada agrupación, la envolvente de sus casillas; cada marcha, una flecha por su camino.
+        for (const { piece: pc, focus } of shapes) {
+            const wide = focus ? 1.8 : 1;
+            if (pc.kind === 'group') {
+                const r = G.S * 1.15, ring = [];
+                for (const c of pc.cells) for (let k = 0; k < 12; k++) ring.push(this.toScreen(G.cx[c] + r * Math.cos(k * Math.PI / 6), G.cy[c] + r * Math.sin(k * Math.PI / 6)));
+                const hull = convexHull(ring);
+                if (hull.length < 3) continue;
+                ctx.beginPath(); hull.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath();
+                ctx.fillStyle = '#ffffff'; ctx.globalAlpha = focus ? 0.14 : 0.07; ctx.fill(); ctx.globalAlpha = 1;
+                ctx.setLineDash([6, 4]); ctx.strokeStyle = 'rgba(21,26,18,0.8)'; ctx.lineWidth = 4 * wide; ctx.stroke();
+                ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2 * wide; ctx.stroke(); ctx.setLineDash([]);
+            } else if (pc.kind === 'march' && pc.cells.length >= 2) {
+                const pts = pc.cells.map(scr);
+                ctx.beginPath(); pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+                ctx.strokeStyle = 'rgba(21,26,18,0.85)'; ctx.lineWidth = 4.5 * wide; ctx.stroke();
+                ctx.setLineDash([6, 4]); ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2.2 * wide; ctx.stroke(); ctx.setLineDash([]);
+                const [x1, y1] = pts[pts.length - 1], [x0, y0] = pts[pts.length - 2], ang = Math.atan2(y1 - y0, x1 - x0), L = 10 * wide;
+                ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x1 - L * Math.cos(ang - 0.45), y1 - L * Math.sin(ang - 0.45)); ctx.lineTo(x1 - L * Math.cos(ang + 0.45), y1 - L * Math.sin(ang + 0.45)); ctx.closePath();
+                ctx.fillStyle = '#ffffff'; ctx.fill(); ctx.lineWidth = 1.2; ctx.strokeStyle = INK; ctx.stroke();
+            }
         }
         // Propuesta de las asistidas: movimientos en blanco discontinuo, ataques en rojo y misiones aéreas en azul, de
         // cada base al blanco.
@@ -12180,6 +12216,13 @@ class MapView {
     }
     // Envolvente de la agrupación en coordenadas de mundo: la convexa de sus casillas con un margen redondeado de algo
     // más de media casilla, así también rodea a uno o dos ejércitos. Se guarda en su marca.
+    // Piezas pendientes del borrador de «Proponer organización» (GameUI.draft) que se dibujan, con `focus` en la que está
+    // bajo el ratón (GameUI.draftFocus).
+    draftShapes() {
+        const dr = this.ui?.draft;
+        if (!dr || this.game.player === null) return [];
+        return dr.pieces.filter(pc => !dr.decided.has(pc.key)).map(pc => ({ piece: pc, focus: this.ui.draftFocus === pc.key }));
+    }
     groupHull(gid) {
         const m = (this.groupMarks(), this.groupBy.get(gid));
         if (!m) return [];
@@ -12789,6 +12832,8 @@ class GameUI {
         this.replaying = false;
 
         this.opPreview = null;       // casillas de la línea propuesta bajo el ratón, para verla en el mapa
+        this.draft = null;           // «Proponer organización»: { th, stamp, pieces, decided: Map(clave → 'aceptada'|'descartada') }; no se guarda
+        this.draftFocus = null;      // clave de la pieza del borrador bajo el ratón, más gruesa en el mapa
         document.body.dataset.sheet = ['mini', 'media', 'grande'].includes(this.prefs?.sheet) ? this.prefs.sheet : 'media';
         // Asa de la hoja inferior (móvil): tocarla pasa de mínima a media, a grande y otra vez a mínima; arrastrarla
         // hacia arriba o hacia abajo la agranda o la achica.
@@ -12813,6 +12858,15 @@ class GameUI {
             if (!e.target.closest?.('[data-preview]') || !this.opPreview) return;
             this.opPreview = null;
             this.view?.draw();
+        });
+        // Al pasar el ratón por una pieza del borrador de organización, el mapa la dibuja más gruesa.
+        document.addEventListener('mouseover', e => {
+            const r = e.target.closest?.('[data-piece]');
+            if (r && this.draft && this.draftFocus !== r.dataset.piece) { this.draftFocus = r.dataset.piece; this.view?.draw(); }
+        });
+        document.addEventListener('mouseout', e => {
+            const r = e.target.closest?.('[data-piece]');
+            if (r && !r.contains(e.relatedTarget) && this.draftFocus) { this.draftFocus = null; this.view?.draw(); }
         });
         // Al pasar el ratón por la fila de una agrupación en el cajón, el mapa resalta a sus miembros (lo dibuja MapView).
         const focusGroup = gid => { if (this.view && (this.view.groupFocus || 0) !== gid) { this.view.groupFocus = gid; this.view.draw(); } };
@@ -12883,6 +12937,7 @@ class GameUI {
     // Sustituye la partida en curso (al cargar).
     setGame(g) {
         this.opPreview = null;
+        this.draft = this.draftFocus = null;
         game = g;
         this.game = g;
         this.legendKey = null;
@@ -14312,6 +14367,7 @@ class GameUI {
             case 'start':
                 if (this.choice === null) return;
                 g.start(this.choice);
+                this.draft = this.draftFocus = null;
                 this.seenLog = g.logs.length;
                 this.view.hoverNation = -1;
                 this.view.centerOn(g.nations[this.choice].capitalCell, 5);
@@ -14487,7 +14543,31 @@ class GameUI {
                 this.view.frameCells([...t.cells]);
                 break;
             }
-            case 'th-propose': return;   // «Proponer organización»: llega con la propuesta de los teatros
+            // «Proponer organización»: el borrador es de la interfaz y no se guarda. Aceptar asigna solo lo de la pieza; tras
+            // aceptar, el borrador apunta la clave nueva de los teatros (si estaba al día), para que su propia aceptación no
+            // lo marque como «ha cambiado».
+            case 'th-propose':
+            case 'th-refresh':
+                if (g.over || g.player === null || !g.theatres(g.player)[+d.th]) return;
+                this.draft = { ...g.proposeOrganization(g.player, +d.th), decided: new Map() };
+                this.draftFocus = null;
+                break;
+            case 'th-accept':
+            case 'th-accept-all': {
+                const dr = this.draft;
+                if (!dr) return;
+                const fresh = dr.stamp === g.theatreData(g.player).key;
+                let n = 0;
+                for (const pc of dr.pieces) {
+                    if (dr.decided.has(pc.key) || (d.action === 'th-accept' && pc.key !== d.key) || g.pieceWhy(g.player, pc)) continue;
+                    if (g.acceptPiece(g.player, pc)) { dr.decided.set(pc.key, 'aceptada'); n++; }
+                }
+                if (n && fresh) dr.stamp = g.theatreData(g.player).key;
+                if (!n && d.action === 'th-accept') this.flash('No se pudo aceptar esa pieza.');
+                break;
+            }
+            case 'th-discard': if (this.draft?.pieces.some(pc => pc.key === d.key)) this.draft.decided.set(d.key, 'descartada'); break;
+            case 'th-close': this.draft = this.draftFocus = null; break;
             case 'ob-color': { const gr = g.groupById(g.player, +d.id); if (gr) g.recolorGroup(g.player, gr.id, (gr.color + 1) % GROUP_COLORS.length); break; }
             case 'ob-disband': this.obOpen.delete(+d.id); g.playerDisbandGroup(+d.id); break;
             case 'ob-new': {
@@ -16138,9 +16218,46 @@ class GameUI {
                     <button class="btn" data-action="th-pick" data-th="${t.idx}" ${t.idle.length ? '' : 'disabled'} title="Los pone en la selección y centra el mapa en ellos">Elegirlos</button>
                     <button class="btn" data-action="th-goto" data-th="${t.idx}">Ver</button>
                     <button class="btn" data-action="th-propose" data-th="${t.idx}">Proponer organización</button></div>
+                ${this.draft?.th === t.idx ? this.draftBlock(t) : ''}
             </div>`;
         };
         return `<p class="group-title">Teatros</p>${warn}${th.map(card).join('')}`;
+    }
+    // Borrador de «Proponer organización» en la tarjeta de su teatro: una fila por pieza (icono, frase y Aceptar/Descartar,
+    // o su estado si ya está decidida; Aceptar desactivado con el motivo si no se puede), los vecinos tranquilos que quedan a
+    // las guarniciones y el pie: cuántas operaciones caben, Aceptar todo y Cerrar. Si la partida ha cambiado desde que se
+    // calculó (un turno, un movimiento a mano), lo dice y ofrece volver a proponer.
+    draftBlock(t) {
+        const g = this.game, p0 = g.player, dr = this.draft, color = g.nations[p0].color;
+        const stale = dr.stamp !== g.theatreData(p0).key, left = g.commandCap(p0) - g.opsOf(p0).length;
+        const icon = pc => {
+            if (pc.kind === 'line') return OP_KINDS.defensa.icon;
+            if (pc.kind === 'reserve') return OP_KINDS.reserva.icon;
+            if (pc.kind === 'march') return uiIcon('arrow', 18);
+            const u = emptyUnits();   // la agrupación, con el símbolo de la pestaña Batalla: escalón y tipo que más pesa
+            for (const id of pc.armies) { const a = g.armies.get(id); if (a) for (const k of UNIT_KEYS) u[k] += a.units[k] || 0; }
+            return `<span class="ob-sym"><small>${echelonOf(countUnits(u)).mark}</small>${unitIcon(dominantType(u), color)}</span>`;
+        };
+        const rows = dr.pieces.map(pc => {
+            const done = dr.decided.get(pc.key), why = done ? '' : g.pieceWhy(p0, pc);
+            return `<div class="th-piece ${done ? 'done' : ''}" data-piece="${esc(pc.key)}">
+                <span class="th-ico" title="${{ line: 'Línea de defensa', reserve: 'Reserva', group: 'Agrupación', march: 'Marcha' }[pc.kind]}">${icon(pc)}</span>
+                <span class="small">${esc(pc.text)}.${why ? ` <span class="warn-text">${esc(why)}.</span>` : ''}</span>
+                <div class="row">${done ? `<span class="chip ${done === 'aceptada' ? 'ok' : ''}">${done === 'aceptada' ? 'Aceptada' : 'Descartada'}</span>`
+                    : `<button class="btn" data-action="th-accept" data-key="${esc(pc.key)}" ${why ? `disabled title="${esc(why)}"` : ''}>Aceptar</button>
+                       <button class="btn ghost" data-action="th-discard" data-key="${esc(pc.key)}">Descartar</button>`}</div></div>`;
+        }).join('');
+        const calm = t.border.filter(b => b.weight === 1).map(b => g.nm(b.nation)), shown = calm.slice(0, 3);
+        const calmNote = calm.length ? `<p class="small muted">Sin línea frente a ${esc(shown.join(', '))}${calm.length > 3 ? ` y ${calm.length - 3} más` : ''}: ${calm.length === 1 ? 'está en calma' : 'están en calma'} y ${calm.length === 1 ? 'queda' : 'quedan'} a las guarniciones.</p>` : '';
+        const pending = dr.pieces.some(pc => !dr.decided.has(pc.key));
+        return `<div class="th-draft" data-draft>
+            <b class="small">Propuesta de organización</b>
+            ${stale ? `<div class="row"><span class="small warn-text">La propuesta ha cambiado.</span><button class="btn" data-action="th-refresh" data-th="${t.idx}">Volver a proponer</button></div>` : ''}
+            ${rows || '<p class="small muted">Nada que proponer: no hay vecinos armados, ejércitos sueltos que juntar ni tropa de sobra.</p>'}
+            ${calmNote}
+            <p class="small">${left > 0 ? `${left === 1 ? 'Cabe' : 'Caben'} ${plural(left, 'operación', 'operaciones')} más en tu estado mayor.` : 'No caben más operaciones en tu estado mayor: las agrupaciones y las marchas sí se aceptan.'} Solo se asignan los ejércitos de cada pieza.</p>
+            <div class="row"><button class="btn primary" data-action="th-accept-all" ${pending ? '' : 'disabled'} title="Acepta en orden las que se puedan; se para en el tope de operaciones">Aceptar todo</button>
+                <button class="btn ghost" data-action="th-close">Cerrar</button></div></div>`;
     }
     // Qué hace una agrupación, en una o dos palabras: su ataque coordinado, las órdenes de sus ejércitos o su operación.
     obGroupState(gr, members) {
