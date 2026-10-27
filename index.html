@@ -12480,6 +12480,7 @@ class GameUI {
         this.obFilter = 'todas';     // pestaña Orden de batalla: 'todas', 'pantalla' u 'op:<id>'
         this.obBy = 'provincia';     // cómo se agrupan los sueltos: 'provincia' u 'operacion'
         this.obOpen = new Set();     // agrupaciones desplegadas
+        this.obGarrisonsOpen = false; // fila «Guarniciones» de la pestaña Batalla desplegada
         this.escortMode = 'defensa';  // modo con el que se encarga la siguiente escolta
         this.obSel = new Set();      // ejércitos marcados con la casilla
         this.proposal = null;        // { ids, ghost, skip }: lo que proponen las operaciones asistidas al terminar el turno
@@ -14159,6 +14160,7 @@ class GameUI {
             case 'sel-disband': g.playerDisbandGroup(+d.id); break;
             // Pestaña Orden de batalla
             case 'ob-toggle': if (this.obOpen.has(+d.id)) this.obOpen.delete(+d.id); else this.obOpen.add(+d.id); break;
+            case 'ob-garrisons': this.obGarrisonsOpen = !this.obGarrisonsOpen; break;
             case 'ob-select': if (isMobile()) this.drawerOpen = false; this.selectGroup(+d.id); return;
             case 'ob-center': if (isMobile()) this.drawerOpen = false; this.centerGroup(+d.id); break;
             case 'ob-color': { const gr = g.groupById(g.player, +d.id); if (gr) g.recolorGroup(g.player, gr.id, (gr.color + 1) % GROUP_COLORS.length); break; }
@@ -15831,9 +15833,9 @@ class GameUI {
                 ${sym(a.units, n)}<span><b>${n}</b>${withPlace ? ` en ${where(a)}` : ''}<small>${state(a)} · ${unitText(a.units)}</small></span></label>
                 <button class="btn ghost" data-action="sel-center" data-id="${a.id}" title="Centrar el mapa en él">Ver</button></div>`;
         };
-        const byGroup = new Map(), loose = [];
+        const byGroup = new Map(), loose = [], garrisons = [];   // las guarniciones van aparte: una fila plegada
         for (const a of all) {
-            if (!a.group) { loose.push(a); continue; }
+            if (!a.group) { (g.isGarrison(a) ? garrisons : loose).push(a); continue; }
             let l = byGroup.get(a.group);
             if (!l) byGroup.set(a.group, l = []);
             l.push(a);
@@ -15862,16 +15864,30 @@ class GameUI {
                 ${open ? (escort => (escort ? `<div class="ob-escort"><p class="group-title">Escolta</p>${escort}</div>` : ''))(this.escortBox({ group: gr.id }, true)) : ''}</div>`;
         }).join('');
         // Los sueltos, por provincia (o por operación).
-        const buckets = new Map();
-        for (const a of loose) {
-            if (!pass(a)) continue;
-            const key = this.obBy === 'operacion' ? a.op : afloat(a.cell) ? -1 - SEA_PROV[a.cell] : G.prov[a.cell];
-            let b = buckets.get(key);
-            if (!b) buckets.set(key, b = { list: [], label: this.obBy === 'operacion' ? (a.op ? g.ops.get(a.op)?.name ?? 'Operación' : 'Sin operación') : key < 0 ? `Mar junto a ${PROVINCES[-1 - key].name}` : PROVINCES[key].name });
-            b.list.push(a);
-        }
-        const looseRows = [...buckets.values()].sort((a, b) => a.label.localeCompare(b.label, 'es'))
-            .map(b => `<p class="group-title">${esc(b.label)} · ${b.list.length}</p><div class="ob-list">${b.list.map(a => row(a, false)).join('')}</div>`).join('');
+        const bucketRows = (list, by) => {
+            const buckets = new Map();
+            for (const a of list) {
+                if (!pass(a)) continue;
+                const key = by === 'operacion' ? a.op : afloat(a.cell) ? -1 - SEA_PROV[a.cell] : G.prov[a.cell];
+                let b = buckets.get(key);
+                if (!b) buckets.set(key, b = { list: [], label: by === 'operacion' ? (a.op ? g.ops.get(a.op)?.name ?? 'Operación' : 'Sin operación') : key < 0 ? `Mar junto a ${PROVINCES[-1 - key].name}` : PROVINCES[key].name });
+                b.list.push(a);
+            }
+            return [...buckets.values()].sort((a, b) => a.label.localeCompare(b.label, 'es'))
+                .map(b => `<p class="group-title">${esc(b.label)} · ${b.list.length}</p><div class="ob-list">${b.list.map(a => row(a, false)).join('')}</div>`).join('');
+        };
+        const looseRows = bucketRows(loose, this.obBy);
+        // Guarniciones: una fila plegada encima de «Sin agrupar», con los mismos filtros; sin ellas, no sale.
+        const gar = garrisons.filter(pass), garOpen = this.obGarrisonsOpen;
+        const garUnits = emptyUnits();
+        for (const a of gar) for (const k of UNIT_KEYS) garUnits[k] += a.units[k] || 0;
+        const garN = countUnits(garUnits);
+        const garRow = gar.length ? `<div class="ob-group ${garOpen ? 'open' : ''}" data-ob-garrisons style="--gc:${color}">
+                <div class="ob-head"><button class="ob-symbtn" data-action="ob-garrisons" aria-expanded="${garOpen}" title="${garOpen ? 'Plegar' : 'Desplegar'} las guarniciones">${sym(garUnits, garN)}</button>
+                    <div class="ob-main"><div class="row"><b>Guarniciones</b></div>
+                        <small>${plural(gar.length, 'ejército', 'ejércitos')} · ${plural(garN, 'unidad', 'unidades')} · quietos en sus ciudades</small></div></div>
+                <div class="ob-btns"><button class="btn ghost" data-action="ob-garrisons" title="${garOpen ? 'Plegar' : 'Desplegar'} las guarniciones" aria-label="${garOpen ? 'Plegar' : 'Desplegar'} las guarniciones">${garOpen ? '▴' : '▾'}</button></div>
+                ${garOpen ? bucketRows(gar, 'provincia') : ''}</div>` : '';
         const nLoose = loose.filter(pass).length;
         const seg = (act, cur, items) => `<div class="seg">${items.map(([v, l, t]) => `<button data-action="${act}" data-value="${v}" class="${cur === v ? 'on' : ''}" ${t ? `title="${t}"` : ''}>${l}</button>`).join('')}</div>`;
         body.innerHTML = `${this.obBar()}
@@ -15879,9 +15895,10 @@ class GameUI {
             <div class="row ob-filters">${seg('ob-filter', fop ? '' : f, [['todas', 'Todas'], ['pantalla', 'En pantalla', 'Solo los ejércitos que ves ahora en el mapa']])}
                 ${ops.length ? `<select data-ob-op aria-label="Filtrar por operación"><option value="0">Operación…</option>${ops.map(o => `<option value="${o.id}" ${fop === o.id ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select>` : ''}</div>
             <div class="ob-groups">${groupRows || `<p class="note" style="margin:8px">${groups.length ? 'Ninguna agrupación tiene ejércitos que cumplan el filtro.' : 'Aún no hay agrupaciones. Marca ejércitos de la lista de abajo y crea una, o elígelos en el mapa con Ctrl + clic o un rectángulo.'}</p>`}</div>
+            ${garRow}
             <p class="group-title">Sin agrupar · ${nLoose}</p>
             ${loose.length ? `<div class="row" style="margin:0 8px 4px"><span class="small muted">Agrupados por</span>${seg('ob-by', this.obBy, [['provincia', 'Provincia'], ['operacion', 'Operación']])}</div>` : ''}
-            ${looseRows || '<p class="note" style="margin:8px">Todos tus ejércitos están en una agrupación.</p>'}
+            ${looseRows || `<p class="note" style="margin:8px">${gar.length ? 'Todos tus ejércitos son guarniciones o están en una agrupación.' : 'Todos tus ejércitos están en una agrupación.'}</p>`}
             <p class="note" style="margin-top:10px">Una agrupación es una etiqueta para elegir y mandar a la vez: sus ejércitos siguen en su operación. Alt + 1–9 elige la de ese número.</p>`;
     }
     // Directiva nacional: postura, objetivos estratégicos, presupuesto opcional y retaguardia.

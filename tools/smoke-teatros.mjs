@@ -178,6 +178,29 @@ const CHECKS = [
         T.ok($('#map-menu').querySelector('[data-action="layer-garrisons"]') && $('#map-menu').textContent.includes('Guarniciones de lejos'), 'la casilla está en el panel Mapa');
         ui.mapMenu = false; ui.render();
         return true;
+    }],
+    ['3 · Batalla: guarniciones en una fila plegada que no cuenta en Sin agrupar', () => {
+        const g = T.uiStart('es'), es = g.player;
+        for (const a of [...g.armies.values()]) if (a.owner === es) g.removeArmy(a);
+        const gars = [0, 1, 2].map(i => T.army(g, es, T.cleanCity(g, es, i), 2 + i));
+        const bigs = [0, 1].map(i => T.army(g, es, T.plainPair(g, es, i)[1], 12));
+        T.ok(gars.every(a => g.isGarrison(a)) && bigs.every(a => !g.isGarrison(a)), 'tres guarniciones y dos grandes');
+        ui.tab = 'batalla'; ui.drawerOpen = true; ui.obGarrisonsOpen = false; ui.render();
+        const body = $('#drawer-body'), row = body.querySelector('[data-ob-garrisons]');
+        T.ok(row && row.textContent.includes('3 ejércitos') && row.textContent.includes('Guarniciones'), 'la fila dice «Guarniciones · 3 ejércitos»: ' + row?.textContent.replace(/s+/g, ' '));
+        T.ok(row.textContent.includes('9 unidades'), 'y sus 9 unidades');
+        T.eq(row.querySelectorAll('[data-ob-army]').length, 0, 'plegada: sin filas de ejército');
+        T.ok(body.textContent.includes('Sin agrupar · 2'), 'Sin agrupar cuenta solo los grandes');
+        T.eq(body.querySelectorAll('[data-ob-army]').length, 2, 'solo los dos grandes en la lista');
+        body.querySelector('[data-action="ob-garrisons"]').click();
+        T.eq($('#drawer-body').querySelectorAll('[data-ob-army]').length, 5, 'desplegada: tres filas más');
+        T.eq($('#drawer-body').querySelector('[data-ob-garrisons]').querySelectorAll('[data-ob-army]').length, 3, 'dentro de la fila');
+        $('#drawer-body').querySelector('[data-action="ob-garrisons"]').click();
+        T.eq($('#drawer-body').querySelectorAll('[data-ob-army]').length, 2, 'se pliega otra vez');
+        for (const a of gars) g.removeArmy(a);
+        ui.render();
+        T.ok(!$('#drawer-body').querySelector('[data-ob-garrisons]'), 'sin guarniciones, no sale la fila');
+        return true;
     }]
 ];
 
