@@ -8194,7 +8194,8 @@ class GameEngine {
     // --- Proponer organización ---
     // Borrador para el teatro `th` de `id`, que el jugador acepta pieza a pieza (acceptPiece). Calcularlo no cambia nada.
     // Las piezas van por este orden y no comparten ejércitos: cada una toma solo los sin encargo del teatro que no tomó
-    // una anterior.
+    // otra. Se calculan líneas, reserva, marchas y agrupaciones (las marchas antes, para que se lleven las masas
+    // más grandes), pero la lista sale en el orden de abajo.
     // - Líneas (theatreLines): con los sueltos más cercanos (en pasos), tantos como casillas; `short`, los que faltan.
     // - Una reserva, si el teatro no tiene ya una (reserveSpot), sin ejércitos: los recibe luego.
     // - Agrupaciones: racimos de 3 o más sueltos a 2 casillas o menos unos de otros, los 6 de más unidades.
@@ -8232,20 +8233,7 @@ class GameEngine {
                         + (this.nations[id].command.rear ? '' : '; enciende Retaguardia para que mande aquí lo que sobra en las ciudades sin peligro') });
             }
         }
-        // 3. Agrupaciones: racimos por cercanía (unión de los que están a 2 casillas o menos).
-        const pool = free(), at = new Map(pool.map((a, i) => [a.cell, i])), parent = pool.map((_, i) => i);
-        const root = i => { while (parent[i] !== i) i = parent[i] = parent[parent[i]]; return i; };
-        pool.forEach((a, i) => { for (const x of this.nearCells(a.cell, 2).keys()) { const j = at.get(x); if (j !== undefined && j !== i) parent[root(i)] = root(j); } });
-        const clusters = new Map();
-        pool.forEach((a, i) => { const r = root(i); if (!clusters.has(r)) clusters.set(r, []); clusters.get(r).push(a); });
-        const groups = [...clusters.values()].filter(c => c.length >= 3).sort((x, y) => sum(y) - sum(x) || x[0].id - y[0].id).slice(0, 6);
-        for (const c of groups) {
-            for (const a of c) taken.add(a.id);
-            const head = c.reduce((m, a) => (size(a) > size(m) ? a : m));
-            piece({ key: `group:${Math.min(...c.map(a => a.id))}`, kind: 'group', armies: c.map(a => a.id), cells: c.map(a => a.cell),
-                text: `Agrupar ${plural(c.length, 'ejército', 'ejércitos')} (${unitsText(sum(c))}) junto a ${this.placeName(head.cell)}` });
-        }
-        // 4. Marchas a los teatros poco defendidos.
+        // Marchas a los teatros poco defendidos, antes que las agrupaciones: así las masas más grandes son las que se mandan.
         const bal = this.troopBalance(id);
         if (bal.over.includes(th) && bal.under.length) {
             const U = d.list.map(x => x.units), total = U.reduce((s, x) => s + x, 0), D = bal.share.map(s => s.danger), part = i => U[i] / total;
@@ -8275,6 +8263,22 @@ class GameEngine {
                     text: `Mandar ${unitsText(size(a))} de ${this.placeName(a.cell)} a ${this.placeName(dest)} (${d.list[j].name}): ${plural(turns, 'turno', 'turnos')}, ${path.some(afloat) ? 'por mar' : 'por tierra'}` });
             }
         }
+        // Agrupaciones, con lo que queda libre: racimos por cercanía (unión de los que están a 2 casillas o menos).
+        const pool = free(), at = new Map(pool.map((a, i) => [a.cell, i])), parent = pool.map((_, i) => i);
+        const root = i => { while (parent[i] !== i) i = parent[i] = parent[parent[i]]; return i; };
+        pool.forEach((a, i) => { for (const x of this.nearCells(a.cell, 2).keys()) { const j = at.get(x); if (j !== undefined && j !== i) parent[root(i)] = root(j); } });
+        const clusters = new Map();
+        pool.forEach((a, i) => { const r = root(i); if (!clusters.has(r)) clusters.set(r, []); clusters.get(r).push(a); });
+        const groups = [...clusters.values()].filter(c => c.length >= 3).sort((x, y) => sum(y) - sum(x) || x[0].id - y[0].id).slice(0, 6);
+        for (const c of groups) {
+            for (const a of c) taken.add(a.id);
+            const head = c.reduce((m, a) => (size(a) > size(m) ? a : m));
+            piece({ key: `group:${Math.min(...c.map(a => a.id))}`, kind: 'group', armies: c.map(a => a.id), cells: c.map(a => a.cell),
+                text: `Agrupar ${plural(c.length, 'ejército', 'ejércitos')} (${unitsText(sum(c))}) junto a ${this.placeName(head.cell)}` });
+        }
+        // En la lista, el orden de la spec: líneas, reserva, agrupaciones y marchas.
+        const order = ['line', 'reserve', 'group', 'march'];
+        pieces.sort((x, y) => order.indexOf(x.kind) - order.indexOf(y.kind));
         return { th, stamp, pieces };
     }
     // Líneas que propondría el teatro `t`: contra los vecinos de su frontera peligrosa de peso 2 o 3 (en guerra o con

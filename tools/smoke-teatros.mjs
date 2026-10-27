@@ -488,6 +488,26 @@ const CHECKS = [
         T.eq(g.proposeOrganization(es, metro).pieces.filter(x => x.kind === 'march').length, 0, 'la metrópoli no manda nada');
         return true;
     }],
+    ['6 · propuesta: en el teatro muy defendido, la masa mayor marcha y no se agrupa', () => {
+        const { g, es, far, mine, block } = T.marchScene();
+        for (const a of mine) g.removeArmy(a);
+        // Cuatro sueltos juntos (a una casilla del primero): el mayor haría racimo con los otros tres.
+        const inBlock = c => block.includes(G.prov[c]);
+        const c = block.flatMap(pid => PROVINCES[pid].cells).find(x => T.free(g, x) && [0, 1, 2, 3, 4, 5].map(d => G.nb[x * 6 + d]).filter(j => j >= 0 && inBlock(j) && T.free(g, j)).length >= 3);
+        T.ok(c !== undefined, 'hay sitio para el racimo');
+        const nbs = [0, 1, 2, 3, 4, 5].map(d => G.nb[c * 6 + d]).filter(j => j >= 0 && inBlock(j) && T.free(g, j)).slice(0, 3);
+        const big = T.army(g, es, c, 40);
+        for (const x of nbs) T.army(g, es, x, 5);
+        T.ok(g.troopBalance(es).over.includes(far), 'el teatro francés, muy defendido');
+        const p = g.proposeOrganization(es, far);
+        T.ok(p.pieces.some(x => x.kind === 'march' && x.armies.includes(big.id)), 'la masa mayor marcha: ' + JSON.stringify(p.pieces.map(x => x.text)));
+        T.ok(!p.pieces.some(x => x.kind === 'group' && x.armies.includes(big.id)), 'y no va en una agrupación');
+        const all = p.pieces.flatMap(x => x.armies);
+        T.eq(all.length, new Set(all).size, 'las piezas no comparten ejércitos');
+        const order = ['line', 'reserve', 'group', 'march'];
+        T.ok(p.pieces.every((x, i) => !i || order.indexOf(p.pieces[i - 1].kind) <= order.indexOf(x.kind)), 'la lista, en el orden de la spec');
+        return true;
+    }],
     ['6 · aceptar: exactamente sus ejércitos, sin tocar las operaciones del jugador', () => {
         // Línea, con una reserva del jugador de 2 ejércitos lejos de la frontera.
         let { g, es, mine, metro } = T.lineScene();
