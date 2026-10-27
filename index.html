@@ -16045,7 +16045,10 @@ class GameUI {
         const unread = g.logs.length - this.seenLog;
         if (this.tab === 'registro' && this.drawerOpen) this.seenLog = g.logs.length;
         const tabs = [['paises', 'Países'], ['mando', 'Mando'], ['batalla', 'Batalla'], ['alianzas', 'Alianzas'], ['registro', 'Registro']];
-        const keep = this.tab === 'batalla' ? $('#drawer-body')?.scrollTop ?? 0 : 0;   // la lista larga no salta al principio
+        // Al redibujar la misma pestaña (y, en Países, la misma ficha), el panel no salta al principio.
+        const view = `${this.tab}:${this.tab === 'paises' ? this.focusNation : ''}`;
+        const keep = view === this.drawerView ? $('#drawer-body')?.scrollTop ?? 0 : 0;
+        this.drawerView = this.drawerOpen ? view : null;
         if (this.view && (this.tab !== 'batalla' || !this.drawerOpen) && this.view.groupFocus) { this.view.groupFocus = 0; this.view.draw(); }
         el.innerHTML = `<div class="sheet-grip" data-sheet-grip role="button" aria-label="Agrandar o achicar el panel"><i></i></div><div class="tabs">
             ${tabs.map(([id, label]) => `<button data-action="tab" data-tab="${id}"${id === 'batalla' ? ' title="Orden de batalla (B)"' : ''} class="${this.tab === id ? 'on' : ''}">${label}${id === 'registro' && unread > 0 && this.tab !== 'registro' ? `<span class="count">${unread}</span>` : ''}</button>`).join('')}
@@ -16054,9 +16057,10 @@ class GameUI {
         if (!this.drawerOpen) return;
         if (this.tab === 'paises') this.renderNations();
         else if (this.tab === 'mando') this.renderCommand();
-        else if (this.tab === 'batalla') { this.renderBattleOrder(); $('#drawer-body').scrollTop = keep; }
+        else if (this.tab === 'batalla') this.renderBattleOrder();
         else if (this.tab === 'alianzas') this.renderBlocs();
         else this.renderLog();
+        $('#drawer-body').scrollTop = keep;
     }
 
     renderNations() {
@@ -16867,7 +16871,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.27-120716';
+const APP_VERSION = '2026.10.27-122910';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
