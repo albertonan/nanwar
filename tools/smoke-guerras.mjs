@@ -477,6 +477,31 @@ const CHECKS = [
         T.ok(g.atWar(it, es) && g.alerts.some(a => a.from === it), `aviso del señor: ${JSON.stringify(g.alerts)}`);
         return true;
     }],
+    ['N3 · a un vencido se le anexiona entero de una vez, como a un satélite; sus satélites pasan a ser tuyos', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr'), be = T.nation('be');
+        g.declareWar(es, fr);
+        g.makeSatellite(be, fr);
+        g.alerts = [];
+        const open = () => { document.querySelector('#peace-dialog').open && document.querySelector('#peace-dialog').close(); ui.drawerOpen = true; ui.tab = 'paises'; ui.focusNation = fr; ui.render(); document.querySelector('#drawer-body [data-action="peace-open"]').click(); };
+        open();
+        const opt = () => document.querySelector('#peace-body [data-action="peace-mode"][data-mode="total"]');
+        T.ok(opt()?.disabled, 'sin vencerlo, la opción está pero no se puede elegir');
+        T.ok(!g.acceptsPeace(fr, { mode: 'total' }, false), 'y no la acepta');
+        g.owner[g.nations[fr].capitalCell] = es; g.version++;   // le tomas la capital: vencido
+        T.ok(g.isCrushed(fr), 'vencido');
+        open();
+        opt().click();
+        const armies = [...g.armies.values()].filter(a => a.owner === fr).length, gold = g.nations[es].gold + g.nations[fr].gold;
+        document.querySelector('#peace-body [data-action="peace-send"]').click();
+        T.ok(!g.nations[fr].alive, 'Francia desaparece');
+        T.ok(G.land.every(c => g.legal[c] !== fr && g.owner[c] !== fr), 'todo su territorio es de otro');
+        T.ok(G.land.filter(c => g.legal[c] === es).length > 0 && g.legal[g.nations[fr].capitalCell] === es, 'su capital, tuya');
+        T.ok(armies > 0 && ![...g.armies.values()].some(a => a.owner === fr), 'su ejército pasa a ti');
+        T.eq(g.nations[es].gold, gold, 'y su tesoro');
+        T.ok(g.nations[be].overlord === es && !g.atWar(be, es), 'su satélite pasa a ser tuyo, en paz contigo');
+        T.ok(g.logs.some(l => l.msg.includes(`se anexiona ${g.nm(fr)} entera`)), 'el registro lo dice');
+        return true;
+    }],
     ['M2 · con niebla el cajón no deja ver la relación de fuerzas; frases exactas', () => {
         const drawer = (g, t) => { ui.drawerOpen = true; ui.tab = 'paises'; ui.focusNation = t; ui.render(); return document.querySelector('#drawer-body').innerText; };
         let g = T.uiStart('es', true), es = g.player, fr = T.nation('fr');
