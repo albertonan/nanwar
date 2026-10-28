@@ -216,6 +216,8 @@
         #replay { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); display: flex; gap: 12px; align-items: center; padding: 8px 10px 8px 14px; z-index: 4; max-width: calc(100% - 24px); }
         .alert { padding: 10px 12px; border-left: 5px solid var(--war); background: var(--raised); border-radius: 8px; margin-top: 8px; }
         .alert.ally { border-left-color: var(--signal); }
+        .toast .row.mute { margin-top: 4px; align-items: center; gap: 4px; }
+        .toast .row.mute .btn { padding: 2px 8px; }
         #tooltip {
             position: absolute; pointer-events: none; background: rgba(21, 26, 18, 0.94); border: 1px solid var(--line);
             padding: 7px 10px; border-radius: 6px; font-size: 13px; line-height: 1.45; max-width: 290px; z-index: 4;
@@ -1397,6 +1399,7 @@ class GameEngine {
         this.proposals = [];
         this.alerts = [];           // partes de guerra para el jugador (se muestran al volver a su turno)
         this.proposedThisTurn = new Set();
+        this.peaceMute = new Map();   // país → turno hasta el que el jugador no quiere ver sus propuestas de paz (Infinity: siempre)
         this.version = 0;       // cambia con la propiedad de las casillas
         this.roadVersion = 0;   // cambia al construir
         this.blocVersion = 0;   // cambia con las alianzas
@@ -1546,6 +1549,7 @@ class GameEngine {
             format: 'eurowar-1', mapId: MAP_ID, map: `${G.land.length}:${PROVINCES.length}`, move: MOVE,
             seed: this.seed, rng: this.rng.state, turn: this.turn, player: this.player, over: this.over, won: this.won,
             settings: this.settings, logs: this.logs.slice(-150), proposals: this.proposals, proposed: [...this.proposedThisTurn],
+            peaceMute: [...this.peaceMute].map(([id, until]) => [id, until === Infinity ? -1 : until]),
             owner: runs, legal: compress(this.legal), dev: Array.from(this.dev), roads: this.roadEdges(), broken: this.brokenEdges(),
             fortLv: G.land.filter(i => this.fort[i]).map(i => [i, this.fort[i]]), fortWork: [...this.fortWork].map(([c, w]) => [c, w.owner, w.left, w.up ? 1 : 0]),
             roadWork: [...this.roadWork].map(([k, w]) => [k, w.owner, w.left, w.cls]),
@@ -1628,6 +1632,7 @@ class GameEngine {
             : p.kind === 'bloque' ? { kind: 'bloque', from: nat(p.from), blocId: p.blocId === null || p.blocId === undefined ? null : int(p.blocId, 0, 1e6, 0) }
             : { kind: 'paz', from: nat(p.from), ...(PEACE_WHY.includes(p.why) ? { why: p.why } : {}) }));
         g.proposedThisTurn = new Set(list(data.proposed).map(x => str(x, 40)));
+        g.peaceMute = new Map(list(data.peaceMute).filter(Array.isArray).map(([id, until]) => [nat(id), until === -1 ? Infinity : int(until, 0, 1e6, 0)]));
         const s = data.settings ?? {};
         g.settings = {
             aggression: Object.prototype.hasOwnProperty.call(AGGRESSION, s.aggression) ? s.aggression : 'normal',
@@ -9573,12 +9578,15 @@ class GameEngine {
             if (this.atWar(s.id, foe)) continue;
             this.startWar(s.id, foe, s.id, { kind: 'señor', provinces: [], for: side });
             this.log(`${s.name}, satélite de ${this.nm(side)}, entra en la guerra contra ${this.nm(foe)}.`);
-            if (foe === this.player) this.alerts.push({ kind: 'joined', from: s.id, defending: side });
+            if (foe === this.player) this.alerts.push({ kind: 'sat', from: s.id, lord: side });
         }
         const lord = this.nations[b].overlord;
         if (lord >= 0 && !handled.has(lord) && lord !== a && !this.atWar(lord, a)) {
             if (lord === this.player) this.proposals.push({ kind: 'llamada', from: b, against: a });
-            else this.startWar(lord, a, lord, { kind: 'alianza', provinces: [], for: b });
+            else {
+                this.startWar(lord, a, lord, { kind: 'alianza', provinces: [], for: b });
+                if (a === this.player) this.alerts.push({ kind: 'joined', from: lord, defending: b });
+            }
         }
         this.warVersion++;
         return true;
@@ -9632,7 +9640,10 @@ class GameEngine {
         this.blocsChanged();
         // Hace la paz con quien no esté en guerra con su señor y entra en las guerras de su señor.
         for (const e of this.enemiesOf(sat)) if (!this.atWar(lord, e)) this.settlePeace(sat, e, { mode: 'annex' });
-        for (const e of this.enemiesOf(lord)) if (!this.atWar(sat, e)) this.startWar(sat, e, sat, { kind: 'señor', provinces: [], for: lord });
+        for (const e of this.enemiesOf(lord)) if (!this.atWar(sat, e)) {
+            this.startWar(sat, e, sat, { kind: 'señor', provinces: [], for: lord });
+            if (e === this.player) this.alerts.push({ kind: 'sat', from: sat, lord });
+        }
         this.warVersion++;
         this.proposals = this.proposals.filter(p => p.from !== sat);
         this.version++;
@@ -10326,6 +10337,11 @@ class GameEngine {
         const bloc = this.bloc(blocId);
         if (bloc) this.leaveBloc(bloc, this.player);
     }
+    // ¿Oculta el jugador las propuestas de paz de `from`? Hasta un turno (las de «10 turnos») o siempre.
+    peaceMuted(from) { return (this.peaceMute.get(from) ?? -1) > this.turn; }
+    // Ocultar sus propuestas de paz `turns` turnos (0: siempre); la propuesta sigue en pie y se negocia desde su ficha.
+    playerMutePeace(from, turns) { this.peaceMute.set(from, turns > 0 ? this.turn + turns : Infinity); }
+    playerUnmutePeace(from) { this.peaceMute.delete(from); }
     answerProposal(index, accept, ignored = false) {
         const pr = this.proposals.splice(index, 1)[0];
         if (!pr) return;
@@ -10341,7 +10357,10 @@ class GameEngine {
             }
             return;
         }
-        if (!accept) { this.log(`${verb} la propuesta de ${pr.kind === 'paz' ? 'paz' : 'alianza'} de ${this.nm(pr.from)}.`); return; }
+        if (!accept) {
+            if (!(ignored && pr.kind === 'paz' && this.peaceMuted(pr.from))) this.log(`${verb} la propuesta de ${pr.kind === 'paz' ? 'paz' : 'alianza'} de ${this.nm(pr.from)}.`);   // la oculta, sin repetirla
+            return;
+        }
         if (pr.kind === 'paz' && this.atWar(pr.from, p)) this.settlePeace(p, pr.from, { mode: 'annex' });
         else if (pr.kind === 'bloque' && !this.atWar(pr.from, p)) {
             let bloc = pr.blocId ? this.bloc(pr.blocId) : null;
@@ -10381,7 +10400,7 @@ class GameEngine {
                 if (this.proposals.some(p => p.kind === 'paz' && p.from === id)) continue;
                 this.proposals.push({ kind: 'paz', from: id, why: wish.why });
                 // En el registro, la primera vez y luego cada PEACE_LOG_TURNS mientras siga en pie (la propuesta, cada turno).
-                if (!w?.told || this.turn - w.told[0] >= CONFIG.PEACE_LOG_TURNS) {
+                if (!this.peaceMuted(id) && (!w?.told || this.turn - w.told[0] >= CONFIG.PEACE_LOG_TURNS)) {
                     if (w) w.told = [this.turn, wish.why];
                     this.log(`${this.nm(id)} propone la paz: ${PEACE_WHY_TEXT[wish.why]}.`);
                 }
@@ -14955,6 +14974,8 @@ class GameUI {
             case 'recruit-qty': this.recruitQty = d.qty === 'max' ? Infinity : +d.qty; break;
             case 'diplo': g.playerDiplomacy(d.kind, +d.target); break;
             case 'invite': g.playerInvite(+d.bloc, +d.target); break;
+            case 'peace-mute': g.playerMutePeace(+d.target, +d.turns); break;
+            case 'peace-unmute': g.playerUnmutePeace(+d.target); break;
             case 'accept': case 'reject':
                 g.answerProposal(+d.index, d.action === 'accept');
                 if ($('#alerts-dialog').open) this.renderAlerts();
@@ -15157,6 +15178,7 @@ class GameUI {
             const cap = g.nations[a.from].capitalCell;
             if (a.kind === 'war') items.push(`<div class="alert"><p><b>${g.nm(a.from)}</b> te ha declarado la guerra.</p>
                 <div class="row" style="margin-top:6px"><button class="btn" data-action="alert-goto" data-cell="${cap}">Ver en el mapa</button></div></div>`);
+            else if (a.kind === 'sat') items.push(`<div class="alert"><p><b>${g.nm(a.from)}</b>, satélite de ${g.nm(a.lord)}, entra en la guerra contra ti.</p></div>`);
             else items.push(`<div class="alert"><p><b>${g.nm(a.from)}</b> entra en la guerra contra ti en defensa de ${g.nm(a.defending)}.</p></div>`);
         }
         g.proposals.forEach((pr, i) => {
@@ -15167,7 +15189,8 @@ class GameUI {
                 <button class="btn" data-action="reject" data-index="${i}">No intervenir</button></div></div>`);
         });
         const pending = g.proposals.some(p => p.kind === 'llamada');
-        $('#alerts-body').innerHTML = `<h2>Partes de guerra</h2>
+        // El foco empieza en el título, no en un botón: el Intro con el que se termina el turno no lo cierra sin leerlo.
+        $('#alerts-body').innerHTML = `<h2 tabindex="-1" autofocus style="outline:none">Partes de guerra</h2>
             ${items.join('') || '<p class="note" style="margin-top:8px">Ya has respondido a todo.</p>'}
             <div class="row" style="margin-top:14px;justify-content:flex-end">
                 <button class="btn ${pending ? '' : 'primary'}" data-action="alerts-close">${pending ? 'Decidir más tarde' : 'Entendido'}</button></div>`;
@@ -15768,6 +15791,11 @@ class GameUI {
             const asked = g.proposedThisTurn.has(`paz${t}`);
             html += `<p class="small muted">En guerra desde el turno ${r.since}.</p>
                 <div class="row" style="margin-top:8px"><button class="btn" data-action="peace-open" data-target="${t}" ${asked ? 'disabled' : ''}>${asked ? 'Paz ya propuesta este turno' : 'Negociar la paz'}</button></div>`;
+            if (g.peaceMuted(t)) {
+                const until = g.peaceMute.get(t);
+                html += `<p class="small muted" style="margin-top:8px">Tienes ocultas sus propuestas de paz${until === Infinity ? '' : ` hasta el turno ${until}`}.</p>
+                    <div class="row" style="margin-top:6px"><button class="btn ghost" data-action="peace-unmute" data-target="${t}">Volver a mostrarlas</button></div>`;
+            }
             const helpers = g.nations.filter(n => n.alive && n.id !== p0 && g.allied(p0, n.id) && n.overlord < 0 && !g.atWar(n.id, t));
             if (helpers.length) {
                 const label = x => { const o = g.callToWarOdds(x, t); return o >= 0.6 ? 'probable' : o >= 0.3 ? 'dudoso' : o > 0 ? 'improbable' : 'no puede'; };
@@ -15956,6 +15984,7 @@ class GameUI {
         const g = this.game;
         $('#toasts').innerHTML = (this.flashes ?? []).map(f => `<div class="toast float done"><p>${f.html}</p>
             ${f.action ? `<div class="row"><button class="btn" data-action="${f.action}"${f.data ? ` data-id="${f.data}"` : ''}>${f.label}</button></div>` : ''}</div>`).join('') + g.proposals.map((pr, i) => {
+            if (pr.kind === 'paz' && g.peaceMuted(pr.from)) return '';   // la oculta el jugador
             const who = `<b>${g.nm(pr.from)}</b>`;
             let text, yes = 'Aceptar', no = 'Rechazar';
             if (pr.kind === 'paz') text = `${who} te propone la paz${PEACE_WHY_TEXT[pr.why] ? `: ${PEACE_WHY_TEXT[pr.why]}` : ''}.`;
@@ -15965,7 +15994,10 @@ class GameUI {
             if (pr.kind === 'paz') yes = 'Negociar';
             return `<div class="toast float" style="border-left-color:${g.nations[pr.from].color}"><p>${text}</p>
                 <div class="row"><button class="btn primary" ${yesAction}>${yes}</button>
-                <button class="btn" data-action="reject" data-index="${i}">${no}</button></div></div>`;
+                <button class="btn" data-action="reject" data-index="${i}">${no}</button></div>
+                ${pr.kind === 'paz' ? `<div class="row mute"><span class="small muted">Ocultar sus propuestas</span>
+                <button class="btn ghost" data-action="peace-mute" data-target="${pr.from}" data-turns="10">10 turnos</button>
+                <button class="btn ghost" data-action="peace-mute" data-target="${pr.from}" data-turns="0">Siempre</button></div>` : ''}</div>`;
         }).join('');
     }
 
@@ -16906,7 +16938,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.28-122012';
+const APP_VERSION = '2026.10.28-123146';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
