@@ -344,6 +344,21 @@ const CHECKS = [
     T.eq(cells, [s, s, c], 'espera dos turnos y desembarca');
     return true;
 }],
+['5 · si toda la ofensiva cruza el mar, el que aún no ha embarcado no frena a los barcos', () => {
+    const g = T.game(), es = T.nation('es'), gb = T.nation('gb');
+    g.start(es); g.declareWar(es, gb);
+    const goal = g.nations[gb].capitalCell, [c, s] = T.coast(g, es, { near: goal });
+    T.eq(g.orderField(es, goal, { key: 't', land: true }).to(c), Infinity, 'precondición: por tierra no se llega');
+    const op = g.createOp(es, 'ofensiva', [c, goal], { noCap: true });
+    const land = g.settle(g.newArmy(es, c, { infantry: 3, tank: 0, artillery: 0 }, 999)), ship = T.embark(g, es, s, 3);
+    for (const a of [land, ship]) g.assignArmy(a, op.id);
+    op.phase = 'avance'; op.body = [land.id, ship.id];   // ya lanzada, con los dos en el grueso
+    const x0 = g.opAlong(op, c);
+    g.executeOp(op);   // el de tierra ya ha gastado el turno: se queda en la costa
+    const x1 = g.opAlong(op, g.armies.get(ship.id).cell);
+    T.ok(x1 > x0 + OP_LEAD + 1, `el barco navega a su ritmo (${x0.toFixed(1)} → ${x1.toFixed(1)})`);
+    return true;
+}],
 ['5 · la orden prefiere no terminar el turno en una casilla de mar expuesta', () => {
     const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
     g.start(es); g.declareWar(es, fr);

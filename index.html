@@ -4726,7 +4726,9 @@ class GameEngine {
         if (other === a.id) return a;
         const o = this.armies.get(other);
         for (const k of UNIT_KEYS) if (a.units[k]) o.units[k] = (o.units[k] || 0) + a.units[k];
-        o.used = Math.max(o.used, a.used);
+        // El refuerzo que llega a su ejército (a.rein, con la orden de juntarse con él) se le suma en marcha: no le quita el
+        // movimiento. Si no, el que recibe refuerzos cada turno no se mueve nunca.
+        if (!(a.rein && a.order?.kind === 'join' && a.order.target === o.id)) o.used = Math.max(o.used, a.used);
         o.hunger = Math.max(o.hunger || 0, a.hunger || 0);
         o.disorgUntil = Math.max(o.disorgUntil || 0, a.disorgUntil || 0);   // desorganizado: el que más dure
         o.rocketTurn = Math.max(o.rocketTurn || 0, a.rocketTurn || 0);   // si uno ya ha lanzado su salva, el otro no la repite
@@ -6209,8 +6211,9 @@ class GameEngine {
         const here = a => this.armies.has(a.id) && a.owner === id && a.op === op.id && this.armyOn(a.cell) === a;
         const stall = op.stall ??= new Map();
         for (const x of [...stall.keys()]) if (!ids.has(x)) stall.delete(x);
-        // El grueso que marca el paso: los suyos en tierra que manda la operación (los barcos van a su ritmo).
-        const pacers = () => crew.filter(a => body.has(a.id) && here(a) && !afloat(a.cell));
+        // El grueso que marca el paso: los suyos que manda la operación y llegan por tierra (opWalks; los barcos, y quien
+        // tiene que embarcar, van a su ritmo).
+        const pacers = () => crew.filter(a => body.has(a.id) && here(a) && this.opWalks(op, a, goal));
         const alongOf = a => this.opAlong(op, a.cell);
         let wpMoved = false;
         for (;;) {
@@ -6245,10 +6248,10 @@ class GameEngine {
             const r = this.reach(id, a.cell, this.mp(a), a.used === 0);
             if (this.flee(a, r)) { tally.moved++; continue; }
             if (afloat(a.cell) && this.opHoldShip(op, a, goal, landState())) { this.reattach(a); continue; }
-            const others = pacers().filter(b => b !== a && b !== a0);
-            const lim = Math.min(cap, others.length ? others.reduce((m, b) => Math.min(m, alongOf(b)), Infinity) + OP_LEAD : Infinity);
+            const rear = pacers().filter(b => b !== a && b !== a0).reduce((m, b) => Math.min(m, alongOf(b)), Infinity);
             let f = lane.has(a.cell) ? this.opField(op, goal, a, true) : null;
             if (!f || f.to(a.cell) === Infinity) f = this.opField(op, goal, a, false);   // fuera del pasillo, o sin paso por él
+            const lim = this.opRearLim(op, a, f, r, Math.min(cap, rear + OP_LEAD), rear, cap);
             const pick = this.opPick(a, f, r, v => this.opAlong(op, v) <= lim, v => this.opAlong(op, v));
             let cell = pick.cell;
             if ((pick.held || cell < 0) && !short.has(a0.id)) {   // ante un enemigo al que no llega, aguanta
@@ -6270,6 +6273,35 @@ class GameEngine {
         op.body = [...others, ...body].filter(x => alive.has(x));
         op.waiting = waiting;
         if (wpMoved) tally.notes.push(`Avance hacia el punto ${op.wp + 1} de ${op.cells.length}`);
+    }
+    // ¿Marca `a` el paso de la ofensiva hacia `dest`? Solo quien está en tierra y, si la flecha cruza el mar, llega por
+    // tierra que pueda pisar (landSteps, sin contar ejércitos): el que tiene que embarcar va al ritmo de los barcos. Si
+    // no, cuando toda la ofensiva cruza el mar, los que aún no han embarcado frenan a los barcos (OP_LEAD) y los barcos
+    // les quitan las casillas de mar donde embarcar: nadie se mueve. Los pasos se guardan por pasada, como los caminos.
+    opWalks(op, a, dest) {
+        if (afloat(a.cell)) return false;
+        if (!op.bySea) return true;
+        const stamp = this.passStamp ?? `${this.turn}:${this.version}:${this.blocVersion}`, c = (this.walkSteps ??= { stamp: null, map: new Map() });
+        if (c.stamp !== stamp) { c.stamp = stamp; c.map.clear(); }
+        const key = op.owner * G.N + dest;
+        let steps = c.map.get(key);
+        if (!steps) c.map.set(key, steps = this.landSteps(op.owner, [dest]));
+        return steps[a.cell] < 1e9;
+    }
+    // El tope de adelanto `lim` de `a` (OP_LEAD por delante de `rear`, el más atrasado de los demás) no frena al más
+    // atrasado, que no espera a nadie: si ninguna casilla libre que lo acerca (en el campo `f`) cabe bajo él, sube hasta la
+    // que menos se adelanta de ellas, sin pasar de `hard` (el tope que sí lo frena). Sin esto, en un atasco (lo de delante
+    // ocupado por los suyos hasta más allá del tope) se esperan unos a otros para siempre.
+    opRearLim(op, a, f, r, lim, rear, hard = Infinity) {
+        if (rear === Infinity || this.opAlong(op, a.cell) > rear) return lim;
+        const here = f.to(a.cell);
+        let low = Infinity;
+        for (const v of this.destinations(r)) {
+            if (this.armyAt[v] || !f.done[v] || f.dist[v] >= here) continue;
+            const x = this.opAlong(op, v);
+            if (x <= hard && x < low) low = x;
+        }
+        return low < Infinity ? Math.max(lim, low) : lim;
     }
     // Mientras espera a los demás, un ejército de la ofensiva toma de camino una casilla enemiga vacía de tierra del
     // pasillo que alcance este turno: sin pasar del tope de adelanto `lim` ni quedar más de 2 casillas por detrás de
@@ -6343,7 +6375,7 @@ class GameEngine {
         }
         say('pin', pinned.length ? `La punta no puede dejar guarnición en ${pinned.map(a => this.placeName(a.cell)).join(', ')}: se queda hasta que caiga` : '');
         const pin = new Set(pinned.map(a => a.id));
-        const landState = () => { const g = crew.filter(a => pbody.has(a.id) && here(a) && !afloat(a.cell)); return !g.length ? 'none' : g.some(a => hexDist(a.cell, goal) <= 1) ? 'ready' : 'far'; };
+        const landState = () => { const g = crew.filter(a => pbody.has(a.id) && here(a) && this.opWalks(op, a, goal)); return !g.length ? 'none' : g.some(a => hexDist(a.cell, goal) <= 1) ? 'ready' : 'far'; };
         // 3) Asalto.
         this.opAssault(op, crew.filter(a => pbody.has(a.id) && !pin.has(a.id)), landState, tally, true);
         // 4) Marcha.
@@ -6357,10 +6389,11 @@ class GameEngine {
             const r = this.reach(id, a.cell, this.mp(a), a.used === 0);
             if (this.flee(a, r)) { tally.moved++; continue; }
             if (afloat(a.cell) && this.opHoldShip(op, a, goal, landState())) { this.reattach(a); continue; }
-            const mates = pbody.has(a0.id) ? crew.filter(b => b !== a && b !== a0 && pbody.has(b.id) && here(b) && !afloat(b.cell)) : [];
-            const near = mates.length ? mates.reduce((m, b) => Math.min(m, alongOf(b)), Infinity) + OP_LEAD : Infinity, lim = Math.min(near, cap);
+            const mates = pbody.has(a0.id) ? crew.filter(b => b !== a && b !== a0 && pbody.has(b.id) && here(b) && this.opWalks(op, b, goal)) : [];
+            const rear = mates.reduce((m, b) => Math.min(m, alongOf(b)), Infinity), near = rear + OP_LEAD;
             let f = lane.has(a.cell) ? this.opField(op, goal, a, true) : null;
             if (!f || f.to(a.cell) === Infinity) f = this.opField(op, goal, a, false);   // fuera del pasillo, o sin paso por él
+            const lim = this.opRearLim(op, a, f, r, Math.min(near, cap), rear, cap);
             const pick = this.opPick(a, f, r, v => this.opAlong(op, v) <= lim, v => this.opAlong(op, v));
             const ref = f.to(pick.cell >= 0 ? pick.cell : a.cell);
             let cell = this.opPrize(op, a, f, r, lim, ref);
@@ -6905,7 +6938,7 @@ class GameEngine {
         const laneOf = new Map(lanes.map((l, i) => [op.lanes[i], i]));
         const stall = op.wideStall ??= new Map();
         for (const x of [...stall.keys()]) if (!laneOf.has(x)) stall.delete(x);
-        const pacers = () => this.opMembers(op).filter(a => laneOf.has(a.id) && !afloat(a.cell) && !lanes[laneOf.get(a.id)].stalled && (stall.get(a.id) ?? 0) < OP_STALL);
+        const pacers = () => this.opMembers(op).filter(a => laneOf.has(a.id) && this.opWalks(op, a, op.cells[op.wp]) && !lanes[laneOf.get(a.id)].stalled && (stall.get(a.id) ?? 0) < OP_STALL);
         const rearOf = list => list.reduce((m, a) => Math.min(m, alongOf(a)), Infinity);
         // 1) Puntos alcanzados.
         let wpMoved = false;
@@ -6974,16 +7007,15 @@ class GameEngine {
             if (!live(a0)) continue;
             const i = laneOf.get(a0.id), L = lanes[i];
             // Adónde y por dónde.
-            let dest = L.dest, within = L.cells, key = `${i}`, lim = Infinity, mop = false;
+            let dest = L.dest, within = L.cells, key = `${i}`, lim = Infinity, rear = Infinity, hard = Infinity, mop = false;
             if (left) {
                 const open = left.filter(c => c === a0.cell || this.armyOn(c)?.owner !== id);
                 if (!open.length || open.includes(a0.cell)) continue;   // nada que tomar, o asedia la suya
                 dest = open.sort((x, y) => (geo.idx.get(x) !== i) - (geo.idx.get(y) !== i) || hexDist(a0.cell, x) - hexDist(a0.cell, y) || x - y)[0];
                 within = null; mop = true;
             } else {
-                const others = pacers().filter(b => b !== a0);
-                if (others.length) lim = rearOf(others) + OP_LEAD;
-                if (L.stalled) lim = Math.min(lim, geo.along.get(L.mass) - 2);
+                rear = rearOf(pacers().filter(b => b !== a0));
+                if (L.stalled) hard = geo.along.get(L.mass) - 2;
                 else if (L.shift >= 0) {
                     dest = lanes[L.shift].dest; key = `${i}.${L.shift}.${L.mass}`;
                     within = new Set([...L.cells, ...lanes[L.shift].cells].filter(c => hexDist(c, L.mass) > 1));
@@ -6997,6 +7029,7 @@ class GameEngine {
                     }
                     within = null;
                 }
+                lim = Math.min(rear + OP_LEAD, hard);
             }
             if (dest < 0) continue;
             const a = stays.has(a0.id) ? a0 : this.detach(a0);   // de la ciudad asediada ya ha salido su guarnición
@@ -7014,6 +7047,7 @@ class GameEngine {
             let f = within && !op.bySea && !afloat(a.cell) ? this.orderField(id, dest, { key: `w${op.id}.${geo.n}.${key}`, land: true, within }) : null;
             if (!f || f.to(a.cell) === Infinity) f = this.opField(op, dest, a, true);
             if (f.to(a.cell) === Infinity) f = this.opField(op, dest, a, false);   // sin paso por el pasillo
+            lim = this.opRearLim(op, a, f, r, lim, rear, hard);
             const pick = this.opPick(a, f, r, v => this.opAlong(op, v) <= lim, v => this.opAlong(op, v));
             const ref = f.to(pick.cell >= 0 ? pick.cell : a.cell), area = within ?? L.cells;
             let cell = mop ? -1 : this.opPrize(op, a, f, r, lim, ref, area, false);
@@ -7760,12 +7794,13 @@ class GameEngine {
             const p = near.find(q => this.canRecruitAt(id, q) && (this.armyOn(q.city) === m || this.orderField(id, m.cell).to(q.city) < Infinity));
             const type = p && UNIT_KEYS.filter(k => need[k] > 0).sort((x, y) => need[y] / (c.tpl[y] || 1) - need[x] / (c.tpl[x] || 1))
                 .find(k => { const cost = this.unitCost(id, k, p.id); return op.pool >= cost && n.gold - this.armsHeld(id) >= cost; });
-            const cost = type ? this.unitCost(id, type, p.id) : 0;
+            const cost = type ? this.unitCost(id, type, p.id) : 0, used = m.used;
             if (!type || !this.recruit(id, p, type)) {
                 c.blocked.add(m.id);
                 if (!p && !this.fillReaches(id, m, near)) c.unreachable.add(m.id);
                 continue;
             }
+            if (this.armyOn(p.city) === m) m.used = used;   // en su ciudad, el recluta se le suma sin quitarle el movimiento
             op.pool -= cost;
             need[type]--;
             if (this.armyOn(p.city) !== m) {   // en su misma ciudad, ya ha llegado
@@ -16871,7 +16906,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.27-122910';
+const APP_VERSION = '2026.10.28-122012';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
