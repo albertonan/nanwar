@@ -9598,7 +9598,8 @@ class GameEngine {
         if (!quiet) this.log(`PAZ entre ${this.nm(a)} y ${this.nm(b)} (tregua hasta el turno ${this.turn + CONFIG.TRUCE_TURNS}).`);
     }
     // Firma la paz entre el bando de `a` y el de `b` (cada uno con sus satélites) y reparte lo ocupado.
-    // terms.mode: 'annex' (cada uno se anexiona lo que ocupa), 'satellite' (b pasa a ser satélite de a) o 'white' (todo vuelve).
+    // terms.mode: 'annex' (cada uno se anexiona lo que ocupa), 'satellite' (b pasa a ser satélite de a), 'white' (todo vuelve)
+    // o 'total' (solo el jugador, a un vencido: como 'satellite' quedándose lo ocupado, y en seguida se lo anexiona entero).
     // terms.keep: en 'satellite', si a se queda lo que ocupó. terms.mine: satélite al que a cede lo que ocupó él (−1: para a).
     // terms.satGains: 'self' (lo ocupado por los satélites de a es para ellos) u 'overlord' (para a).
     settlePeace(a, b, terms = { mode: 'annex' }) {
@@ -9610,7 +9611,7 @@ class GameEngine {
             if (o === l) continue;
             const aGain = sideA.has(o) && sideB.has(l), bGain = sideB.has(o) && sideA.has(l);
             if (!aGain && !bGain) continue;
-            if (terms.mode === 'white' || (terms.mode === 'satellite' && (bGain || !terms.keep))) { this.owner[i] = l; continue; }
+            if (terms.mode === 'white' || (terms.mode === 'satellite' && (bGain || !terms.keep)) || (terms.mode === 'total' && bGain)) { this.owner[i] = l; continue; }
             if (aGain) {
                 let to = o;
                 if (o === a && terms.mine >= 0 && sideA.has(terms.mine)) to = terms.mine;
@@ -9626,10 +9627,12 @@ class GameEngine {
         for (const x of sideA) for (const y of sideB) if (this.atWar(x, y)) this.makePeace(x, y, true);
         const what = terms.mode === 'white' ? 'paz blanca: cada uno recupera lo suyo'
             : terms.mode === 'satellite' ? `${this.nm(b)} pasa a ser satélite de ${this.nm(a)}`
+            : terms.mode === 'total' ? `${this.nm(a)} se anexiona ${this.nm(b)} entera: su territorio, su ejército y su tesoro`
             : `${this.nm(a)} se anexiona ${plural(gainedA, 'casilla', 'casillas')} y ${this.nm(b)} ${gainedB}`;
         this.log(`PAZ entre ${this.nm(a)} y ${this.nm(b)}: ${what}. Tregua hasta el turno ${this.turn + CONFIG.TRUCE_TURNS}.`);
         this.version++;
-        if (terms.mode === 'satellite') this.makeSatellite(b, a);
+        if (terms.mode === 'satellite' || terms.mode === 'total') this.makeSatellite(b, a);
+        if (terms.mode === 'total' && a === this.player) this.playerAnnexSatellite(b, true);
         this.evictArmies();
         this.checkGameOver();
     }
@@ -9860,7 +9863,7 @@ class GameEngine {
     }
     acceptsPeace(ai, terms, offered) {
         if (this.isPariah(this.player)) return false;   // con un paria nuclear, nada (C4)
-        if (terms.mode === 'satellite') return this.isCrushed(ai);
+        if (terms.mode === 'satellite' || terms.mode === 'total') return this.isCrushed(ai);
         const wish = this.peaceWish(ai, this.player);
         // Si quiere la paz (o la ha propuesto él), acepta quedarse cada uno lo ocupado; la paz blanca, solo si no pierde con ella.
         const why = wish.why ?? this.proposals.find(p => p.kind === 'paz' && p.from === ai)?.why;
@@ -10277,9 +10280,11 @@ class GameEngine {
         if (!PROVINCES.some(q => this.owner[q.city] === sat)) this.playerAnnexSatellite(sat);
         this.checkGameOver();
     }
-    playerAnnexSatellite(sat) {
+    // Con `quiet`, sin su línea en el registro (la paz que se lo anexiona ya lo dice). Sus satélites pasan a ser tuyos.
+    playerAnnexSatellite(sat, quiet = false) {
         const s = this.nations[sat], me = this.player;
         if (this.over || s.overlord !== me) return;
+        for (const x of this.satellitesOf(sat)) { this.makeSatellite(x, me); this.log(`${this.nm(x)}, satélite de ${s.name}, pasa a ser satélite tuyo.`); }
         for (const i of G.land) {
             if (this.owner[i] === sat) this.owner[i] = me;
             if (this.legal[i] === sat) this.legal[i] = this.owner[i] === me ? me : this.owner[i];
@@ -10295,7 +10300,7 @@ class GameEngine {
         this.blocsChanged();
         this.armyVersion++;
         this.version++;
-        this.log(`Te anexionas ${s.name} entera: su territorio, su ejército y su tesoro pasan a ser tuyos.`);
+        if (!quiet) this.log(`Te anexionas ${s.name} entera: su territorio, su ejército y su tesoro pasan a ser tuyos.`);
         this.checkGameOver();
     }
     playerReleaseSatellite(sat) {
@@ -16849,9 +16854,9 @@ class GameUI {
         const occ = g.occupation(t), sats = g.satellitesOf(me);
         const offered = g.proposals.find(p => p.kind === 'paz' && p.from === t);
         const crushed = g.isCrushed(t);
-        if (s.mode === 'satellite' && !crushed) s.mode = 'annex';
+        if ((s.mode === 'satellite' || s.mode === 'total') && !crushed) s.mode = 'annex';
         const opt = (mode, title, desc, enabled = true) => `<button class="peace-opt ${s.mode === mode ? 'on' : ''}" data-action="peace-mode" data-mode="${mode}" ${enabled ? '' : 'disabled'}><b>${title}</b><span>${desc}</span></button>`;
-        const keeps = s.mode === 'annex' || (s.mode === 'satellite' && s.keep);
+        const keeps = s.mode === 'annex' || s.mode === 'total' || (s.mode === 'satellite' && s.keep);
         let extra = '';
         if (keeps && occ.mine && sats.length && s.mode === 'annex') {
             extra += `<label class="field"><span>Lo que has ocupado tú es para</span>
@@ -16880,6 +16885,9 @@ class GameUI {
                 ${opt('satellite', `Convertir a ${g.nm(t)} en tu satélite`, crushed
                     ? `Conserva su país, te paga el ${CONFIG.TRIBUTE * 100} % de sus ingresos, entra en tus guerras y nunca te ataca. Lo que te ocupó vuelve a ti.`
                     : `Solo si su bando está vencido: el tuyo (tú, tus satélites y tus aliados en esta guerra) ocupa su capital o el 40 % de su territorio, o le ocupa el ${Math.round(CONFIG.CRUSH_LOST * 100)} % y el suyo no llega a un tercio de la fuerza del tuyo.`, crushed)}
+                ${opt('total', `Anexionar ${g.nm(t)} entera`, crushed
+                    ? 'Su país desaparece: todo su territorio, su ejército y su tesoro pasan a ser tuyos, y sus satélites, tus satélites. Lo que te ocupó vuelve a ti.'
+                    : 'Solo si su bando está vencido, como para hacerlo tu satélite.', crushed)}
                 ${opt('white', 'Paz blanca', 'Cada uno recupera lo suyo; las casillas ocupadas vuelven a su dueño.')}
             </div>
             ${extra}
@@ -16938,7 +16946,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.28-123146';
+const APP_VERSION = '2026.10.28-123646';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
