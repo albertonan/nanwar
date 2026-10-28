@@ -424,6 +424,59 @@ const CHECKS = [
         T.eq(h.rel(es, fr).war.told, g.rel(es, fr).war.told, 'se guarda');
         return true;
     }],
+    ['N1 · las propuestas de paz se ocultan 10 turnos o siempre, por país, y se vuelven a mostrar desde su ficha', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr');
+        T.power(g, es, 300); T.power(g, fr, 100);
+        g.declareWar(es, fr);
+        g.turn = g.rel(es, fr).since + 10;
+        g.aiDiplomacy(fr, g.powers());
+        T.ok(g.proposals.some(p => p.kind === 'paz' && p.from === fr), 'Francia propone la paz');
+        const toast = () => [...document.querySelectorAll('#toasts .toast')].find(t => t.textContent.includes(g.nm(fr)) && t.textContent.includes('propone la paz'));
+        ui.render();
+        T.ok(toast(), 'se ve el aviso');
+        toast().querySelector('[data-action="peace-mute"][data-turns="10"]').click();
+        T.ok(!toast() && g.peaceMuted(fr), 'oculto 10 turnos');
+        T.ok(g.proposals.some(p => p.kind === 'paz' && p.from === fr), 'la propuesta sigue en pie (se puede negociar desde su ficha)');
+        // Oculta: ni «propone la paz» ni «Ignoras» en el registro.
+        let from = g.logs.length;
+        g.rel(es, fr).war.told = null; g.proposals = []; g.aiDiplomacy(fr, g.powers());
+        g.answerProposal(g.proposals.findIndex(p => p.from === fr), false, true);
+        T.eq(T.logs(g, from).filter(m => m.includes(g.nm(fr))), [], 'el registro tampoco la repite');
+        g.turn += 10; g.aiDiplomacy(fr, g.powers()); ui.render();
+        T.ok(!g.peaceMuted(fr) && toast(), 'a los 10 turnos vuelve');
+        toast().querySelector('[data-action="peace-mute"][data-turns="0"]').click();
+        g.turn += 1000; ui.render();
+        T.ok(g.peaceMuted(fr) && !toast(), 'oculta para siempre');
+        const h = GameEngine.load(JSON.parse(JSON.stringify(g.serialize())));
+        T.ok(h.peaceMuted(fr) && !h.peaceMuted(T.nation('pt')), 'se guarda');
+        // Su ficha lo dice y deja volver a mostrarla.
+        ui.drawerOpen = true; ui.tab = 'paises'; ui.focusNation = fr; ui.render();
+        const back = document.querySelector('#drawer-body [data-action="peace-unmute"]');
+        T.ok(back, 'en su ficha, «Volver a mostrarlas»');
+        back.click();
+        T.ok(!g.peaceMuted(fr) && toast(), 'y vuelve a verse');
+        return true;
+    }],
+    ['N2 · los partes de guerra: no se cierran con Intro y avisan también del satélite y del señor que entran contra ti', () => {
+        const g = T.uiStart('es'), es = g.player, fr = T.nation('fr'), be = T.nation('be'), it = T.nation('it'), ch = T.nation('ch');
+        g.declareWar(fr, es);
+        T.ok(g.alerts.some(a => a.kind === 'war' && a.from === fr), 'Francia te declara la guerra');
+        ui.openAlerts();
+        const dlg = document.querySelector('#alerts-dialog');
+        T.ok(dlg.open && document.activeElement?.tagName !== 'BUTTON', `el foco no está en un botón (${document.activeElement?.tagName}), así que Intro no lo cierra`);
+        dlg.close(); g.alerts = [];
+        // Un país que pasa a ser satélite de Francia entra en sus guerras: también en la tuya.
+        g.makeSatellite(be, fr);
+        T.ok(g.atWar(be, es) && g.alerts.some(a => a.from === be), `aviso del satélite: ${JSON.stringify(g.alerts)}`);
+        ui.renderAlerts();
+        T.ok(document.querySelector('#alerts-body').textContent.includes(g.nm(be)), 'en el parte');
+        g.alerts = [];
+        // Atacas a un satélite: su señor entra contra ti.
+        g.makeSatellite(ch, it);
+        T.ok(g.declareWar(es, ch), 'declaras la guerra a Suiza');
+        T.ok(g.atWar(it, es) && g.alerts.some(a => a.from === it), `aviso del señor: ${JSON.stringify(g.alerts)}`);
+        return true;
+    }],
     ['M2 · con niebla el cajón no deja ver la relación de fuerzas; frases exactas', () => {
         const drawer = (g, t) => { ui.drawerOpen = true; ui.tab = 'paises'; ui.focusNation = t; ui.render(); return document.querySelector('#drawer-body').innerText; };
         let g = T.uiStart('es', true), es = g.player, fr = T.nation('fr');
