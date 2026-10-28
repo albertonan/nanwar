@@ -1199,6 +1199,27 @@ const CHECKS = [
         T.ok(!after.some(l => l.member === gone.id), 'sin el que se fue');
         return true;
     }],
+    ['D1 · en un atasco de salida, el más atrasado no espera a nadie: la ofensiva avanza con cualquier doctrina', () => {
+        // Dos ejércitos junto a la salida y todo lo de delante hasta más allá del tope de adelanto ocupado por los suyos:
+        // las únicas casillas libres que los acercan quedan más allá de OP_LEAD. Antes se esperaban el uno al otro siempre.
+        for (const doctrine of ['asalto', 'lanza', 'amplio']) {
+            const g = T.game(), es = T.nation('es'), fr = T.nation('fr');
+            g.start(es); g.declareWar(es, fr);
+            const [S, O] = T.straight(g, es, 10, { m: 1, supply: true });
+            const op = g.createOp(es, 'ofensiva', [S, O], { doctrine, width: 'estrecha', noCap: true });
+            g.owner[O] = fr; g.legal[O] = fr; g.version++;
+            const xs = T.cellsAt(g, es, S, [0, 1]).map(c => T.army(g, es, c, 0, 4, 0));
+            for (const a of xs) g.assignArmy(a, op.id);
+            const top = Math.max(...xs.map(a => g.opAlong(op, a.cell))) + OP_LEAD + 0.3;
+            for (const c of g.nearCells(S, 8).keys()) if (isLand(c) && !g.armyAt[c] && g.owner[c] === es && g.opAlong(op, c) > 0 && g.opAlong(op, c) <= top) T.army(g, es, c, 1);
+            g.opLaunch(op);
+            T.eq(op.phase, 'avance', `${doctrine}: sale`);
+            for (let t = 0; t < 3; t++) T.turns(g, es, 1);
+            const al = xs.filter(a => g.armies.has(a.id)).map(a => g.opAlong(op, a.cell));
+            T.ok(Math.max(...al) > top, `${doctrine}: pasa el atasco (${al.map(x => x.toFixed(1))}; tope ${top.toFixed(1)})`);
+        }
+        return true;
+    }],
     ['D4 · con el objetivo tomado, avisa a los 6 turnos sin tomar provincias (la de la IA termina)', () => {
         // Una ciudad del pasillo demasiado defendida para el frente amplio: el objetivo ya es suyo y no toma nada más.
         const g = T.game(), es = T.nation('es'), fr = T.nation('fr');

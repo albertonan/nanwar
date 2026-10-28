@@ -541,6 +541,40 @@ const CHECKS = [
         T.eq(g.opFillNeed(op).size, 0, 'ya no falta nada');
         return true;
     }],
+    ['Plantillas · completar a un miembro no le quita el movimiento (ni en su ciudad ni al llegarle los reclutas)', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        g.nations[es].gold = 20000;
+        T.ok(g.playerSaveTemplate('DefensaTotal', { infantry: 4, tank: 0, artillery: 2 }), 'plantilla propia');
+        // En su ciudad: los reclutas se le suman al momento.
+        const city = PROVINCES.find(p => g.owner[p.city] === es && g.legal[p.city] === es && CAPITAL_OF[p.city] < 0).city;
+        if (g.armyOn(city)) g.removeArmy(g.armyOn(city));
+        const [nb] = T.plainPair(g, es);
+        const op = g.createOp(es, 'defensa', [nb, city]);
+        const m = T.army(g, es, city, 1);
+        g.assignArmy(m, op.id);
+        g.playerOpSet(op, 'template', 'c0');
+        op.gold = 100;   // poco: solo completa, sin formación nueva (sus reclutas sí esperan en la ciudad a salir)
+        g.beginNationTurn(es);
+        g.stepReinforcements(es);
+        T.ok(!op.form, 'sin formación');
+        T.ok(countUnits(m.units) > 1, `recibe reclutas en su ciudad (${unitText(m.units)})`);
+        T.eq(m.used, 0, 'y puede moverse este turno');
+        // Al llegarle un recluta en marcha (con la orden de juntarse con él), tampoco.
+        const [c1, c2] = T.plainPair(g, es, 3);
+        const a = T.army(g, es, c1, 1), r = T.army(g, es, c2, 1);
+        g.assignArmy(a, op.id);
+        r.rein = `o${op.id}`; g.setOrder(r, { kind: 'join', target: a.id });
+        g.stepOrder(r);
+        T.ok(!g.armies.has(r.id) && a.units.infantry === 2, 'el recluta se funde con él');
+        T.eq(a.used, 0, 'sin quitarle el movimiento');
+        // Otro ejército que se le junta sí le gasta el turno, como siempre.
+        const b = T.army(g, es, c2, 1);
+        g.setOrder(b, { kind: 'join', target: a.id });
+        g.stepOrder(b);
+        T.ok(!g.armies.has(b.id) && a.used > 0, 'uno que no es su refuerzo, sí');
+        return true;
+    }],
     ['Plantillas · con poco oro, primero los miembros; la formación espera', () => {
         const g = T.game(), es = T.nation('es');
         g.start(es);
