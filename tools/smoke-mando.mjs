@@ -575,6 +575,53 @@ const CHECKS = [
         T.ok(!g.armies.has(b.id) && a.used > 0, 'uno que no es su refuerzo, sí');
         return true;
     }],
+    ['Refuerzos · no reclutan donde está el ejército de una operación, que se quedaría sin moverse', () => {
+        const g = T.game(), es = T.nation('es');
+        g.start(es);
+        g.nations[es].gold = 50000;
+        T.ok(g.playerSaveTemplate('DefensaTotal', { infantry: 4, tank: 0, artillery: 2 }), 'plantilla propia');
+        const cities = PROVINCES.filter(p => g.owner[p.city] === es && g.legal[p.city] === es && CAPITAL_OF[p.city] < 0);
+        const freeNb = c => [0, 1, 2, 3, 4, 5].map(d => G.nb[c * 6 + d]).find(j => j >= 0 && T.free(g, j) && g.owner[j] === es);
+        // Un ejército de otra operación, aún sin mover, en la ciudad `p`.
+        const blocker = p => {
+            if (g.armyOn(p.city)) g.removeArmy(g.armyOn(p.city));
+            const x = T.army(g, es, p.city, 3), opB = g.createOp(es, 'defensa', [p.city], { noCap: true });
+            g.assignArmy(x, opB.id);
+            return x;
+        };
+        const still = (x, msg) => { T.ok(g.armies.has(x.id) && x.units.infantry === 3 && countUnits(x.units) === 3, `${msg}: no recibe reclutas (${unitText(x.units)})`); T.eq(x.used, 0, `${msg}: puede moverse`); };
+        // 1) Completar a un miembro junto a esa ciudad: recluta en otra.
+        const p1 = cities.find(p => freeNb(p.city) !== undefined), x1 = blocker(p1);
+        const m = T.army(g, es, freeNb(p1.city), 1), op = g.createOp(es, 'defensa', [m.cell], { noCap: true });
+        g.assignArmy(m, op.id);
+        g.playerOpSet(op, 'template', 'c0');
+        op.gold = 400;
+        g.stepReinforcements(es);
+        still(x1, 'al completar');
+        T.ok(op.fill?.pending.length && op.fill.pending.every(([c]) => c !== p1.city), 'los reclutas esperan en otra ciudad');
+        // 2) La formación nueva de una operación: tampoco en esa ciudad.
+        const [, from] = T.plainPair(g, es), opF = g.createOp(es, 'reserva', [from], { gold: 400, template: 'acorazada', noCap: true });
+        const ctx = g.formCtx(opF), p2 = ctx.cities.find(q => q.city !== opF.form.zone && g.canRecruitAt(es, q) && ctx.path.to(q.city) < Infinity);
+        const x2 = blocker(p2);
+        g.stepReinforcements(es);
+        still(x2, 'al formar');
+        T.ok(countUnits(opF.form.recruited) > 0, 'la formación recluta en otra ciudad');
+        // 3) Los refuerzos de un ejército (A7): igual; y al que está en su ciudad se le suman sin quitarle el movimiento.
+        g.nations[es].recruited.clear();   // el cupo de las ciudades, como al empezar otro turno
+        const p3 = cities.find(p => p !== p1 && p !== p2 && freeNb(p.city) !== undefined), x3 = blocker(p3);
+        const t = T.army(g, es, freeNb(p3.city), 1);
+        T.ok(g.playerReinforce({ army: t.id }, { mode: 'add', units: { infantry: 3 }, gold: 400 }), 'refuerzo del ejército');
+        const p4 = cities.find(p => ![p1, p2, p3].includes(p));
+        if (g.armyOn(p4.city)) g.removeArmy(g.armyOn(p4.city));
+        const t4 = T.army(g, es, p4.city, 1);
+        T.ok(g.playerReinforce({ army: t4.id }, { mode: 'add', units: { infantry: 2 }, gold: 400 }), 'refuerzo del ejército en su ciudad');
+        g.stepUnitReinforcements(es);
+        still(x3, 'al reforzar un ejército');
+        T.ok(countUnits(t.reinforce?.recruited ?? { infantry: 3 }) > 0, 'recluta en otra ciudad');
+        T.ok(t4.units.infantry > 1, `el que está en su ciudad recibe los reclutas (${unitText(t4.units)})`);
+        T.eq(t4.used, 0, 'sin quitarle el movimiento');
+        return true;
+    }],
     ['Plantillas · con poco oro, primero los miembros; la formación espera', () => {
         const g = T.game(), es = T.nation('es');
         g.start(es);
