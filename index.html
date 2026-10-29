@@ -7672,7 +7672,7 @@ class GameEngine {
         if (!f || !c) { ctx.done = true; return false; }
         const missing = UNIT_KEYS.filter(k => (f.recruited[k] || 0) < (f.units[k] || 0)).sort((x, y) => (f.recruited[x] || 0) / f.units[x] - (f.recruited[y] || 0) / f.units[y]);
         // Se recluta en la ciudad con cupo más cercana a la zona.
-        const p = missing.length ? c.cities.find(q => q.city !== f.zone && this.canRecruitAt(id, q) && c.path.to(q.city) < Infinity) : null;
+        const p = missing.length ? c.cities.find(q => q.city !== f.zone && this.canRecruitAt(id, q) && !this.recruitStalls(id, q) && c.path.to(q.city) < Infinity) : null;
         // El tipo más atrasado que se pueda pagar (si la artillería no llega, una infantería).
         const type = p && missing.find(k => { const cost = this.unitCost(id, k, p.id); return op.pool >= cost && n.gold - this.armsHeld(id) >= cost; });   // sin tocar lo apartado para el arsenal
         if (!type || !this.recruit(id, p, type)) { ctx.done = true; return false; }
@@ -7796,7 +7796,7 @@ class GameEngine {
                 const x = G.cx[m.cell], y = G.cy[m.cell], d = p => (G.cx[p.city] - x) ** 2 + (G.cy[p.city] - y) ** 2;
                 c.near.set(m.id, near = [...c.cities].sort((p, q) => d(p) - d(q) || p.id - q.id));
             }
-            const p = near.find(q => this.canRecruitAt(id, q) && (this.armyOn(q.city) === m || this.orderField(id, m.cell).to(q.city) < Infinity));
+            const p = near.find(q => this.canRecruitAt(id, q) && (this.armyOn(q.city) === m || (!this.recruitStalls(id, q) && this.orderField(id, m.cell).to(q.city) < Infinity)));
             const type = p && UNIT_KEYS.filter(k => need[k] > 0).sort((x, y) => need[y] / (c.tpl[y] || 1) - need[x] / (c.tpl[x] || 1))
                 .find(k => { const cost = this.unitCost(id, k, p.id); return op.pool >= cost && n.gold - this.armsHeld(id) >= cost; });
             const cost = type ? this.unitCost(id, type, p.id) : 0, used = m.used;
@@ -7999,15 +7999,18 @@ class GameEngine {
         const types = UNIT_KEYS.filter(k => c.got[k] < c.need[k]).sort((x, y) => c.got[x] / c.need[x] - c.got[y] / c.need[y]);
         const ok = ([p, t]) => {
             if (!this.canRecruitAt(id, p)) return false;
+            const home = this.rfIsTarget(id, ref, this.armyOn(p.city));
+            if (!home && this.recruitStalls(id, p)) return false;
             let r = c.reach.get(p.id);
-            if (r === undefined) c.reach.set(p.id, r = this.rfIsTarget(id, ref, this.armyOn(p.city)) || this.orderField(id, t.cell).to(p.city) < Infinity);
+            if (r === undefined) c.reach.set(p.id, r = home || this.orderField(id, t.cell).to(p.city) < Infinity);
             return r;
         };
         const p = types.length ? c.cities.find(ok)?.[0] : null;
         const type = p && types.find(k => { const cost = this.unitCost(id, k, p.id); return c.budget >= cost && n.gold >= cost; });
         if (!type) { c.done = true; return false; }
-        const cost = this.unitCost(id, type, p.id);
+        const cost = this.unitCost(id, type, p.id), home = this.armyOn(p.city), used = home?.used;
         if (!this.recruit(id, p, type)) { c.done = true; return false; }
+        if (this.rfIsTarget(id, ref, home)) home.used = used;   // en su ciudad, el recluta se le suma sin quitarle el movimiento
         c.budget -= cost;
         if (!R.now) R.pool -= cost;
         c.got[type]++;
@@ -9386,6 +9389,14 @@ class GameEngine {
     canRecruitAt(nation, p) {
         const ar = this.armyOn(p.city);
         return this.owner[p.city] === nation && this.legal[p.city] === nation && (!ar || ar.owner === nation) && this.recruitLeft(nation, p) > 0;
+    }
+    // ¿Dejaría quieto un recluta en la ciudad `p` a un ejército de una operación? Los refuerzos automáticos se reclutan al
+    // terminar el turno, justo antes de que las operaciones muevan a sus ejércitos: el recluta se fundiría con el que está
+    // en la ciudad y le quitaría el movimiento (y, si marca el paso, a toda la ofensiva). Esa ciudad no les vale, salvo
+    // para el ejército al que van los reclutas, que se los suma sin perderlo.
+    recruitStalls(id, p) {
+        const a = this.armyOn(p.city);
+        return !!a && a.owner === id && a.op > 0 && a.used < 999;
     }
     // Tropas que puede reclutar `id`: la Antiaérea, solo con Defensa aérea 3.
     recruitTypes(id) { return UNIT_KEYS.filter(k => k !== 'antiair' || this.rules(id).mobileAA); }
@@ -16946,7 +16957,7 @@ const ui = new GameUI(game);
 // --- Actualizaciones ---
 // La app compara su versión con version.json (al abrirse, al volver a primer plano y cada 15 minutos). Si hay una
 // nueva, guarda la partida, recarga y la reanuda: las apps instaladas no se quedan con versiones antiguas.
-const APP_VERSION = '2026.10.28-123646';
+const APP_VERSION = '2026.10.29-115020';
 const RESUME_KEY = 'nanwar.resume';
 let updating = false;
 async function checkForUpdate() {
